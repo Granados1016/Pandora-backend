@@ -10,9 +10,10 @@ Thumbs.db
 .vscode/
 .idea/
 
-# .NET build artifacts
+# .NET build artifacts (excepto libs/ que contiene los DLLs para Docker)
 **/bin/
 **/obj/
+!libs/
 *.user
 *.suo
 .vs/
