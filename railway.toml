@@ -4,7 +4,7 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "sh -c 'ASPNETCORE_URLS=http://+:$PORT dotnet Pandora.API.dll'"
-healthcheckPath = "/api/templates"
+healthcheckPath = "/swagger/index.html"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
