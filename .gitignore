@@ -1,0 +1,25 @@
+# Secretos
+.env
+*.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# .NET build artifacts
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+
+# Carpetas de build por sprint
+**/binSprint*/
+
+# Storage y wwwroot locales
+Pandora.API/storage/
+Pandora.API/wwwroot/

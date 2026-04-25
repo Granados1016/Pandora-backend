@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Pandora.API</RootNamespace>
+    <AssemblyName>Pandora.API</AssemblyName>
+    <!-- Output fuera de OneDrive para evitar conflictos de sincronizacion con OneDrive -->
+    <OutputPath>C:\PandoraRun</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!-- Paquetes NuGet -->
+  <ItemGroup>
+    <PackageReference Include="FluentValidation.AspNetCore" Version="11.3.0" />
+    <PackageReference Include="MailKit" Version="4.11.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="1.1.0" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.11" />
+  </ItemGroup>
+
+  <!-- DLLs pre-compilados (source cloud-only) -->
+  <PropertyGroup>
+    <BinDir>$(MSBuildProjectDirectory)\bin\Debug\net8.0</BinDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Pandora.Application">
+      <HintPath>$(BinDir)\Pandora.Application.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Pandora.Infrastructure">
+      <HintPath>$(BinDir)\Pandora.Infrastructure.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Pandora.Domain">
+      <HintPath>$(BinDir)\Pandora.Domain.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
