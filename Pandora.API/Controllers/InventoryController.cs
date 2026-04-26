@@ -168,9 +168,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.CommandText = """
                 SELECT
                     COUNT(*) AS Total,
-                    ISNULL(SUM(CASE WHEN Status = 1 THEN 1 ELSE 0 END), 0) AS Activos,
-                    ISNULL(SUM(CASE WHEN Status = 2 THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
-                    ISNULL(SUM(CASE WHEN Status = 3 THEN 1 ELSE 0 END), 0) AS DadosDeBaja
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')            THEN 1 ELSE 0 END), 0) AS Activos,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento','En mantenimiento') THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja','DadoDeBaja')        THEN 1 ELSE 0 END), 0) AS DadosDeBaja
                 FROM dbo.InventoryItems
                 """;
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -496,6 +496,21 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
     private static string Csv(string s) =>
         s.Contains(',') || s.Contains('"') ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
 
+    private static int? ParseStatus(object val) => val switch
+    {
+        int i    => i,
+        long l   => (int)l,
+        string s => s switch
+        {
+            "Activo"        or "1" => 1,
+            "Mantenimiento" or "En mantenimiento" or "2" => 2,
+            "Dado de baja"  or "DadoDeBaja" or "3"       => 3,
+            "En almacén"    or "4"                        => 4,
+            _ => int.TryParse(s, out var n) ? n : 1,
+        },
+        _ => 1,
+    };
+
     private static object ReadItem(SqlDataReader r) => new
     {
         id                  = r.GetGuid(r.GetOrdinal("Id")),
@@ -504,7 +519,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         brand               = r.IsDBNull(r.GetOrdinal("Brand"))               ? null : r.GetString(r.GetOrdinal("Brand")),
         model               = r.IsDBNull(r.GetOrdinal("Model"))               ? null : r.GetString(r.GetOrdinal("Model")),
         serialNumber        = r.IsDBNull(r.GetOrdinal("SerialNumber"))        ? null : r.GetString(r.GetOrdinal("SerialNumber")),
-        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? (int?)null : r.GetInt32(r.GetOrdinal("Status")),
+        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? (int?)null : ParseStatus(r.GetValue(r.GetOrdinal("Status"))),
         department          = r.IsDBNull(r.GetOrdinal("Department"))          ? null : r.GetString(r.GetOrdinal("Department")),
         assignedTo          = r.IsDBNull(r.GetOrdinal("AssignedTo"))          ? null : r.GetString(r.GetOrdinal("AssignedTo")),
         assignedEmployeeId  = r.IsDBNull(r.GetOrdinal("AssignedEmployeeId"))  ? (Guid?)null : r.GetGuid(r.GetOrdinal("AssignedEmployeeId")),
