@@ -388,7 +388,7 @@ public class CampaignsController(
                         message.From.Add(new MailboxAddress(fromName, fromEmail));
                         message.To.Add(new MailboxAddress(rec.FullName, rec.Email));
                         message.Subject = finalSubject;
-                        message.Body = new TextPart("html") { Text = bodyWithTracking };
+                        message.Body = BuildBodyWithInlineImages(bodyWithTracking);
 
                         using var mailClient = new SmtpClient();
                         await mailClient.ConnectAsync(smtpHost, smtpPort, SecureSocketOptions.StartTls);
@@ -738,6 +738,46 @@ public class CampaignsController(
                 RegexOptions.IgnoreCase);
 
         return result;
+    }
+
+    // Convierte imágenes data:base64 embebidas en el HTML a adjuntos CID inline
+    // para que los clientes de correo las muestren correctamente.
+    private static MimeEntity BuildBodyWithInlineImages(string html)
+    {
+        var imgRegex = new Regex(
+            @"src=""(data:(?<mime>image/[^;]+);base64,(?<data>[^""]+))""",
+            RegexOptions.Compiled);
+
+        var matches = imgRegex.Matches(html);
+        if (matches.Count == 0)
+            return new TextPart("html") { Text = html };
+
+        var builder = new BodyBuilder();
+        var processedHtml = html;
+
+        foreach (Match m in matches)
+        {
+            var mimeType  = m.Groups["mime"].Value;           // e.g. "image/png"
+            var base64    = m.Groups["data"].Value;
+            var bytes     = Convert.FromBase64String(base64);
+            var subtype   = mimeType.Split('/').Last();        // png, jpeg, gif, webp
+            var cid       = Guid.NewGuid().ToString("N");
+
+            var part = new MimePart("image", subtype)
+            {
+                Content                  = new MimeContent(new MemoryStream(bytes)),
+                ContentDisposition       = new ContentDisposition(ContentDisposition.Inline),
+                ContentTransferEncoding  = ContentEncoding.Base64,
+                ContentId                = cid,
+                FileName                 = $"img_{cid}.{subtype}",
+            };
+
+            builder.LinkedResources.Add(part);
+            processedHtml = processedHtml.Replace(m.Value, $@"src=""cid:{cid}""");
+        }
+
+        builder.HtmlBody = processedHtml;
+        return builder.ToMessageBody();
     }
 }
 
