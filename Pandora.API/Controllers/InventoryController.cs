@@ -168,9 +168,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.CommandText = """
                 SELECT
                     COUNT(*) AS Total,
-                    ISNULL(SUM(CASE WHEN Status = 1 THEN 1 ELSE 0 END), 0) AS Activos,
-                    ISNULL(SUM(CASE WHEN Status = 2 THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
-                    ISNULL(SUM(CASE WHEN Status = 3 THEN 1 ELSE 0 END), 0) AS DadosDeBaja
+                    ISNULL(SUM(CASE WHEN Status = 'Activo'        THEN 1 ELSE 0 END), 0) AS Activos,
+                    ISNULL(SUM(CASE WHEN Status = 'Mantenimiento' THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
+                    ISNULL(SUM(CASE WHEN Status = 'Dado de baja'  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
                 FROM dbo.InventoryItems
                 """;
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -303,7 +303,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     (object?)dto.Status ?? 1);
+            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -343,7 +343,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     (object?)dto.Status ?? 1);
+            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -506,7 +506,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         brand               = r.IsDBNull(r.GetOrdinal("Brand"))               ? null : r.GetString(r.GetOrdinal("Brand")),
         model               = r.IsDBNull(r.GetOrdinal("Model"))               ? null : r.GetString(r.GetOrdinal("Model")),
         serialNumber        = r.IsDBNull(r.GetOrdinal("SerialNumber"))        ? null : r.GetString(r.GetOrdinal("SerialNumber")),
-        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? (int?)null : r.GetInt32(r.GetOrdinal("Status")),
+        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? null : r.GetString(r.GetOrdinal("Status")),
         department          = r.IsDBNull(r.GetOrdinal("Department"))          ? null : r.GetString(r.GetOrdinal("Department")),
         assignedTo          = r.IsDBNull(r.GetOrdinal("AssignedTo"))          ? null : r.GetString(r.GetOrdinal("AssignedTo")),
         assignedEmployeeId  = r.IsDBNull(r.GetOrdinal("AssignedEmployeeId"))  ? (Guid?)null : r.GetGuid(r.GetOrdinal("AssignedEmployeeId")),
@@ -530,7 +530,7 @@ public record InventoryItemDto(
     string?  Brand,
     string?  Model,
     string?  SerialNumber,
-    int?     Status,
+    string?  Status,
     string?  Department,
     string?  AssignedTo,
     Guid?    AssignedEmployeeId,
