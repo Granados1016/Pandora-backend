@@ -226,8 +226,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT i.Id, i.InventoryNumber, i.Name, i.Brand, i.Model, i.SerialNumber,
                        i.Status, i.Department, i.AssignedTo, i.AssignedEmployeeId,
                        i.InventoryTypeId, i.IsPhone,
-                       i.PurchaseDate, i.PurchasePrice, i.Accessories,
-                       i.DecommissionDate, i.DecommissionReason, i.CreatedAt,
+                       i.PurchaseDate, i.PurchasePrice, i.Accessories, i.CreatedAt,
                        t.Name AS TypeName,
                        e.FullName AS EmployeeName
                 FROM dbo.InventoryItems i
@@ -259,8 +258,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT i.Id, i.InventoryNumber, i.Name, i.Brand, i.Model, i.SerialNumber,
                        i.Status, i.Department, i.AssignedTo, i.AssignedEmployeeId,
                        i.InventoryTypeId, i.IsPhone,
-                       i.PurchaseDate, i.PurchasePrice, i.Accessories,
-                       i.DecommissionDate, i.DecommissionReason, i.CreatedAt,
+                       i.PurchaseDate, i.PurchasePrice, i.Accessories, i.CreatedAt,
                        t.Name AS TypeName,
                        e.FullName AS EmployeeName
                 FROM dbo.InventoryItems i
@@ -524,22 +522,23 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 public record InventoryTypeDto(string Name, string? Description, string? Department, bool IsActive);
 
-public record InventoryItemDto(
-    string   InventoryNumber,
-    string   Name,
-    string?  Brand,
-    string?  Model,
-    string?  SerialNumber,
-    int?     Status,
-    string?  Department,
-    string?  AssignedTo,
-    Guid?    AssignedEmployeeId,
-    Guid     InventoryTypeId,
-    bool     IsPhone,
-    DateTime? PurchaseDate,
-    decimal?  PurchasePrice,
-    string?  Accessories
-);
+public class InventoryItemDto
+{
+    public string    InventoryNumber    { get; set; } = "";
+    public string    Name               { get; set; } = "";
+    public string?   Brand              { get; set; }
+    public string?   Model              { get; set; }
+    public string?   SerialNumber       { get; set; }
+    public int?      Status             { get; set; }
+    public string?   Department         { get; set; }
+    public string?   AssignedTo         { get; set; }
+    public Guid?     AssignedEmployeeId { get; set; }
+    public Guid      InventoryTypeId    { get; set; }
+    public bool      IsPhone            { get; set; }
+    public DateTime? PurchaseDate       { get; set; }
+    public decimal?  PurchasePrice      { get; set; }
+    public string?   Accessories        { get; set; }
+}
 
 public record TransferDto(
     string?  FromDepartment,
