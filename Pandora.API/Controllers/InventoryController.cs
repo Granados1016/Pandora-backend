@@ -168,9 +168,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.CommandText = """
                 SELECT
                     COUNT(*) AS Total,
-                    SUM(CASE WHEN Status = 'Activo'       THEN 1 ELSE 0 END) AS Activos,
-                    SUM(CASE WHEN Status = 'Mantenimiento' THEN 1 ELSE 0 END) AS EnMantenimiento,
-                    SUM(CASE WHEN Status = 'Dado de baja'  THEN 1 ELSE 0 END) AS DadosDeBaja
+                    ISNULL(SUM(CASE WHEN Status = 'Activo'        THEN 1 ELSE 0 END), 0) AS Activos,
+                    ISNULL(SUM(CASE WHEN Status = 'Mantenimiento' THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
+                    ISNULL(SUM(CASE WHEN Status = 'Dado de baja'  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
                 FROM dbo.InventoryItems
                 """;
             await using var r = await cmd.ExecuteReaderAsync(ct);
