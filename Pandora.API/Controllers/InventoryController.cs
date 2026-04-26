@@ -177,10 +177,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await r.ReadAsync(ct);
             return Ok(new
             {
-                total           = r.GetInt32(0),
-                activos         = r.GetInt32(1),
-                enMantenimiento = r.GetInt32(2),
-                dadosDeBaja     = r.GetInt32(3),
+                total           = r.IsDBNull(0) ? 0 : r.GetInt32(0),
+                activos         = r.IsDBNull(1) ? 0 : r.GetInt32(1),
+                enMantenimiento = r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                dadosDeBaja     = r.IsDBNull(3) ? 0 : r.GetInt32(3),
             });
         }
         catch (Exception ex) { logger.LogError(ex, "GetDashboard Inventory"); return StatusCode(500, ex.Message); }
