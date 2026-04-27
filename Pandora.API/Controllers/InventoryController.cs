@@ -164,23 +164,88 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT
-                    COUNT(*) AS Total,
-                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')            THEN 1 ELSE 0 END), 0) AS Activos,
-                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento','En mantenimiento') THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
-                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja','DadoDeBaja')        THEN 1 ELSE 0 END), 0) AS DadosDeBaja
-                FROM dbo.InventoryItems
-                """;
-            await using var r = await cmd.ExecuteReaderAsync(ct);
-            await r.ReadAsync(ct);
+
+            int     totalCount = 0, activeCount = 0, maintenanceCount = 0, decommissionedCount = 0, inStorageCount = 0;
+            decimal activeValue = 0, totalValue = 0;
+
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT
+                        COUNT(*) AS TotalCount,
+                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')                                  THEN 1 ELSE 0 END), 0) AS ActiveCount,
+                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento','En mantenimiento')         THEN 1 ELSE 0 END), 0) AS MaintenanceCount,
+                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja','DadoDeBaja')                THEN 1 ELSE 0 END), 0) AS DecommissionedCount,
+                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('4','En almacén','Almacén','EnAlmacen')         THEN 1 ELSE 0 END), 0) AS InStorageCount,
+                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo') THEN ISNULL(PurchasePrice,0) ELSE 0 END), 0) AS ActiveValue,
+                        ISNULL(SUM(ISNULL(PurchasePrice, 0)), 0) AS TotalValue
+                    FROM dbo.InventoryItems
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (await r.ReadAsync(ct))
+                {
+                    totalCount          = r.IsDBNull(0) ? 0 : r.GetInt32(0);
+                    activeCount         = r.IsDBNull(1) ? 0 : r.GetInt32(1);
+                    maintenanceCount    = r.IsDBNull(2) ? 0 : r.GetInt32(2);
+                    decommissionedCount = r.IsDBNull(3) ? 0 : r.GetInt32(3);
+                    inStorageCount      = r.IsDBNull(4) ? 0 : r.GetInt32(4);
+                    activeValue         = r.IsDBNull(5) ? 0 : r.GetDecimal(5);
+                    totalValue          = r.IsDBNull(6) ? 0 : r.GetDecimal(6);
+                }
+            }
+
+            var byType = new List<object>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT t.Name AS TypeName,
+                           COUNT(i.Id) AS TotalCount,
+                           ISNULL(SUM(CASE WHEN TRY_CAST(i.Status AS NVARCHAR(50)) IN ('1','Activo') THEN 1 ELSE 0 END), 0) AS ActiveCount
+                    FROM dbo.InventoryTypes t
+                    LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
+                    WHERE t.IsActive = 1
+                    GROUP BY t.Id, t.Name
+                    ORDER BY COUNT(i.Id) DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    byType.Add(new { typeName = r.GetString(0), totalCount = r.GetInt32(1), activeCount = r.GetInt32(2) });
+            }
+
+            var recentTransfers = new List<object>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT TOP 5 et.Id, et.TransferDate, et.FromPerson, et.ToPerson,
+                                 i.Name AS ItemName, i.InventoryNumber
+                    FROM dbo.EquipmentTransfers et
+                    JOIN dbo.InventoryItems i ON et.InventoryItemId = i.Id
+                    ORDER BY et.TransferDate DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    recentTransfers.Add(new
+                    {
+                        id              = r.GetGuid(0),
+                        transferDate    = r.GetDateTime(1),
+                        fromPerson      = r.IsDBNull(2) ? null : r.GetString(2),
+                        toPerson        = r.IsDBNull(3) ? null : r.GetString(3),
+                        itemName        = r.GetString(4),
+                        inventoryNumber = r.GetString(5),
+                    });
+            }
+
             return Ok(new
             {
-                total           = r.IsDBNull(0) ? 0 : r.GetInt32(0),
-                activos         = r.IsDBNull(1) ? 0 : r.GetInt32(1),
-                enMantenimiento = r.IsDBNull(2) ? 0 : r.GetInt32(2),
-                dadosDeBaja     = r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                totalCount,
+                activeCount,
+                maintenanceCount,
+                decommissionedCount,
+                inStorageCount,
+                activeValue,
+                totalValue,
+                byType,
+                recentTransfers,
             });
         }
         catch (Exception ex) { logger.LogError(ex, "GetDashboard Inventory"); return StatusCode(500, ex.Message); }
