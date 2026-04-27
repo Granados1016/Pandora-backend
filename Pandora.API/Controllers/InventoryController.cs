@@ -1,8 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
-using MiniExcelLibs;
-using IConfiguration = Microsoft.Extensions.Configuration.IConfiguration;
 using System.Security.Claims;
 using System.Text;
 
@@ -166,88 +164,23 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-
-            int     totalCount = 0, activeCount = 0, maintenanceCount = 0, decommissionedCount = 0, inStorageCount = 0;
-            decimal activeValue = 0, totalValue = 0;
-
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = """
-                    SELECT
-                        COUNT(*) AS TotalCount,
-                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')                                  THEN 1 ELSE 0 END), 0) AS ActiveCount,
-                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento','En mantenimiento')         THEN 1 ELSE 0 END), 0) AS MaintenanceCount,
-                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja','DadoDeBaja')                THEN 1 ELSE 0 END), 0) AS DecommissionedCount,
-                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('4','En almacén','Almacén','EnAlmacen')         THEN 1 ELSE 0 END), 0) AS InStorageCount,
-                        ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo') THEN ISNULL(PurchasePrice,0) ELSE 0 END), 0) AS ActiveValue,
-                        ISNULL(SUM(ISNULL(PurchasePrice, 0)), 0) AS TotalValue
-                    FROM dbo.InventoryItems
-                    """;
-                await using var r = await cmd.ExecuteReaderAsync(ct);
-                if (await r.ReadAsync(ct))
-                {
-                    totalCount          = r.IsDBNull(0) ? 0 : r.GetInt32(0);
-                    activeCount         = r.IsDBNull(1) ? 0 : r.GetInt32(1);
-                    maintenanceCount    = r.IsDBNull(2) ? 0 : r.GetInt32(2);
-                    decommissionedCount = r.IsDBNull(3) ? 0 : r.GetInt32(3);
-                    inStorageCount      = r.IsDBNull(4) ? 0 : r.GetInt32(4);
-                    activeValue         = r.IsDBNull(5) ? 0 : r.GetDecimal(5);
-                    totalValue          = r.IsDBNull(6) ? 0 : r.GetDecimal(6);
-                }
-            }
-
-            var byType = new List<object>();
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = """
-                    SELECT t.Name AS TypeName,
-                           COUNT(i.Id) AS TotalCount,
-                           ISNULL(SUM(CASE WHEN TRY_CAST(i.Status AS NVARCHAR(50)) IN ('1','Activo') THEN 1 ELSE 0 END), 0) AS ActiveCount
-                    FROM dbo.InventoryTypes t
-                    LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
-                    WHERE t.IsActive = 1
-                    GROUP BY t.Id, t.Name
-                    ORDER BY COUNT(i.Id) DESC
-                    """;
-                await using var r = await cmd.ExecuteReaderAsync(ct);
-                while (await r.ReadAsync(ct))
-                    byType.Add(new { typeName = r.GetString(0), totalCount = r.GetInt32(1), activeCount = r.GetInt32(2) });
-            }
-
-            var recentTransfers = new List<object>();
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = """
-                    SELECT TOP 5 et.Id, et.TransferDate, et.FromPerson, et.ToPerson,
-                                 i.Name AS ItemName, i.InventoryNumber
-                    FROM dbo.EquipmentTransfers et
-                    JOIN dbo.InventoryItems i ON et.InventoryItemId = i.Id
-                    ORDER BY et.TransferDate DESC
-                    """;
-                await using var r = await cmd.ExecuteReaderAsync(ct);
-                while (await r.ReadAsync(ct))
-                    recentTransfers.Add(new
-                    {
-                        id              = r.GetGuid(0),
-                        transferDate    = r.GetDateTime(1),
-                        fromPerson      = r.IsDBNull(2) ? null : r.GetString(2),
-                        toPerson        = r.IsDBNull(3) ? null : r.GetString(3),
-                        itemName        = r.GetString(4),
-                        inventoryNumber = r.GetString(5),
-                    });
-            }
-
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT
+                    COUNT(*) AS Total,
+                    ISNULL(SUM(CASE WHEN Status = 'Activo'        THEN 1 ELSE 0 END), 0) AS Activos,
+                    ISNULL(SUM(CASE WHEN Status = 'Mantenimiento' THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
+                    ISNULL(SUM(CASE WHEN Status = 'Dado de baja'  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
+                FROM dbo.InventoryItems
+                """;
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            await r.ReadAsync(ct);
             return Ok(new
             {
-                totalCount,
-                activeCount,
-                maintenanceCount,
-                decommissionedCount,
-                inStorageCount,
-                activeValue,
-                totalValue,
-                byType,
-                recentTransfers,
+                total           = r.GetInt32(0),
+                activos         = r.GetInt32(1),
+                enMantenimiento = r.GetInt32(2),
+                dadosDeBaja     = r.GetInt32(3),
             });
         }
         catch (Exception ex) { logger.LogError(ex, "GetDashboard Inventory"); return StatusCode(500, ex.Message); }
@@ -293,7 +226,8 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT i.Id, i.InventoryNumber, i.Name, i.Brand, i.Model, i.SerialNumber,
                        i.Status, i.Department, i.AssignedTo, i.AssignedEmployeeId,
                        i.InventoryTypeId, i.IsPhone,
-                       i.PurchaseDate, i.PurchasePrice, i.Accessories, i.CreatedAt,
+                       i.PurchaseDate, i.PurchasePrice, i.Accessories,
+                       i.DecommissionDate, i.DecommissionReason, i.CreatedAt,
                        t.Name AS TypeName,
                        e.FullName AS EmployeeName
                 FROM dbo.InventoryItems i
@@ -325,7 +259,8 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT i.Id, i.InventoryNumber, i.Name, i.Brand, i.Model, i.SerialNumber,
                        i.Status, i.Department, i.AssignedTo, i.AssignedEmployeeId,
                        i.InventoryTypeId, i.IsPhone,
-                       i.PurchaseDate, i.PurchasePrice, i.Accessories, i.CreatedAt,
+                       i.PurchaseDate, i.PurchasePrice, i.Accessories,
+                       i.DecommissionDate, i.DecommissionReason, i.CreatedAt,
                        t.Name AS TypeName,
                        e.FullName AS EmployeeName
                 FROM dbo.InventoryItems i
@@ -368,7 +303,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     (object?)dto.Status ?? 1);
+            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -408,7 +343,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     (object?)dto.Status ?? 1);
+            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -523,7 +458,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         catch (Exception ex) { logger.LogError(ex, "CreateTransfer {Id}", id); return StatusCode(500, ex.Message); }
     }
 
-    // ── Excel Export ──────────────────────────────────────────────────────────
+    // ── Excel Export (simple CSV) ─────────────────────────────────────────────
     [HttpGet("excel/export")]
     [AllowAnonymous]
     public async Task<IActionResult> Export([FromQuery] string? access_token, CancellationToken ct)
@@ -541,278 +476,27 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 LEFT JOIN dbo.InventoryTypes t ON i.InventoryTypeId = t.Id
                 ORDER BY i.InventoryNumber
                 """;
-            var rows = new List<Dictionary<string, object?>>();
+            var sb = new StringBuilder();
+            sb.AppendLine("NumInventario,Nombre,Marca,Modelo,NumSerie,Estado,Departamento,AsignadoA,Tipo,FechaCompra,Precio,Accesorios");
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
             {
-                var statusRaw = r.IsDBNull(5) ? null : r.GetValue(5);
-                var statusStr = statusRaw switch
-                {
-                    int n    => StatusToString(n),
-                    long n   => StatusToString((int)n),
-                    string s => s,
-                    _        => ""
-                };
-                rows.Add(new Dictionary<string, object?>
-                {
-                    ["NumInventario"] = r.IsDBNull(0)  ? ""    : r.GetString(0),
-                    ["Nombre"]        = r.IsDBNull(1)  ? ""    : r.GetString(1),
-                    ["Marca"]         = r.IsDBNull(2)  ? ""    : r.GetString(2),
-                    ["Modelo"]        = r.IsDBNull(3)  ? ""    : r.GetString(3),
-                    ["NumSerie"]      = r.IsDBNull(4)  ? ""    : r.GetString(4),
-                    ["Estado"]        = statusStr,
-                    ["Departamento"]  = r.IsDBNull(6)  ? ""    : r.GetString(6),
-                    ["AsignadoA"]     = r.IsDBNull(7)  ? ""    : r.GetString(7),
-                    ["Categoria"]     = r.IsDBNull(8)  ? ""    : r.GetString(8),
-                    ["FechaCompra"]   = r.IsDBNull(9)  ? ""    : r.GetDateTime(9).ToString("yyyy-MM-dd"),
-                    ["Precio"]        = r.IsDBNull(10) ? ""    : r.GetDecimal(10).ToString("F2"),
-                    ["Accesorios"]    = r.IsDBNull(11) ? ""    : r.GetString(11),
-                });
+                string G(int i) => r.IsDBNull(i) ? "" : r.GetString(i);
+                string D(int i) => r.IsDBNull(i) ? "" : r.GetDateTime(i).ToString("yyyy-MM-dd");
+                string N(int i) => r.IsDBNull(i) ? "" : r.GetDecimal(i).ToString("F2");
+                sb.AppendLine(string.Join(",",
+                    Csv(G(0)), Csv(G(1)), Csv(G(2)), Csv(G(3)), Csv(G(4)),
+                    Csv(G(5)), Csv(G(6)), Csv(G(7)), Csv(G(8)),
+                    Csv(D(9)), Csv(N(10)), Csv(G(11))));
             }
-            var ms = new MemoryStream();
-            await ms.SaveAsAsync(rows, cancellationToken: ct);
-            ms.Position = 0;
-            return File(ms, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "inventario.xlsx");
+            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(sb.ToString())).ToArray();
+            return File(bytes, "text/csv", "inventario.csv");
         }
         catch (Exception ex) { logger.LogError(ex, "Export Inventory"); return StatusCode(500, ex.Message); }
     }
 
-    // ── Excel Template ────────────────────────────────────────────────────────
-    [HttpGet("excel/template")]
-    [AllowAnonymous]
-    public async Task<IActionResult> Template(CancellationToken ct)
-    {
-        var rows = new[]
-        {
-            new Dictionary<string, object?>
-            {
-                ["NumInventario"] = "EQT-0001",
-                ["Nombre"]        = "Laptop Dell Latitude",
-                ["Marca"]         = "Dell",
-                ["Modelo"]        = "Latitude 5420",
-                ["NumSerie"]      = "SN-ABC12345",
-                ["Categoria"]     = "Laptop",
-                ["Estado"]        = "Activo",
-                ["Departamento"]  = "Coordinación de TI",
-                ["AsignadoA"]     = "Juan Pérez",
-                ["FechaCompra"]   = "2024-01-15",
-                ["Precio"]        = "12000.00",
-                ["Accesorios"]    = "Cargador, funda",
-            }
-        };
-        var ms = new MemoryStream();
-        await ms.SaveAsAsync(rows, cancellationToken: ct);
-        ms.Position = 0;
-        return File(ms, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "plantilla-inventario.xlsx");
-    }
-
-    // ── Excel Import Preview ──────────────────────────────────────────────────
-    [HttpPost("excel/import/preview")]
-    public async Task<IActionResult> ImportPreview(IFormFile file, CancellationToken ct)
-    {
-        if (file is null || file.Length == 0) return BadRequest("Archivo requerido.");
-        try
-        {
-            // Cargar tipos de inventario para validar Categoria
-            await using var conn = Conn();
-            await conn.OpenAsync(ct);
-            var typeMap = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "SELECT Id, Name FROM dbo.InventoryTypes WHERE IsActive = 1";
-                await using var tr = await cmd.ExecuteReaderAsync(ct);
-                while (await tr.ReadAsync(ct))
-                    typeMap[tr.GetString(1)] = tr.GetGuid(0);
-            }
-
-            await using var stream = file.OpenReadStream();
-            var rawRows = await stream.QueryAsync(useHeaderRow: true, cancellationToken: ct);
-
-            var validRows  = new List<object>();
-            var errors     = new List<object>();
-            int rowNumber  = 1;
-
-            foreach (var rawRow in rawRows)
-            {
-                rowNumber++;
-                var row = (IDictionary<string, object?>)rawRow;
-
-                string Get(string key) =>
-                    row.TryGetValue(key, out var v) ? v?.ToString()?.Trim() ?? "" : "";
-
-                var name       = Get("Nombre");
-                var category   = Get("Categoria");
-                var status     = Get("Estado");
-
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    errors.Add(new { rowNumber, field = "Nombre", message = "El nombre es requerido." });
-                    continue;
-                }
-                if (string.IsNullOrWhiteSpace(category) || !typeMap.ContainsKey(category))
-                {
-                    errors.Add(new { rowNumber, field = "Categoria",
-                        message = string.IsNullOrWhiteSpace(category)
-                            ? "La categoría es requerida."
-                            : $"Categoría '{category}' no existe en el sistema." });
-                    continue;
-                }
-
-                var normalizedStatus = status switch
-                {
-                    "Activo"        or "1" => "Activo",
-                    "Mantenimiento" or "2" => "Mantenimiento",
-                    "Dado de baja"  or "3" => "Dado de baja",
-                    "En almacén"    or "Almacén" or "4" => "En almacén",
-                    "" => "Activo",
-                    _  => null,
-                };
-                if (normalizedStatus is null)
-                {
-                    errors.Add(new { rowNumber, field = "Estado",
-                        message = $"Estado '{status}' no válido. Use: Activo, Mantenimiento, Dado de baja, En almacén." });
-                    continue;
-                }
-
-                decimal? price = null;
-                var priceStr = Get("Precio");
-                if (!string.IsNullOrWhiteSpace(priceStr) && decimal.TryParse(priceStr, out var p))
-                    price = p;
-
-                DateTime? purchaseDate = null;
-                var dateStr = Get("FechaCompra");
-                if (!string.IsNullOrWhiteSpace(dateStr) && DateTime.TryParse(dateStr, out var d))
-                    purchaseDate = d;
-
-                validRows.Add(new
-                {
-                    inventoryNumber = Get("NumInventario"),
-                    name,
-                    brand           = Get("Marca"),
-                    model           = Get("Modelo"),
-                    serialNumber    = Get("NumSerie"),
-                    category,
-                    inventoryTypeId = typeMap[category],
-                    status          = normalizedStatus,
-                    department      = Get("Departamento"),
-                    assignedTo      = Get("AsignadoA"),
-                    purchaseDate,
-                    purchasePrice   = price,
-                    accessories     = Get("Accesorios"),
-                });
-            }
-
-            return Ok(new { totalRows = rowNumber - 1, validRows, errors });
-        }
-        catch (Exception ex) { logger.LogError(ex, "ImportPreview"); return StatusCode(500, ex.Message); }
-    }
-
-    // ── Excel Import Confirm ──────────────────────────────────────────────────
-    [HttpPost("excel/import/confirm")]
-    public async Task<IActionResult> ImportConfirm([FromBody] List<ImportRowDto> rows, CancellationToken ct)
-    {
-        if (rows is null || rows.Count == 0) return BadRequest("Sin filas para importar.");
-        int inserted = 0, skipped = 0, autoGenerated = 0;
-        var warnings = new List<string>();
-        try
-        {
-            await using var conn = Conn();
-            await conn.OpenAsync(ct);
-
-            foreach (var row in rows)
-            {
-                var invNum = row.InventoryNumber?.Trim();
-
-                // Auto-generar número si viene vacío
-                if (string.IsNullOrWhiteSpace(invNum))
-                {
-                    await using var cmdN = conn.CreateCommand();
-                    cmdN.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems";
-                    var cnt = (int)await cmdN.ExecuteScalarAsync(ct)!;
-                    invNum = $"IMP-{(cnt + 1):D4}";
-                    autoGenerated++;
-                }
-
-                // Verificar duplicado
-                await using var cmdCheck = conn.CreateCommand();
-                cmdCheck.CommandText = "SELECT COUNT(1) FROM dbo.InventoryItems WHERE InventoryNumber = @N";
-                cmdCheck.Parameters.AddWithValue("@N", invNum);
-                var exists = (int)await cmdCheck.ExecuteScalarAsync(ct)! > 0;
-                if (exists)
-                {
-                    warnings.Add($"{invNum}: número ya existe, omitido.");
-                    skipped++;
-                    continue;
-                }
-
-                var statusInt = row.Status switch
-                {
-                    "Activo"       => 1,
-                    "Mantenimiento"=> 2,
-                    "Dado de baja" => 3,
-                    "En almacén"   => 4,
-                    _              => 1,
-                };
-
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = """
-                    INSERT INTO dbo.InventoryItems
-                        (Id, InventoryNumber, Name, Brand, Model, SerialNumber, Status,
-                         Department, AssignedTo, InventoryTypeId, IsPhone,
-                         PurchaseDate, PurchasePrice, Accessories, CreatedAt)
-                    VALUES
-                        (@Id, @InvNum, @Name, @Brand, @Model, @Serial, @Status,
-                         @Dept, @AssignedTo, @TypeId, 0,
-                         @PurchDate, @PurchPrice, @Acc, GETUTCDATE())
-                    """;
-                cmd.Parameters.AddWithValue("@Id",        Guid.NewGuid());
-                cmd.Parameters.AddWithValue("@InvNum",    invNum);
-                cmd.Parameters.AddWithValue("@Name",      row.Name?.Trim() ?? "");
-                cmd.Parameters.AddWithValue("@Brand",     (object?)row.Brand      ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@Model",     (object?)row.Model      ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@Serial",    (object?)row.SerialNumber ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@Status",    statusInt);
-                cmd.Parameters.AddWithValue("@Dept",      (object?)row.Department ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@AssignedTo",(object?)row.AssignedTo ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@TypeId",    row.InventoryTypeId);
-                cmd.Parameters.AddWithValue("@PurchDate", (object?)row.PurchaseDate  ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@PurchPrice",(object?)row.PurchasePrice ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@Acc",       (object?)row.Accessories   ?? DBNull.Value);
-                await cmd.ExecuteNonQueryAsync(ct);
-                inserted++;
-            }
-
-            return Ok(new { inserted, skipped, autoGenerated, warnings });
-        }
-        catch (Exception ex) { logger.LogError(ex, "ImportConfirm"); return StatusCode(500, ex.Message); }
-    }
-
-    private static string StatusToString(int n) => n switch
-    {
-        1 => "Activo",
-        2 => "Mantenimiento",
-        3 => "Dado de baja",
-        4 => "En almacén",
-        _ => n.ToString(),
-    };
-
     private static string Csv(string s) =>
         s.Contains(',') || s.Contains('"') ? $"\"{s.Replace("\"", "\"\"")}\"" : s;
-
-    private static int? ParseStatus(object val) => val switch
-    {
-        int i    => i,
-        long l   => (int)l,
-        string s => s switch
-        {
-            "Activo"        or "1" => 1,
-            "Mantenimiento" or "En mantenimiento" or "2" => 2,
-            "Dado de baja"  or "DadoDeBaja" or "3"       => 3,
-            "En almacén"    or "4"                        => 4,
-            _ => int.TryParse(s, out var n) ? n : 1,
-        },
-        _ => 1,
-    };
 
     private static object ReadItem(SqlDataReader r) => new
     {
@@ -822,7 +506,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         brand               = r.IsDBNull(r.GetOrdinal("Brand"))               ? null : r.GetString(r.GetOrdinal("Brand")),
         model               = r.IsDBNull(r.GetOrdinal("Model"))               ? null : r.GetString(r.GetOrdinal("Model")),
         serialNumber        = r.IsDBNull(r.GetOrdinal("SerialNumber"))        ? null : r.GetString(r.GetOrdinal("SerialNumber")),
-        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? (int?)null : ParseStatus(r.GetValue(r.GetOrdinal("Status"))),
+        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? null : r.GetString(r.GetOrdinal("Status")),
         department          = r.IsDBNull(r.GetOrdinal("Department"))          ? null : r.GetString(r.GetOrdinal("Department")),
         assignedTo          = r.IsDBNull(r.GetOrdinal("AssignedTo"))          ? null : r.GetString(r.GetOrdinal("AssignedTo")),
         assignedEmployeeId  = r.IsDBNull(r.GetOrdinal("AssignedEmployeeId"))  ? (Guid?)null : r.GetGuid(r.GetOrdinal("AssignedEmployeeId")),
@@ -840,23 +524,22 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 public record InventoryTypeDto(string Name, string? Description, string? Department, bool IsActive);
 
-public class InventoryItemDto
-{
-    public string    InventoryNumber    { get; set; } = "";
-    public string    Name               { get; set; } = "";
-    public string?   Brand              { get; set; }
-    public string?   Model              { get; set; }
-    public string?   SerialNumber       { get; set; }
-    public int?      Status             { get; set; }
-    public string?   Department         { get; set; }
-    public string?   AssignedTo         { get; set; }
-    public Guid?     AssignedEmployeeId { get; set; }
-    public Guid      InventoryTypeId    { get; set; }
-    public bool      IsPhone            { get; set; }
-    public DateTime? PurchaseDate       { get; set; }
-    public decimal?  PurchasePrice      { get; set; }
-    public string?   Accessories        { get; set; }
-}
+public record InventoryItemDto(
+    string   InventoryNumber,
+    string   Name,
+    string?  Brand,
+    string?  Model,
+    string?  SerialNumber,
+    string?  Status,
+    string?  Department,
+    string?  AssignedTo,
+    Guid?    AssignedEmployeeId,
+    Guid     InventoryTypeId,
+    bool     IsPhone,
+    DateTime? PurchaseDate,
+    decimal?  PurchasePrice,
+    string?  Accessories
+);
 
 public record TransferDto(
     string?  FromDepartment,
@@ -866,19 +549,3 @@ public record TransferDto(
     DateTime? TransferDate,
     string?  Notes
 );
-
-public class ImportRowDto
-{
-    public string?   InventoryNumber  { get; set; }
-    public string    Name             { get; set; } = "";
-    public string?   Brand            { get; set; }
-    public string?   Model            { get; set; }
-    public string?   SerialNumber     { get; set; }
-    public string?   Status           { get; set; }
-    public string?   Department       { get; set; }
-    public string?   AssignedTo       { get; set; }
-    public Guid      InventoryTypeId  { get; set; }
-    public DateTime? PurchaseDate     { get; set; }
-    public decimal?  PurchasePrice    { get; set; }
-    public string?   Accessories      { get; set; }
-}
