@@ -461,6 +461,76 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+// ── Tabla Licencias (fuera del modelo EF — migración manual) ─────────────────
+using (var scope2 = app.Services.CreateScope())
+{
+    var cfg = scope2.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var conn = new Microsoft.Data.SqlClient.SqlConnection(
+        cfg.GetConnectionString("PandoraDb"));
+    await conn.OpenAsync();
+
+    // Crear tabla si no existe
+    await using var cmdCreate = conn.CreateCommand();
+    cmdCreate.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Licencias' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Licencias (
+                Id             INT IDENTITY(1,1) PRIMARY KEY,
+                Numero         INT           NOT NULL,
+                Plataforma     NVARCHAR(100) NOT NULL,
+                Area           NVARCHAR(50)  NOT NULL,
+                Responsable    NVARCHAR(100) NULL,
+                FrecuenciaPago NVARCHAR(20)  NOT NULL,
+                FechaInicio    DATE          NOT NULL,
+                ProximoPago    DATE          NOT NULL,
+                CostoMXN       DECIMAL(12,2) NOT NULL DEFAULT 0,
+                Estado         NVARCHAR(20)  NOT NULL DEFAULT 'Activa',
+                Notas          NVARCHAR(500) NULL,
+                CreadoEn       DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+                ActualizadoEn  DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+        """;
+    await cmdCreate.ExecuteNonQueryAsync();
+
+    // Seed inicial solo si la tabla está vacía
+    await using var cmdCount = conn.CreateCommand();
+    cmdCount.CommandText = "SELECT COUNT(*) FROM dbo.Licencias";
+    int count = (int)(await cmdCount.ExecuteScalarAsync())!;
+
+    if (count == 0)
+    {
+        await using var cmdSeed = conn.CreateCommand();
+        cmdSeed.CommandText = """
+            INSERT INTO dbo.Licencias (Numero,Plataforma,Area,Responsable,FrecuenciaPago,FechaInicio,ProximoPago,CostoMXN,Estado,Notas) VALUES
+            (1,'E-Study','TI',NULL,'Mensual','2025-01-01','2026-05-01',5220.00,'Por vencer','Plataforma educativa'),
+            (2,'Fortinet FortiGate','TI',NULL,'Anual','2025-07-16','2026-07-16',15000.00,'Activa','Firewall de seguridad'),
+            (3,'Google Workspace','TI',NULL,'Mensual','2025-01-01','2026-05-01',0.00,'Por vencer','Administración de correos'),
+            (4,'Canva','Marketing',NULL,'Anual','2025-12-07','2026-12-07',1210.00,'Activa','Editor de Imágenes'),
+            (5,'Capcut','Marketing',NULL,'Anual','2025-11-14','2026-11-14',2400.00,'Activa','Editor de videos'),
+            (6,'OpenAI','Marketing',NULL,'Mensual','2025-11-07','2026-05-07','0.00','Cancelada','IA aplicada a recursos Académicos'),
+            (7,'Envato','Marketing',NULL,'Anual','2024-10-16','2026-04-16',0.00,'Cancelada','Administración de diseños'),
+            (8,'Adobe Creative','Marketing',NULL,'Anual','2025-03-04','2027-03-06',1055.29,'Activa','Gestor de Diseño'),
+            (9,'Claude Max','Marketing',NULL,'Mensual','2025-02-05','2026-05-11',1785.10,'Por vencer','IA aplicada a recursos Académicos'),
+            (10,'Claude Max','Innovación',NULL,'Mensual','2026-04-01','2026-05-01',1785.10,'Por vencer','IA aplicada a recursos Académicos'),
+            (11,'Claude Basic','Socios',NULL,'Mensual','2026-04-09','2026-05-09',357.00,'Activa','IA aplicada a recursos Académicos'),
+            (12,'Claude Basic','TI',NULL,'Mensual','2026-04-01','2026-05-01',357.02,'Por vencer','IA aplicada a recursos Académicos'),
+            (13,'Antivirus Kaspersky','TI',NULL,'Anual','2025-09-19','2026-09-19',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (14,'Antivirus Kaspersky','TI',NULL,'Anual','2025-09-21','2026-09-21',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (15,'Antivirus Kaspersky','TI',NULL,'Anual','2025-09-21','2026-09-21',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (16,'Antivirus Kaspersky','TI',NULL,'Anual','2025-09-22','2026-09-22',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (17,'Antivirus Kaspersky','TI',NULL,'Anual','2025-09-22','2026-09-22',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (18,'Antivirus Kaspersky','Marketing',NULL,'Anual','2025-09-25','2026-09-25',2000.00,'Activa','Seguridad a equipos de cómputo'),
+            (19,'GitHub','Innovación',NULL,'Mensual','2026-02-09','2026-05-10',264.53,'Por vencer','IA aplicada a Desarrollo de Software'),
+            (20,'DigitalOcean','Innovación',NULL,'Mensual','2026-02-01','2026-05-01',496.71,'Por vencer','Servidor Cloud para plataformas'),
+            (21,'Akky','TI',NULL,'Anual','2025-02-12','2026-05-06',2000.00,'Por vencer','Alojamiento de la página web'),
+            (22,'HiggsField','Marketing',NULL,'Mensual','2026-04-08','2026-05-08',887.40,'Por vencer','Generador de Imágenes'),
+            (23,'Midjourney','Marketing',NULL,'Mensual','2026-04-08','2026-05-08',637.78,'Por vencer','Generador de Imágenes');
+            """;
+        await cmdSeed.ExecuteNonQueryAsync();
+    }
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
