@@ -1,6 +1,12 @@
+using MailKit.Net.Smtp;
+using MailKit.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using MimeKit;
+using System.Globalization;
+using System.Security.Claims;
+using System.Text.Json;
 
 namespace Pandora.API.Controllers;
 
@@ -9,13 +15,32 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class CalendarController(IConfiguration config, ILogger<CalendarController> logger) : ControllerBase
 {
+    private static readonly TimeZoneInfo MxTz = TimeZoneInfo.FindSystemTimeZoneById(
+        OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
+
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+
+    private string? CurrentUsername =>
+        User.FindFirstValue(ClaimTypes.Name) ??
+        User.FindFirstValue("name") ??
+        User.Claims.FirstOrDefault(c => c.Type.EndsWith("name", StringComparison.OrdinalIgnoreCase))?.Value;
+
+    private async Task EnsureAttendeesColumnAsync(SqlConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.Reservations') AND name = 'AttendeesJson')
+            ALTER TABLE dbo.Reservations ADD AttendeesJson NVARCHAR(MAX) NULL
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
 
     // ════════════════════════════════════════════════════════════════════════
     //  ROOMS
     // ════════════════════════════════════════════════════════════════════════
 
-    // ── GET /api/calendar/rooms ───────────────────────────────────────────────
     [HttpGet("rooms")]
     public async Task<IActionResult> GetRooms(CancellationToken ct)
     {
@@ -47,7 +72,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "GetRooms"); return StatusCode(500, ex.Message); }
     }
 
-    // ── POST /api/calendar/rooms ──────────────────────────────────────────────
     [HttpPost("rooms")]
     public async Task<IActionResult> CreateRoom([FromBody] RoomDto dto, CancellationToken ct)
     {
@@ -75,7 +99,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "CreateRoom"); return StatusCode(500, ex.Message); }
     }
 
-    // ── PUT /api/calendar/rooms/{id} ──────────────────────────────────────────
     [HttpPut("rooms/{id:guid}")]
     public async Task<IActionResult> UpdateRoom(Guid id, [FromBody] RoomDto dto, CancellationToken ct)
     {
@@ -105,7 +128,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "UpdateRoom {Id}", id); return StatusCode(500, ex.Message); }
     }
 
-    // ── DELETE /api/calendar/rooms/{id} ───────────────────────────────────────
     [HttpDelete("rooms/{id:guid}")]
     public async Task<IActionResult> DeleteRoom(Guid id, CancellationToken ct)
     {
@@ -127,7 +149,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     //  RESERVATIONS
     // ════════════════════════════════════════════════════════════════════════
 
-    // ── GET /api/calendar/reservations ────────────────────────────────────────
     [HttpGet("reservations")]
     public async Task<IActionResult> GetReservations(
         [FromQuery] DateTime? rangeStart,
@@ -142,6 +163,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
 
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await EnsureAttendeesColumnAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
 
             var sql = """
@@ -149,7 +171,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                        r.StartTime, r.EndTime,
                        r.OrganizerName, r.OrganizerEmail, r.MeetLink,
                        r.IsRecurring, r.RecurrenceRule, r.ParentReservationId,
-                       r.CreatedAt,
+                       r.CreatedAt, r.AttendeesJson,
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
@@ -172,7 +194,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "GetReservations"); return StatusCode(500, ex.Message); }
     }
 
-    // ── GET /api/calendar/reservations/check-conflict ─────────────────────────
     [HttpGet("reservations/check-conflict")]
     public async Task<IActionResult> CheckConflict(
         [FromQuery] Guid roomId,
@@ -202,7 +223,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "CheckConflict"); return StatusCode(500, ex.Message); }
     }
 
-    // ── GET /api/calendar/reservations/{id} ───────────────────────────────────
     [HttpGet("reservations/{id:guid}")]
     public async Task<IActionResult> GetReservationById(Guid id, CancellationToken ct)
     {
@@ -210,13 +230,14 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await EnsureAttendeesColumnAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT r.Id, r.Title, r.Description, r.RoomId,
                        r.StartTime, r.EndTime,
                        r.OrganizerName, r.OrganizerEmail, r.MeetLink,
                        r.IsRecurring, r.RecurrenceRule, r.ParentReservationId,
-                       r.CreatedAt,
+                       r.CreatedAt, r.AttendeesJson,
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
@@ -230,7 +251,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "GetReservationById {Id}", id); return StatusCode(500, ex.Message); }
     }
 
-    // ── POST /api/calendar/reservations ───────────────────────────────────────
     [HttpPost("reservations")]
     public async Task<IActionResult> CreateReservation([FromBody] ReservationDto dto, CancellationToken ct)
     {
@@ -243,36 +263,73 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await EnsureAttendeesColumnAsync(conn, ct);
+
+            // Paso 1 — nombre de sala
+            string roomName;
+            using (var roomCmd = conn.CreateCommand())
+            {
+                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @Id AND IsActive = 1";
+                roomCmd.Parameters.AddWithValue("@Id", dto.RoomId);
+                var nameObj = await roomCmd.ExecuteScalarAsync(ct);
+                if (nameObj is null || nameObj is DBNull) return BadRequest("Sala no encontrada o inactiva.");
+                roomName = (string)nameObj;
+            }
+
+            // Paso 2 — verificar conflicto de horario
+            int conflicts;
+            using (var conflictCmd = conn.CreateCommand())
+            {
+                conflictCmd.CommandText = """
+                    SELECT COUNT(1) FROM dbo.Reservations
+                    WHERE RoomId = @RoomId AND StartTime < @End AND EndTime > @Start
+                    """;
+                conflictCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
+                conflictCmd.Parameters.AddWithValue("@Start",  dto.StartTime);
+                conflictCmd.Parameters.AddWithValue("@End",    dto.EndTime);
+                conflicts = (int)(await conflictCmd.ExecuteScalarAsync(ct))!;
+            }
+
+            if (conflicts > 0)
+                return Conflict($"La sala '{roomName}' ya está reservada en ese horario. Por favor elige otro horario o sala.");
+
+            var attendeesJson = dto.Attendees?.Count > 0
+                ? JsonSerializer.Serialize(dto.Attendees)
+                : null;
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.Reservations
                     (Id, Title, Description, RoomId, StartTime, EndTime,
                      OrganizerName, OrganizerEmail, MeetLink,
-                     IsRecurring, RecurrenceRule, ParentReservationId, CreatedAt)
+                     IsRecurring, RecurrenceRule, ParentReservationId, AttendeesJson, CreatedAt)
                 VALUES
                     (@Id, @Title, @Desc, @RoomId, @Start, @End,
                      @OrgName, @OrgEmail, @MeetLink,
-                     @IsRecurring, @RRule, @ParentId, GETUTCDATE())
+                     @IsRecurring, @RRule, @ParentId, @AttendeesJson, GETUTCDATE())
                 """;
-            cmd.Parameters.AddWithValue("@Id",          id);
-            cmd.Parameters.AddWithValue("@Title",       dto.Title.Trim());
-            cmd.Parameters.AddWithValue("@Desc",        (object?)dto.Description       ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@RoomId",      dto.RoomId);
-            cmd.Parameters.AddWithValue("@Start",       dto.StartTime);
-            cmd.Parameters.AddWithValue("@End",         dto.EndTime);
-            cmd.Parameters.AddWithValue("@OrgName",     (object?)dto.OrganizerName  ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@OrgEmail",    (object?)dto.OrganizerEmail ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@MeetLink",    (object?)dto.MeetLink       ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@IsRecurring", dto.IsRecurring);
-            cmd.Parameters.AddWithValue("@RRule",       (object?)dto.RecurrenceRule         ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@ParentId",    (object?)dto.ParentReservationId    ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Id",            id);
+            cmd.Parameters.AddWithValue("@Title",         dto.Title.Trim());
+            cmd.Parameters.AddWithValue("@Desc",          (object?)dto.Description         ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@RoomId",        dto.RoomId);
+            cmd.Parameters.AddWithValue("@Start",         dto.StartTime);
+            cmd.Parameters.AddWithValue("@End",           dto.EndTime);
+            cmd.Parameters.AddWithValue("@OrgName",       (object?)dto.OrganizerName       ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@OrgEmail",      (object?)dto.OrganizerEmail      ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@MeetLink",      (object?)dto.MeetLink            ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@IsRecurring",   dto.IsRecurring);
+            cmd.Parameters.AddWithValue("@RRule",         (object?)dto.RecurrenceRule      ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ParentId",      (object?)dto.ParentReservationId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@AttendeesJson", (object?)attendeesJson           ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
+
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername), CancellationToken.None);
+
             return Ok(new { id });
         }
         catch (Exception ex) { logger.LogError(ex, "CreateReservation"); return StatusCode(500, ex.Message); }
     }
 
-    // ── PUT /api/calendar/reservations/{id} ───────────────────────────────────
     [HttpPut("reservations/{id:guid}")]
     public async Task<IActionResult> UpdateReservation(Guid id, [FromBody] ReservationDto dto, CancellationToken ct)
     {
@@ -282,6 +339,41 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await EnsureAttendeesColumnAsync(conn, ct);
+
+            // Paso 1 — nombre de sala
+            string roomName;
+            using (var roomCmd = conn.CreateCommand())
+            {
+                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @RoomId AND IsActive = 1";
+                roomCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
+                var nameObj = await roomCmd.ExecuteScalarAsync(ct);
+                if (nameObj is null || nameObj is DBNull) return BadRequest("Sala no encontrada o inactiva.");
+                roomName = (string)nameObj;
+            }
+
+            // Paso 2 — verificar conflicto excluyendo la reservación actual
+            int conflicts;
+            using (var conflictCmd = conn.CreateCommand())
+            {
+                conflictCmd.CommandText = """
+                    SELECT COUNT(1) FROM dbo.Reservations
+                    WHERE RoomId = @RoomId AND StartTime < @End AND EndTime > @Start AND Id <> @Id
+                    """;
+                conflictCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
+                conflictCmd.Parameters.AddWithValue("@Start",  dto.StartTime);
+                conflictCmd.Parameters.AddWithValue("@End",    dto.EndTime);
+                conflictCmd.Parameters.AddWithValue("@Id",     id);
+                conflicts = (int)(await conflictCmd.ExecuteScalarAsync(ct))!;
+            }
+
+            if (conflicts > 0)
+                return Conflict($"La sala '{roomName}' ya está reservada en ese horario. Por favor elige otro horario o sala.");
+
+            var attendeesJson = dto.Attendees?.Count > 0
+                ? JsonSerializer.Serialize(dto.Attendees)
+                : null;
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 UPDATE dbo.Reservations
@@ -295,28 +387,167 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     MeetLink          = @MeetLink,
                     IsRecurring       = @IsRecurring,
                     RecurrenceRule    = @RRule,
+                    AttendeesJson     = @AttendeesJson,
                     UpdatedAt         = GETUTCDATE()
                 WHERE Id = @Id
                 """;
-            cmd.Parameters.AddWithValue("@Id",          id);
-            cmd.Parameters.AddWithValue("@Title",       dto.Title.Trim());
-            cmd.Parameters.AddWithValue("@Desc",        (object?)dto.Description       ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@RoomId",      dto.RoomId);
-            cmd.Parameters.AddWithValue("@Start",       dto.StartTime);
-            cmd.Parameters.AddWithValue("@End",         dto.EndTime);
-            cmd.Parameters.AddWithValue("@OrgName",     (object?)dto.OrganizerName  ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@OrgEmail",    (object?)dto.OrganizerEmail ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@MeetLink",    (object?)dto.MeetLink       ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@IsRecurring", dto.IsRecurring);
-            cmd.Parameters.AddWithValue("@RRule",       (object?)dto.RecurrenceRule ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Id",            id);
+            cmd.Parameters.AddWithValue("@Title",         dto.Title.Trim());
+            cmd.Parameters.AddWithValue("@Desc",          (object?)dto.Description    ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@RoomId",        dto.RoomId);
+            cmd.Parameters.AddWithValue("@Start",         dto.StartTime);
+            cmd.Parameters.AddWithValue("@End",           dto.EndTime);
+            cmd.Parameters.AddWithValue("@OrgName",       (object?)dto.OrganizerName  ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@OrgEmail",      (object?)dto.OrganizerEmail ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@MeetLink",      (object?)dto.MeetLink       ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@IsRecurring",   dto.IsRecurring);
+            cmd.Parameters.AddWithValue("@RRule",         (object?)dto.RecurrenceRule ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@AttendeesJson", (object?)attendeesJson      ?? DBNull.Value);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Reservación no encontrada.");
+
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true, CurrentUsername), CancellationToken.None);
+
             return Ok(new { id });
         }
         catch (Exception ex) { logger.LogError(ex, "UpdateReservation {Id}", id); return StatusCode(500, ex.Message); }
     }
 
-    // ── DELETE /api/calendar/reservations/{id} ────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    //  REPORTS
+    // ════════════════════════════════════════════════════════════════════════
+
+    [HttpGet("reports")]
+    public async Task<IActionResult> GetReports(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // 1 — Summary: hoy / semana / mes / año / total
+            object summary;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT
+                      SUM(CASE WHEN CAST(StartTime AS DATE) = CAST(GETUTCDATE() AS DATE) THEN 1 ELSE 0 END) AS Today,
+                      SUM(CASE WHEN StartTime >= DATEADD(day, -6, CAST(GETUTCDATE() AS DATE)) THEN 1 ELSE 0 END) AS ThisWeek,
+                      SUM(CASE WHEN YEAR(StartTime) = YEAR(GETUTCDATE()) AND MONTH(StartTime) = MONTH(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisMonth,
+                      SUM(CASE WHEN YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisYear,
+                      COUNT(1) AS Total
+                    FROM dbo.Reservations
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                await r.ReadAsync(ct);
+                summary = new
+                {
+                    today     = r.IsDBNull(0) ? 0 : r.GetInt32(0),
+                    thisWeek  = r.IsDBNull(1) ? 0 : r.GetInt32(1),
+                    thisMonth = r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                    thisYear  = r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                    total     = r.IsDBNull(4) ? 0 : r.GetInt32(4),
+                };
+            }
+
+            // 2 — Por mes (últimos 12 meses)
+            var byMonth = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT FORMAT(StartTime, 'yyyy-MM') AS MonthKey,
+                           MONTH(StartTime) AS MonthNum,
+                           YEAR(StartTime)  AS Yr,
+                           COUNT(1) AS Cnt
+                    FROM dbo.Reservations
+                    WHERE StartTime >= DATEADD(month, -11,
+                          DATEFROMPARTS(YEAR(GETUTCDATE()), MONTH(GETUTCDATE()), 1))
+                    GROUP BY FORMAT(StartTime, 'yyyy-MM'), MONTH(StartTime), YEAR(StartTime)
+                    ORDER BY MonthKey
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                string[] names = { "", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                                       "Jul", "Ago", "Sep", "Oct", "Nov", "Dic" };
+                while (await r.ReadAsync(ct))
+                    byMonth.Add(new
+                    {
+                        month = $"{names[r.GetInt32(1)]} {r.GetInt32(2)}",
+                        count = r.GetInt32(3),
+                    });
+            }
+
+            // 3 — Por sala
+            var byRoom = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT rm.Name, rm.Color, COUNT(1) AS Cnt
+                    FROM dbo.Reservations r
+                    INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    GROUP BY rm.Name, rm.Color
+                    ORDER BY Cnt DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    byRoom.Add(new
+                    {
+                        name  = r.GetString(0),
+                        color = r.IsDBNull(1) ? "#1a237e" : r.GetString(1),
+                        count = r.GetInt32(2),
+                    });
+            }
+
+            // 4 — Por día de la semana (DATEFIRST=7 → 1=Dom, 2=Lun … 7=Sáb)
+            var dayCounts = new int[8];
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT DATEPART(weekday, StartTime) AS DayNum, COUNT(1) AS Cnt
+                    FROM dbo.Reservations
+                    GROUP BY DATEPART(weekday, StartTime)
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    dayCounts[r.GetInt32(0)] = r.GetInt32(1);
+            }
+            // Ordenar Lun→Dom
+            int[]    order  = { 2, 3, 4, 5, 6, 7, 1 };
+            string[] labels = { "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom" };
+            var byDayOfWeek = order.Select((dayNum, i) =>
+                (object)new { day = labels[i], count = dayCounts[dayNum] }).ToList();
+
+            // 5 — Historial reciente (últimas 20)
+            var history = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT TOP 20
+                        r.Id, r.Title, r.OrganizerName,
+                        r.StartTime, r.EndTime,
+                        rm.Name AS RoomName, rm.Color AS RoomColor
+                    FROM dbo.Reservations r
+                    INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    ORDER BY r.StartTime DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    history.Add(new
+                    {
+                        id            = r.GetGuid(0),
+                        title         = r.GetString(1),
+                        organizerName = r.IsDBNull(2) ? null : r.GetString(2),
+                        startTime     = DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc),
+                        endTime       = DateTime.SpecifyKind(r.GetDateTime(4), DateTimeKind.Utc),
+                        roomName      = r.GetString(5),
+                        roomColor     = r.IsDBNull(6) ? "#1a237e" : r.GetString(6),
+                    });
+            }
+
+            return Ok(new { summary, byMonth, byRoom, byDayOfWeek, history });
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetCalendarReports"); return StatusCode(500, ex.Message); }
+    }
+
     [HttpDelete("reservations/{id:guid}")]
     public async Task<IActionResult> DeleteReservation(
         Guid id, [FromQuery] bool deleteAll = false, CancellationToken ct = default)
@@ -329,7 +560,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
 
             if (deleteAll)
             {
-                // Eliminar todas las instancias de la recurrencia
                 cmd.CommandText = """
                     DELETE FROM dbo.Reservations
                     WHERE Id = @Id OR ParentReservationId = @Id
@@ -347,29 +577,205 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "DeleteReservation {Id}", id); return StatusCode(500, ex.Message); }
     }
 
-    // ── Helper ────────────────────────────────────────────────────────────────
-    private static object ReadReservation(SqlDataReader r) => new
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static object ReadReservation(SqlDataReader r)
     {
-        id                   = r.GetGuid(r.GetOrdinal("Id")),
-        title                = r.GetString(r.GetOrdinal("Title")),
-        description          = r.IsDBNull(r.GetOrdinal("Description"))          ? null : r.GetString(r.GetOrdinal("Description")),
-        roomId               = r.GetGuid(r.GetOrdinal("RoomId")),
-        startTime            = r.GetDateTime(r.GetOrdinal("StartTime")),
-        endTime              = r.GetDateTime(r.GetOrdinal("EndTime")),
-        organizerName        = r.IsDBNull(r.GetOrdinal("OrganizerName"))         ? null : r.GetString(r.GetOrdinal("OrganizerName")),
-        organizerEmail       = r.IsDBNull(r.GetOrdinal("OrganizerEmail"))        ? null : r.GetString(r.GetOrdinal("OrganizerEmail")),
-        meetLink             = r.IsDBNull(r.GetOrdinal("MeetLink"))              ? null : r.GetString(r.GetOrdinal("MeetLink")),
-        isRecurring          = r.GetBoolean(r.GetOrdinal("IsRecurring")),
-        recurrenceRule       = r.IsDBNull(r.GetOrdinal("RecurrenceRule"))        ? null : r.GetString(r.GetOrdinal("RecurrenceRule")),
-        parentReservationId  = r.IsDBNull(r.GetOrdinal("ParentReservationId"))   ? (Guid?)null : r.GetGuid(r.GetOrdinal("ParentReservationId")),
-        createdAt            = r.GetDateTime(r.GetOrdinal("CreatedAt")),
-        roomName             = r.IsDBNull(r.GetOrdinal("RoomName"))              ? null : r.GetString(r.GetOrdinal("RoomName")),
-        roomColor            = r.IsDBNull(r.GetOrdinal("RoomColor"))             ? null : r.GetString(r.GetOrdinal("RoomColor")),
-        roomCapacity         = r.IsDBNull(r.GetOrdinal("RoomCapacity"))          ? 0    : r.GetInt32(r.GetOrdinal("RoomCapacity")),
-    };
+        object? attendees = null;
+        try
+        {
+            var ord = r.GetOrdinal("AttendeesJson");
+            if (!r.IsDBNull(ord))
+                attendees = JsonSerializer.Deserialize<List<object>>(r.GetString(ord));
+        }
+        catch { /* columna aún no migrada o JSON malformado */ }
+
+        return new
+        {
+            id                  = r.GetGuid(r.GetOrdinal("Id")),
+            title               = r.GetString(r.GetOrdinal("Title")),
+            description         = r.IsDBNull(r.GetOrdinal("Description"))        ? null : r.GetString(r.GetOrdinal("Description")),
+            roomId              = r.GetGuid(r.GetOrdinal("RoomId")),
+            startTime           = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("StartTime")), DateTimeKind.Utc),
+            endTime             = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("EndTime")),   DateTimeKind.Utc),
+            organizerName       = r.IsDBNull(r.GetOrdinal("OrganizerName"))      ? null : r.GetString(r.GetOrdinal("OrganizerName")),
+            organizerEmail      = r.IsDBNull(r.GetOrdinal("OrganizerEmail"))     ? null : r.GetString(r.GetOrdinal("OrganizerEmail")),
+            meetLink            = r.IsDBNull(r.GetOrdinal("MeetLink"))           ? null : r.GetString(r.GetOrdinal("MeetLink")),
+            isRecurring         = r.GetBoolean(r.GetOrdinal("IsRecurring")),
+            recurrenceRule      = r.IsDBNull(r.GetOrdinal("RecurrenceRule"))     ? null : r.GetString(r.GetOrdinal("RecurrenceRule")),
+            parentReservationId = r.IsDBNull(r.GetOrdinal("ParentReservationId"))? (Guid?)null : r.GetGuid(r.GetOrdinal("ParentReservationId")),
+            createdAt           = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("CreatedAt")), DateTimeKind.Utc),
+            roomName            = r.IsDBNull(r.GetOrdinal("RoomName"))           ? null : r.GetString(r.GetOrdinal("RoomName")),
+            roomColor           = r.IsDBNull(r.GetOrdinal("RoomColor"))          ? null : r.GetString(r.GetOrdinal("RoomColor")),
+            roomCapacity        = r.IsDBNull(r.GetOrdinal("RoomCapacity"))       ? 0    : r.GetInt32(r.GetOrdinal("RoomCapacity")),
+            attendees,
+        };
+    }
+
+    private async Task SendReservationEmailsAsync(
+        ReservationDto dto, Guid reservationId, string roomName, bool isUpdate, string? username = null)
+    {
+        try
+        {
+            var smtp     = config.GetSection("SmtpSettings");
+            var host     = smtp["Host"] ?? "";
+            var port     = int.TryParse(smtp["Port"], out var p) ? p : 587;
+            var fromName = smtp["FromName"] ?? "Pandora";
+
+            // Leer credenciales del perfil del usuario (igual que Mail+), con fallback global
+            string? smtpEmail = null, smtpPass = null;
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                try
+                {
+                    await using var userConn = Conn();
+                    await userConn.OpenAsync();
+                    using var userCmd = userConn.CreateCommand();
+                    userCmd.CommandText = "SELECT SmtpEmail, SmtpPassword FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User)";
+                    userCmd.Parameters.AddWithValue("@User", username);
+                    await using var ur = await userCmd.ExecuteReaderAsync();
+                    if (await ur.ReadAsync())
+                    {
+                        smtpEmail = ur.IsDBNull(0) ? null : ur.GetString(0);
+                        smtpPass  = ur.IsDBNull(1) ? null : ur.GetString(1);
+                    }
+                }
+                catch (Exception ex) { logger.LogWarning("Could not read user SMTP for {User}: {Msg}", username, ex.Message); }
+            }
+
+            var from = smtpEmail ?? smtp["FromEmail"] ?? "";
+            var pass = smtpPass  ?? smtp["Password"]  ?? "";
+
+            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
+                return;
+
+            // Lista de destinatarios: organizador + asistentes
+            var recipients = new List<(string Name, string Email)>();
+            if (!string.IsNullOrWhiteSpace(dto.OrganizerEmail))
+                recipients.Add((dto.OrganizerName ?? "Organizador", dto.OrganizerEmail!));
+            if (dto.Attendees != null)
+                foreach (var a in dto.Attendees.Where(a => !string.IsNullOrWhiteSpace(a.Email)))
+                    recipients.Add((a.Name, a.Email));
+
+            if (recipients.Count == 0) return;
+
+            // Convertir a hora de México para el correo
+            var mxStart  = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, MxTz);
+            var mxEnd    = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime,   MxTz);
+            var dateStr  = mxStart.ToString("dddd, dd 'de' MMMM 'de' yyyy", new CultureInfo("es-MX"));
+            var startStr = mxStart.ToString("HH:mm");
+            var endStr   = mxEnd.ToString("HH:mm");
+
+            var subject = isUpdate
+                ? $"[iMET] Reservación actualizada: {dto.Title}"
+                : $"[iMET] Nueva reservación de sala: {dto.Title}";
+
+            using var smtpClient = new SmtpClient();
+            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
+            await smtpClient.AuthenticateAsync(from, pass);
+
+            foreach (var (name, email) in recipients)
+            {
+                var body = BuildEmailBody(
+                    recipientName: name,
+                    title:         dto.Title,
+                    roomName:      roomName,
+                    dateStr:       dateStr,
+                    startStr:      startStr,
+                    endStr:        endStr,
+                    organizerName: dto.OrganizerName ?? "—",
+                    meetLink:      dto.MeetLink,
+                    description:   dto.Description,
+                    isUpdate:      isUpdate,
+                    reservationId: reservationId
+                );
+
+                var msg = new MimeMessage();
+                msg.From.Add(new MailboxAddress(fromName, from));
+                msg.To.Add(new MailboxAddress(name, email));
+                msg.Subject = subject;
+                msg.Body    = new TextPart("html") { Text = body };
+
+                await smtpClient.SendAsync(msg);
+            }
+
+            await smtpClient.DisconnectAsync(true);
+            logger.LogInformation("Reservation emails sent for {Id} to {Count} recipients", reservationId, recipients.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Reservation email failed for {Id}: {Msg}", reservationId, ex.Message);
+        }
+    }
+
+    private static string BuildEmailBody(
+        string recipientName, string title, string roomName,
+        string dateStr, string startStr, string endStr,
+        string organizerName, string? meetLink, string? description,
+        bool isUpdate, Guid reservationId)
+    {
+        var headerText  = isUpdate ? "Reservación actualizada" : "Nueva reservación de sala";
+        var headerColor = isUpdate ? "#0d47a1" : "#1a237e";
+
+        var meetRow = string.IsNullOrWhiteSpace(meetLink) ? "" : $"""
+              <tr style="border-bottom:1px solid #eee">
+                <td style="padding:8px;font-weight:bold;color:#555;width:40%">Link de reunión</td>
+                <td style="padding:8px"><a href="{meetLink}" style="color:#1a237e">{meetLink}</a></td>
+              </tr>
+            """;
+
+        var descRow = string.IsNullOrWhiteSpace(description) ? "" : $"""
+              <tr style="border-bottom:1px solid #eee">
+                <td style="padding:8px;font-weight:bold;color:#555">Descripción</td>
+                <td style="padding:8px">{description}</td>
+              </tr>
+            """;
+
+        return $"""
+            <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
+            <div style="max-width:600px;margin:0 auto">
+              <div style="background:{headerColor};padding:20px;border-radius:8px 8px 0 0">
+                <h2 style="color:white;margin:0">📅 {headerText}</h2>
+              </div>
+              <div style="border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px">
+                <p>Hola <strong>{recipientName}</strong>,</p>
+                <p>Te informamos sobre la siguiente reservación de sala en el sistema Pandora de iMET:</p>
+                <table style="width:100%;border-collapse:collapse">
+                  <tr style="border-bottom:1px solid #eee">
+                    <td style="padding:8px;font-weight:bold;color:#555;width:40%">Evento</td>
+                    <td style="padding:8px"><strong>{title}</strong></td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #eee">
+                    <td style="padding:8px;font-weight:bold;color:#555">Sala</td>
+                    <td style="padding:8px">{roomName}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #eee">
+                    <td style="padding:8px;font-weight:bold;color:#555">Fecha</td>
+                    <td style="padding:8px">{dateStr}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #eee">
+                    <td style="padding:8px;font-weight:bold;color:#555">Horario</td>
+                    <td style="padding:8px">{startStr} – {endStr} hrs (hora de México)</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #eee">
+                    <td style="padding:8px;font-weight:bold;color:#555">Organizador</td>
+                    <td style="padding:8px">{organizerName}</td>
+                  </tr>
+                  {meetRow}
+                  {descRow}
+                </table>
+                <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">
+                  Pandora — Sistema de Gestión iMET · Reservación #{reservationId.ToString()[..8]}
+                </p>
+              </div>
+            </div>
+            </body></html>
+            """;
+    }
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
+
 public record RoomDto(
     string  Name,
     int     Capacity,
@@ -379,16 +785,19 @@ public record RoomDto(
     bool    IsActive
 );
 
+public record AttendeeDto(string Name, string Email, bool IsExternal);
+
 public record ReservationDto(
-    string    Title,
-    string?   Description,
-    Guid      RoomId,
-    DateTime  StartTime,
-    DateTime  EndTime,
-    string?   OrganizerName,
-    string?   OrganizerEmail,
-    string?   MeetLink,
-    bool      IsRecurring,
-    string?   RecurrenceRule,
-    Guid?     ParentReservationId
+    string              Title,
+    string?             Description,
+    Guid                RoomId,
+    DateTime            StartTime,
+    DateTime            EndTime,
+    string?             OrganizerName,
+    string?             OrganizerEmail,
+    string?             MeetLink,
+    bool                IsRecurring,
+    string?             RecurrenceRule,
+    Guid?               ParentReservationId,
+    List<AttendeeDto>?  Attendees
 );

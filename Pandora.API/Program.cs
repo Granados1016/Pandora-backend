@@ -36,7 +36,12 @@ if (resolvedConnStr != rawConnStr)
     builder.Configuration["ConnectionStrings:PandoraDb"] = resolvedConnStr;
 
 // ── MVC + FluentValidation ───────────────────────────────────────────────────
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(opts =>
+    {
+        opts.JsonSerializerOptions.NumberHandling =
+            System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString;
+    });
 builder.Services.AddFluentValidationAutoValidation();
 builder.Services.AddValidatorsFromAssemblyContaining<CreateCampaignRequestValidator>();
 builder.Services.AddEndpointsApiExplorer();
