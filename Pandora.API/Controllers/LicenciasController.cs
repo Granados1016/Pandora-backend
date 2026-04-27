@@ -1,5 +1,6 @@
-using ClosedXML.Excel;
+using MiniExcelLibs;
 using Microsoft.AspNetCore.Authorization;
+using IConfiguration = Microsoft.Extensions.Configuration.IConfiguration;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using System.Security.Claims;
@@ -391,226 +392,81 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
 
     private static byte[] BuildExcel(List<LicenciaRow> rows)
     {
-        using var wb = new XLWorkbook();
-
         // ── Hoja 1: Control de Licencias ─────────────────────────────────────
-        var ws = wb.Worksheets.Add("Control de Licencias");
-
-        // Colores del documento original
-        var azulOscuro  = XLColor.FromHtml("#1A237E");
-        var azulMedio   = XLColor.FromHtml("#3949AB");
-        var verdeActiva = XLColor.FromHtml("#E8F5E9");
-        var verdeTxt    = XLColor.FromHtml("#2E7D32");
-        var amarilloVencer  = XLColor.FromHtml("#FFF9C4");
-        var amarilloTxt     = XLColor.FromHtml("#F57F17");
-        var rojoVencida = XLColor.FromHtml("#FFEBEE");
-        var rojoTxt     = XLColor.FromHtml("#C62828");
-        var grisCancel  = XLColor.FromHtml("#F5F5F5");
-        var grisTxt     = XLColor.FromHtml("#757575");
-
-        // Fila 1: título
-        ws.Range("A1:L1").Merge();
-        ws.Cell("A1").Value = "iMET — CONTROL DE LICENCIAS Y PAGOS DE PLATAFORMAS";
-        ws.Cell("A1").Style
-            .Font.SetBold(true).Font.SetFontSize(14).Font.SetFontColor(XLColor.White)
-            .Fill.SetBackgroundColor(azulOscuro)
-            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
-            .Alignment.SetVertical(XLAlignmentVerticalValues.Center);
-        ws.Row(1).Height = 30;
-
-        // Fila 2: subtítulo
-        ws.Range("A2:L2").Merge();
-        ws.Cell("A2").Value = $"Coordinación de Tecnologías  |  Generado: {DateTime.Now:dd/MM/yyyy}";
-        ws.Cell("A2").Style
-            .Font.SetItalic(true).Font.SetFontColor(XLColor.White)
-            .Fill.SetBackgroundColor(azulMedio)
-            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
-        ws.Row(2).Height = 20;
-
-        // Fila 3: encabezados
-        string[] headers = ["#", "Plataforma / Servicio", "Área", "Frecuencia de Pago",
-                             "Fecha de Inicio", "Próximo Pago / Renovación", "Días Restantes",
-                             "Costo (MXN)", "Costo Anual (MXN)", "Estado", "Notas / Observaciones"];
-        for (int i = 0; i < headers.Length; i++)
+        var sheet1 = rows.Select(r => new Dictionary<string, object?>
         {
-            var cell = ws.Cell(3, i + 1);
-            cell.Value = headers[i];
-            cell.Style
-                .Font.SetBold(true).Font.SetFontColor(XLColor.White)
-                .Fill.SetBackgroundColor(azulOscuro)
-                .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
-                .Alignment.SetVertical(XLAlignmentVerticalValues.Center)
-                .Border.SetOutsideBorder(XLBorderStyleValues.Thin)
-                .Border.SetOutsideBorderColor(XLColor.White);
-        }
-        ws.Row(3).Height = 22;
-
-        // Datos
-        for (int i = 0; i < rows.Count; i++)
-        {
-            var row = rows[i];
-            int excelRow = i + 4;
-
-            ws.Cell(excelRow, 1).Value  = row.Numero;
-            ws.Cell(excelRow, 2).Value  = row.Plataforma;
-            ws.Cell(excelRow, 3).Value  = row.Area;
-            ws.Cell(excelRow, 4).Value  = row.FrecuenciaPago;
-            ws.Cell(excelRow, 5).Value  = row.FechaInicio;
-            ws.Cell(excelRow, 6).Value  = row.ProximoPago;
-            ws.Cell(excelRow, 7).Value  = row.DiasRestantes;
-            ws.Cell(excelRow, 8).Value  = (double)row.CostoMXN;
-            ws.Cell(excelRow, 9).Value  = (double)row.CostoAnualMXN;
-            ws.Cell(excelRow, 10).Value = row.Estado;
-            ws.Cell(excelRow, 11).Value = row.Notas ?? "";
-
-            // Formato de fechas
-            ws.Cell(excelRow, 5).Style.DateFormat.Format = "dd/MM/yyyy";
-            ws.Cell(excelRow, 6).Style.DateFormat.Format = "dd/MM/yyyy";
-
-            // Formato de moneda
-            ws.Cell(excelRow, 8).Style.NumberFormat.Format = "$#,##0.00";
-            ws.Cell(excelRow, 9).Style.NumberFormat.Format = "$#,##0.00";
-
-            // Color de fila según estado
-            var (bgColor, txtColor) = row.Estado switch
-            {
-                "Activa"     => (verdeActiva,    verdeTxt),
-                "Por vencer" => (amarilloVencer, amarilloTxt),
-                "Vencida"    => (rojoVencida,    rojoTxt),
-                _            => (grisCancel,     grisTxt),
-            };
-
-            var range = ws.Range(excelRow, 1, excelRow, 11);
-            range.Style.Fill.SetBackgroundColor(bgColor);
-            range.Style.Font.SetFontColor(txtColor);
-            range.Style.Border.SetOutsideBorder(XLBorderStyleValues.Thin);
-            range.Style.Border.SetOutsideBorderColor(XLColor.FromHtml("#BDBDBD"));
-
-            // Estado en negrita
-            ws.Cell(excelRow, 10).Style.Font.SetBold(true);
-        }
-
-        // Fila total
-        int totalRow = rows.Count + 4;
-        ws.Range(totalRow, 1, totalRow, 7).Merge();
-        ws.Cell(totalRow, 1).Value = "TOTAL ANUAL ESTIMADO";
-        ws.Cell(totalRow, 1).Style.Font.SetBold(true).Alignment.SetHorizontal(XLAlignmentHorizontalValues.Right);
-
-        var activasRows = rows.Where(r => r.Estado != "Cancelada").ToList();
-        ws.Cell(totalRow, 8).Value = (double)activasRows.Sum(r => r.CostoMXN);
-        ws.Cell(totalRow, 9).Value = (double)activasRows.Sum(r => r.CostoAnualMXN);
-        ws.Cell(totalRow, 8).Style.NumberFormat.Format = "$#,##0.00";
-        ws.Cell(totalRow, 9).Style.NumberFormat.Format = "$#,##0.00";
-        ws.Range(totalRow, 1, totalRow, 11).Style
-            .Font.SetBold(true).Fill.SetBackgroundColor(azulOscuro).Font.SetFontColor(XLColor.White)
-            .Border.SetOutsideBorder(XLBorderStyleValues.Medium);
-
-        // Anchos de columna
-        ws.Column(1).Width  = 6;
-        ws.Column(2).Width  = 28;
-        ws.Column(3).Width  = 16;
-        ws.Column(4).Width  = 18;
-        ws.Column(5).Width  = 16;
-        ws.Column(6).Width  = 22;
-        ws.Column(7).Width  = 16;
-        ws.Column(8).Width  = 16;
-        ws.Column(9).Width  = 18;
-        ws.Column(10).Width = 14;
-        ws.Column(11).Width = 32;
-
-        // Inmovilizar encabezados
-        ws.SheetView.FreezeRows(3);
+            ["#"]                      = r.Numero,
+            ["Plataforma / Servicio"]  = r.Plataforma,
+            ["Área"]                   = r.Area,
+            ["Frecuencia de Pago"]     = r.FrecuenciaPago,
+            ["Fecha de Inicio"]        = r.FechaInicio.ToString("dd/MM/yyyy"),
+            ["Próximo Pago"]           = r.ProximoPago.ToString("dd/MM/yyyy"),
+            ["Días Restantes"]         = r.DiasRestantes,
+            ["Costo (MXN)"]            = r.CostoMXN,
+            ["Costo Anual (MXN)"]      = r.CostoAnualMXN,
+            ["Estado"]                 = r.Estado,
+            ["Notas"]                  = r.Notas ?? "",
+        }).ToList();
 
         // ── Hoja 2: Resumen por Área ──────────────────────────────────────────
-        var ws2 = wb.Worksheets.Add("Resumen por Área");
-        ws2.Range("A1:E1").Merge();
-        ws2.Cell("A1").Value = "iMET — RESUMEN EJECUTIVO DE LICENCIAS";
-        ws2.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(13).Font.SetFontColor(XLColor.White)
-            .Fill.SetBackgroundColor(azulOscuro)
-            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
-        ws2.Row(1).Height = 28;
-
-        string[] h2 = ["Área", "Total Licencias", "Activas", "Costo Mensual (MXN)", "Costo Anual (MXN)"];
-        for (int i = 0; i < h2.Length; i++)
-        {
-            var c = ws2.Cell(2, i + 1);
-            c.Value = h2[i];
-            c.Style.Font.SetBold(true).Font.SetFontColor(XLColor.White)
-                .Fill.SetBackgroundColor(azulMedio)
-                .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
-        }
-
-        var byArea = rows.Where(r => r.Estado != "Cancelada")
+        var sheet2 = rows
+            .Where(r => r.Estado != "Cancelada")
             .GroupBy(r => r.Area)
-            .OrderByDescending(g => g.Sum(r => r.CostoAnualMXN));
-        int ar = 3;
-        foreach (var g in byArea)
-        {
-            decimal mensual = g.Sum(r => r.FrecuenciaPago switch
+            .OrderByDescending(g => g.Sum(r => r.CostoAnualMXN))
+            .Select(g =>
             {
-                "Mensual"    => r.CostoMXN,
-                "Trimestral" => r.CostoMXN / 3m,
-                "Semestral"  => r.CostoMXN / 6m,
-                "Anual"      => r.CostoMXN / 12m,
-                _            => 0m,
-            });
-            ws2.Cell(ar, 1).Value = g.Key;
-            ws2.Cell(ar, 2).Value = g.Count();
-            ws2.Cell(ar, 3).Value = g.Count(r => r.Estado == "Activa");
-            ws2.Cell(ar, 4).Value = (double)mensual;
-            ws2.Cell(ar, 5).Value = (double)g.Sum(r => r.CostoAnualMXN);
-            ws2.Cell(ar, 4).Style.NumberFormat.Format = "$#,##0.00";
-            ws2.Cell(ar, 5).Style.NumberFormat.Format = "$#,##0.00";
-            ar++;
-        }
-        ws2.Column(1).Width = 24; ws2.Column(2).Width = 16;
-        ws2.Column(3).Width = 12; ws2.Column(4).Width = 22; ws2.Column(5).Width = 22;
+                decimal mensual = g.Sum(r => r.FrecuenciaPago switch
+                {
+                    "Mensual"    => r.CostoMXN,
+                    "Trimestral" => r.CostoMXN / 3m,
+                    "Semestral"  => r.CostoMXN / 6m,
+                    "Anual"      => r.CostoMXN / 12m,
+                    _            => 0m,
+                });
+                return new Dictionary<string, object?>
+                {
+                    ["Área"]                = g.Key,
+                    ["Total Licencias"]     = g.Count(),
+                    ["Activas"]             = g.Count(r => r.Estado == "Activa"),
+                    ["Costo Mensual (MXN)"] = mensual,
+                    ["Costo Anual (MXN)"]   = g.Sum(r => r.CostoAnualMXN),
+                };
+            }).ToList();
 
         // ── Hoja 3: Calendario de Pagos ───────────────────────────────────────
-        var ws3 = wb.Worksheets.Add("Calendario de Pagos");
-        ws3.Range("A1:N1").Merge();
-        ws3.Cell("A1").Value = "iMET — CALENDARIO ANUAL DE PAGOS DE LICENCIAS";
-        ws3.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(13).Font.SetFontColor(XLColor.White)
-            .Fill.SetBackgroundColor(azulOscuro)
-            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
-
         string[] meses = ["ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SEP","OCT","NOV","DIC"];
-        ws3.Cell(2, 1).Value = "Plataforma";
-        ws3.Cell(2, 2).Value = "Frecuencia";
-        for (int m = 0; m < 12; m++) ws3.Cell(2, m + 3).Value = meses[m];
-        ws3.Row(2).Style.Font.SetBold(true).Font.SetFontColor(XLColor.White).Fill.SetBackgroundColor(azulMedio);
-
-        var activasCalendario = rows.Where(r => r.Estado != "Cancelada").OrderBy(r => r.Numero).ToList();
-        for (int i = 0; i < activasCalendario.Count; i++)
-        {
-            var row = activasCalendario[i];
-            int er = i + 3;
-            ws3.Cell(er, 1).Value = row.Plataforma;
-            ws3.Cell(er, 2).Value = row.FrecuenciaPago;
-
-            for (int m = 1; m <= 12; m++)
+        var sheet3 = rows
+            .Where(r => r.Estado != "Cancelada")
+            .OrderBy(r => r.Numero)
+            .Select(r =>
             {
-                bool paga = row.FrecuenciaPago switch
+                var dict = new Dictionary<string, object?>
                 {
-                    "Mensual"    => true,
-                    "Trimestral" => m % 3 == (row.ProximoPago.Month % 3 == 0 ? 3 : row.ProximoPago.Month % 3),
-                    "Semestral"  => m == row.ProximoPago.Month || m == ((row.ProximoPago.Month + 6 - 1) % 12) + 1,
-                    "Anual"      => m == row.ProximoPago.Month,
-                    _            => false,
+                    ["Plataforma"] = r.Plataforma,
+                    ["Frecuencia"] = r.FrecuenciaPago,
                 };
-                if (paga)
+                for (int m = 1; m <= 12; m++)
                 {
-                    ws3.Cell(er, m + 2).Value = "💳";
-                    ws3.Cell(er, m + 2).Style.Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
-                        .Fill.SetBackgroundColor(verdeActiva);
+                    bool paga = r.FrecuenciaPago switch
+                    {
+                        "Mensual"    => true,
+                        "Trimestral" => m % 3 == (r.ProximoPago.Month % 3 == 0 ? 3 : r.ProximoPago.Month % 3),
+                        "Semestral"  => m == r.ProximoPago.Month || m == ((r.ProximoPago.Month + 6 - 1) % 12) + 1,
+                        "Anual"      => m == r.ProximoPago.Month,
+                        _            => false,
+                    };
+                    dict[meses[m - 1]] = paga ? (object?)r.CostoMXN : null;
                 }
-            }
-        }
-        ws3.Column(1).Width = 26; ws3.Column(2).Width = 14;
-        for (int m = 3; m <= 14; m++) ws3.Column(m).Width = 7;
+                return dict;
+            }).ToList();
 
         using var ms = new MemoryStream();
-        wb.SaveAs(ms);
+        MiniExcel.SaveAs(ms, new Dictionary<string, object>
+        {
+            ["Control de Licencias"] = sheet1,
+            ["Resumen por Área"]     = sheet2,
+            ["Calendario de Pagos"]  = sheet3,
+        });
         return ms.ToArray();
     }
 
