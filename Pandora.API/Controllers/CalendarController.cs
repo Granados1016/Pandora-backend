@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using MimeKit;
 using System.Globalization;
+using System.Security.Claims;
 using System.Text.Json;
 
 namespace Pandora.API.Controllers;
@@ -18,6 +19,11 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
 
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+
+    private string? CurrentUsername =>
+        User.FindFirstValue(ClaimTypes.Name) ??
+        User.FindFirstValue("name") ??
+        User.Claims.FirstOrDefault(c => c.Type.EndsWith("name", StringComparison.OrdinalIgnoreCase))?.Value;
 
     private async Task EnsureAttendeesColumnAsync(SqlConnection conn, CancellationToken ct)
     {
@@ -317,7 +323,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             cmd.Parameters.AddWithValue("@AttendeesJson", (object?)attendeesJson           ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
-            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false), CancellationToken.None);
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername), CancellationToken.None);
 
             return Ok(new { id });
         }
@@ -400,7 +406,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Reservación no encontrada.");
 
-            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true), CancellationToken.None);
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true, CurrentUsername), CancellationToken.None);
 
             return Ok(new { id });
         }
@@ -472,16 +478,38 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     }
 
     private async Task SendReservationEmailsAsync(
-        ReservationDto dto, Guid reservationId, string roomName, bool isUpdate)
+        ReservationDto dto, Guid reservationId, string roomName, bool isUpdate, string? username = null)
     {
         try
         {
             var smtp     = config.GetSection("SmtpSettings");
-            var host     = smtp["Host"]     ?? "";
+            var host     = smtp["Host"] ?? "";
             var port     = int.TryParse(smtp["Port"], out var p) ? p : 587;
-            var from     = smtp["FromEmail"] ?? "";
-            var pass     = smtp["Password"]  ?? "";
-            var fromName = smtp["FromName"]  ?? "Pandora";
+            var fromName = smtp["FromName"] ?? "Pandora";
+
+            // Leer credenciales del perfil del usuario (igual que Mail+), con fallback global
+            string? smtpEmail = null, smtpPass = null;
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                try
+                {
+                    await using var userConn = Conn();
+                    await userConn.OpenAsync();
+                    using var userCmd = userConn.CreateCommand();
+                    userCmd.CommandText = "SELECT SmtpEmail, SmtpPassword FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User)";
+                    userCmd.Parameters.AddWithValue("@User", username);
+                    await using var ur = await userCmd.ExecuteReaderAsync();
+                    if (await ur.ReadAsync())
+                    {
+                        smtpEmail = ur.IsDBNull(0) ? null : ur.GetString(0);
+                        smtpPass  = ur.IsDBNull(1) ? null : ur.GetString(1);
+                    }
+                }
+                catch (Exception ex) { logger.LogWarning("Could not read user SMTP for {User}: {Msg}", username, ex.Message); }
+            }
+
+            var from = smtpEmail ?? smtp["FromEmail"] ?? "";
+            var pass = smtpPass  ?? smtp["Password"]  ?? "";
 
             if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
                 return;
