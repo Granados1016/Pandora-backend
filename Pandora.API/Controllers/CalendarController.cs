@@ -413,6 +413,141 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "UpdateReservation {Id}", id); return StatusCode(500, ex.Message); }
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    //  REPORTS
+    // ════════════════════════════════════════════════════════════════════════
+
+    [HttpGet("reports")]
+    public async Task<IActionResult> GetReports(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // 1 — Summary: hoy / semana / mes / año / total
+            object summary;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT
+                      SUM(CASE WHEN CAST(StartTime AS DATE) = CAST(GETUTCDATE() AS DATE) THEN 1 ELSE 0 END) AS Today,
+                      SUM(CASE WHEN StartTime >= DATEADD(day, -6, CAST(GETUTCDATE() AS DATE)) THEN 1 ELSE 0 END) AS ThisWeek,
+                      SUM(CASE WHEN YEAR(StartTime) = YEAR(GETUTCDATE()) AND MONTH(StartTime) = MONTH(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisMonth,
+                      SUM(CASE WHEN YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisYear,
+                      COUNT(1) AS Total
+                    FROM dbo.Reservations
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                await r.ReadAsync(ct);
+                summary = new
+                {
+                    today     = r.IsDBNull(0) ? 0 : r.GetInt32(0),
+                    thisWeek  = r.IsDBNull(1) ? 0 : r.GetInt32(1),
+                    thisMonth = r.IsDBNull(2) ? 0 : r.GetInt32(2),
+                    thisYear  = r.IsDBNull(3) ? 0 : r.GetInt32(3),
+                    total     = r.IsDBNull(4) ? 0 : r.GetInt32(4),
+                };
+            }
+
+            // 2 — Por mes (últimos 12 meses)
+            var byMonth = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT FORMAT(StartTime, 'yyyy-MM') AS MonthKey,
+                           MONTH(StartTime) AS MonthNum,
+                           YEAR(StartTime)  AS Yr,
+                           COUNT(1) AS Cnt
+                    FROM dbo.Reservations
+                    WHERE StartTime >= DATEADD(month, -11,
+                          DATEFROMPARTS(YEAR(GETUTCDATE()), MONTH(GETUTCDATE()), 1))
+                    GROUP BY FORMAT(StartTime, 'yyyy-MM'), MONTH(StartTime), YEAR(StartTime)
+                    ORDER BY MonthKey
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                string[] names = { "", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                                       "Jul", "Ago", "Sep", "Oct", "Nov", "Dic" };
+                while (await r.ReadAsync(ct))
+                    byMonth.Add(new
+                    {
+                        month = $"{names[r.GetInt32(1)]} {r.GetInt32(2)}",
+                        count = r.GetInt32(3),
+                    });
+            }
+
+            // 3 — Por sala
+            var byRoom = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT rm.Name, rm.Color, COUNT(1) AS Cnt
+                    FROM dbo.Reservations r
+                    INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    GROUP BY rm.Name, rm.Color
+                    ORDER BY Cnt DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    byRoom.Add(new
+                    {
+                        name  = r.GetString(0),
+                        color = r.IsDBNull(1) ? "#1a237e" : r.GetString(1),
+                        count = r.GetInt32(2),
+                    });
+            }
+
+            // 4 — Por día de la semana (DATEFIRST=7 → 1=Dom, 2=Lun … 7=Sáb)
+            var dayCounts = new int[8];
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT DATEPART(weekday, StartTime) AS DayNum, COUNT(1) AS Cnt
+                    FROM dbo.Reservations
+                    GROUP BY DATEPART(weekday, StartTime)
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    dayCounts[r.GetInt32(0)] = r.GetInt32(1);
+            }
+            // Ordenar Lun→Dom
+            int[]    order  = { 2, 3, 4, 5, 6, 7, 1 };
+            string[] labels = { "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom" };
+            var byDayOfWeek = order.Select((dayNum, i) =>
+                (object)new { day = labels[i], count = dayCounts[dayNum] }).ToList();
+
+            // 5 — Historial reciente (últimas 20)
+            var history = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT TOP 20
+                        r.Id, r.Title, r.OrganizerName,
+                        r.StartTime, r.EndTime,
+                        rm.Name AS RoomName, rm.Color AS RoomColor
+                    FROM dbo.Reservations r
+                    INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    ORDER BY r.StartTime DESC
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    history.Add(new
+                    {
+                        id            = r.GetGuid(0),
+                        title         = r.GetString(1),
+                        organizerName = r.IsDBNull(2) ? null : r.GetString(2),
+                        startTime     = DateTime.SpecifyKind(r.GetDateTime(3), DateTimeKind.Utc),
+                        endTime       = DateTime.SpecifyKind(r.GetDateTime(4), DateTimeKind.Utc),
+                        roomName      = r.GetString(5),
+                        roomColor     = r.IsDBNull(6) ? "#1a237e" : r.GetString(6),
+                    });
+            }
+
+            return Ok(new { summary, byMonth, byRoom, byDayOfWeek, history });
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetCalendarReports"); return StatusCode(500, ex.Message); }
+    }
+
     [HttpDelete("reservations/{id:guid}")]
     public async Task<IActionResult> DeleteReservation(
         Guid id, [FromQuery] bool deleteAll = false, CancellationToken ct = default)
