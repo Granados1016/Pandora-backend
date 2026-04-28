@@ -857,6 +857,26 @@ public class TicketsController(
     //  AREA CONFIGS — correos de notificación por área
     // ════════════════════════════════════════════════════════════════════════════
 
+    // ── GET /api/tickets/positions — lista pública de puestos (para el formulario) ──
+    [HttpGet("positions")]
+    public async Task<IActionResult> GetPositions(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureTablesAsync(conn, ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Area FROM dbo.TicketAreaConfigs ORDER BY Area";
+            var list = new List<string>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(r.GetString(0));
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetPositions"); return StatusCode(500, ex.Message); }
+    }
+
     [HttpGet("area-configs")]
     [Authorize(Roles = "Admin")]
     public async Task<IActionResult> GetAreaConfigs(CancellationToken ct)
@@ -909,6 +929,70 @@ public class TicketsController(
             return Ok();
         }
         catch (Exception ex) { logger.LogError(ex, "UpdateAreaConfigs"); return StatusCode(500, ex.Message); }
+    }
+
+    [HttpPost("area-configs")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> CreateAreaConfig([FromBody] CreateAreaConfigDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Area)) return BadRequest("El nombre del puesto es requerido.");
+        var id = Guid.NewGuid();
+        var area = dto.Area.Trim();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureTablesAsync(conn, ct);
+
+            await using var cmdCheck = conn.CreateCommand();
+            cmdCheck.CommandText = "SELECT COUNT(1) FROM dbo.TicketAreaConfigs WHERE Area = @Area";
+            cmdCheck.Parameters.AddWithValue("@Area", area);
+            var exists = Convert.ToInt32(await cmdCheck.ExecuteScalarAsync(ct) ?? 0);
+            if (exists > 0) return Conflict("Ya existe un puesto con ese nombre.");
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO dbo.TicketAreaConfigs (Id, Area) VALUES (@Id, @Area)";
+            cmd.Parameters.AddWithValue("@Id",   id);
+            cmd.Parameters.AddWithValue("@Area", area);
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            logger.LogInformation("Puesto creado: {Area} por {User}", area, CurrentUser);
+            return Ok(new { id, area, notificationEmail = (string?)null });
+        }
+        catch (Exception ex) { logger.LogError(ex, "CreateAreaConfig"); return StatusCode(500, ex.Message); }
+    }
+
+    [HttpDelete("area-configs/{id:guid}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> DeleteAreaConfig(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Verificar si hay tickets que referencian este puesto
+            await using var cmdCheck = conn.CreateCommand();
+            cmdCheck.CommandText = """
+                SELECT TOP 1 1 FROM dbo.Tickets t
+                JOIN dbo.TicketAreaConfigs tac ON t.Area = tac.Area
+                WHERE tac.Id = @Id
+                """;
+            cmdCheck.Parameters.AddWithValue("@Id", id);
+            var inUse = await cmdCheck.ExecuteScalarAsync(ct);
+            if (inUse != null)
+                return Conflict("No se puede eliminar: existen tickets asociados a este puesto.");
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM dbo.TicketAreaConfigs WHERE Id = @Id";
+            cmd.Parameters.AddWithValue("@Id", id);
+            int rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound("Puesto no encontrado.");
+
+            logger.LogInformation("Puesto eliminado Id={Id} por {User}", id, CurrentUser);
+            return NoContent();
+        }
+        catch (Exception ex) { logger.LogError(ex, "DeleteAreaConfig {Id}", id); return StatusCode(500, ex.Message); }
     }
 
     private async Task SendAreaNotificationAsync(string ticketNumber, string title, string area, string submittedBy, string? submittedByEmail)
@@ -1063,6 +1147,8 @@ public class CreateTicketFormDto
 }
 
 public record AreaConfigDto(string Area, string? NotificationEmail);
+
+public record CreateAreaConfigDto(string Area);
 
 public record UpdateTicketStatusDto(
     string  Status,
