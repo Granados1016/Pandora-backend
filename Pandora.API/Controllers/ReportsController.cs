@@ -161,7 +161,7 @@ public class ReportsController(IConfiguration config, ILogger<ReportsController>
                     ISNULL(t.Name, 'Sin categoría') AS Name,
                     COUNT(*) AS Value
                 FROM dbo.InventoryItems i
-                LEFT JOIN dbo.InventoryTypes t ON t.Id = i.TypeId
+                LEFT JOIN dbo.InventoryTypes t ON t.Id = i.InventoryTypeId
                 WHERE i.IsActive = 1
                 GROUP BY ISNULL(t.Name, 'Sin categoría')
                 ORDER BY Value DESC
@@ -209,12 +209,11 @@ public class ReportsController(IConfiguration config, ILogger<ReportsController>
             await using var cmdDept = conn.CreateCommand();
             cmdDept.CommandText = """
                 SELECT
-                    ISNULL(d.Name, 'Sin departamento') AS Name,
+                    ISNULL(NULLIF(i.Department,''), 'Sin departamento') AS Name,
                     COUNT(*) AS Value
                 FROM dbo.InventoryItems i
-                LEFT JOIN dbo.Departments d ON d.Id = i.DepartmentId
                 WHERE i.IsActive = 1
-                GROUP BY ISNULL(d.Name, 'Sin departamento')
+                GROUP BY ISNULL(NULLIF(i.Department,''), 'Sin departamento')
                 ORDER BY Value DESC
                 """;
             var byDepartment = new List<object>();
