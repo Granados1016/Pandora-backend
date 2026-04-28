@@ -157,8 +157,52 @@ public class TicketsController(
                     UpdatedAt         DATETIME2        NULL
                 );
                 INSERT INTO dbo.TicketAreaConfigs (Area) VALUES
-                    (N'Administración'), (N'Comercial'), (N'TI'),
-                    (N'MKT'), (N'Programas Académicos');
+                    (N'Dirección General'),
+                    (N'Dirección Administración'),
+                    (N'Dirección de programas académicos'),
+                    (N'Dirección comercial'),
+                    (N'Coordinación de TI'),
+                    (N'Coordinación de Mercadotecnia'),
+                    (N'Coordinación de Innovación'),
+                    (N'Coordinación de Control escolar'),
+                    (N'Diseño'),
+                    (N'Community Manager'),
+                    (N'Audio Visual'),
+                    (N'Asesor 1'),
+                    (N'Asesor 2'),
+                    (N'Asesor 3');
+            END
+
+            -- Migración: sincronizar puestos en instalaciones existentes
+            IF OBJECT_ID('dbo.TicketAreaConfigs') IS NOT NULL
+            BEGIN
+                -- Insertar puestos nuevos si no existen
+                INSERT INTO dbo.TicketAreaConfigs (Area)
+                SELECT src.area
+                FROM (VALUES
+                    (N'Dirección General'),
+                    (N'Dirección Administración'),
+                    (N'Dirección de programas académicos'),
+                    (N'Dirección comercial'),
+                    (N'Coordinación de TI'),
+                    (N'Coordinación de Mercadotecnia'),
+                    (N'Coordinación de Innovación'),
+                    (N'Coordinación de Control escolar'),
+                    (N'Diseño'),
+                    (N'Community Manager'),
+                    (N'Audio Visual'),
+                    (N'Asesor 1'),
+                    (N'Asesor 2'),
+                    (N'Asesor 3')
+                ) AS src(area)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM dbo.TicketAreaConfigs WHERE Area = src.area);
+
+                -- Eliminar puestos anteriores que ya no aplican y no tienen tickets asociados
+                DELETE FROM dbo.TicketAreaConfigs
+                WHERE Area IN (N'Administración', N'Comercial', N'TI', N'MKT', N'Programas Académicos')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM dbo.Tickets WHERE Area = dbo.TicketAreaConfigs.Area);
             END
             """;
         await cmd.ExecuteNonQueryAsync(ct);
