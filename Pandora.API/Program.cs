@@ -613,6 +613,56 @@ using (var scope3 = app.Services.CreateScope())
         END
         """;
     await cmd3.ExecuteNonQueryAsync();
+
+    // ── Migración: Status INT → NVARCHAR(50) en InventoryItems ──────────────
+    // La tabla puede existir con Status como INT (versión anterior).
+    // Si es así, convertimos los valores numéricos a etiquetas de texto.
+    await using var cmdMigrate = conn3.CreateCommand();
+    cmdMigrate.CommandText = """
+        IF EXISTS (
+            SELECT 1 FROM sys.columns
+            WHERE object_id = OBJECT_ID('dbo.InventoryItems')
+              AND name = 'Status'
+              AND system_type_id = TYPE_ID('int')
+        )
+        BEGIN
+            -- 1. Columna temporal de texto
+            ALTER TABLE dbo.InventoryItems ADD StatusText NVARCHAR(50) NULL;
+
+            -- 2. Copiar valores convertidos
+            UPDATE dbo.InventoryItems
+            SET StatusText = CASE
+                WHEN TRY_CAST(Status AS INT) = 1 THEN 'Activo'
+                WHEN TRY_CAST(Status AS INT) = 2 THEN 'Mantenimiento'
+                WHEN TRY_CAST(Status AS INT) = 3 THEN 'Dado de baja'
+                WHEN TRY_CAST(Status AS INT) = 4 THEN 'En almacén'
+                ELSE 'Activo'
+            END;
+
+            -- 3. Eliminar constraint DEFAULT de Status si existe
+            DECLARE @cn NVARCHAR(200);
+            SELECT @cn = d.name
+            FROM sys.default_constraints d
+            JOIN sys.columns c
+              ON d.parent_object_id = c.object_id
+             AND d.parent_column_id = c.column_id
+            WHERE c.object_id = OBJECT_ID('dbo.InventoryItems') AND c.name = 'Status';
+            IF @cn IS NOT NULL EXEC('ALTER TABLE dbo.InventoryItems DROP CONSTRAINT ' + @cn);
+
+            -- 4. Eliminar columna INT
+            ALTER TABLE dbo.InventoryItems DROP COLUMN Status;
+
+            -- 5. Agregar columna NVARCHAR con default
+            ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT 'Activo';
+
+            -- 6. Restaurar valores
+            UPDATE dbo.InventoryItems SET Status = StatusText;
+
+            -- 7. Limpiar columna temporal
+            ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
+        END
+        """;
+    await cmdMigrate.ExecuteNonQueryAsync();
 }
 
 await app.RunAsync();
