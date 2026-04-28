@@ -544,6 +544,77 @@ using (var scope2 = app.Services.CreateScope())
     }
 }
 
+// ── Tablas de Inventario (fuera del modelo EF — migración manual) ─────────────
+using (var scope3 = app.Services.CreateScope())
+{
+    var cfg3 = scope3.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var conn3 = new Microsoft.Data.SqlClient.SqlConnection(
+        cfg3.GetConnectionString("PandoraDb"));
+    await conn3.OpenAsync();
+    await using var cmd3 = conn3.CreateCommand();
+    cmd3.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'InventoryTypes' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.InventoryTypes (
+                Id          UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Name        NVARCHAR(200)    NOT NULL,
+                Description NVARCHAR(500)    NULL,
+                Department  NVARCHAR(200)    NULL,
+                IsActive    BIT              NOT NULL DEFAULT 1,
+                CreatedAt   DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt   DATETIME2        NULL
+            );
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'InventoryItems' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.InventoryItems (
+                Id                 UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                InventoryNumber    NVARCHAR(50)     NOT NULL,
+                Name               NVARCHAR(200)    NOT NULL,
+                Brand              NVARCHAR(200)    NULL,
+                Model              NVARCHAR(200)    NULL,
+                SerialNumber       NVARCHAR(200)    NULL,
+                Status             NVARCHAR(50)     NULL DEFAULT 'Activo',
+                Department         NVARCHAR(200)    NULL,
+                AssignedTo         NVARCHAR(200)    NULL,
+                AssignedEmployeeId UNIQUEIDENTIFIER NULL,
+                InventoryTypeId    UNIQUEIDENTIFIER NOT NULL,
+                IsPhone            BIT              NOT NULL DEFAULT 0,
+                IsActive           BIT              NOT NULL DEFAULT 1,
+                PurchaseDate       DATETIME2        NULL,
+                PurchasePrice      DECIMAL(18,2)    NULL,
+                Accessories        NVARCHAR(MAX)    NULL,
+                DecommissionDate   DATETIME2        NULL,
+                DecommissionReason NVARCHAR(MAX)    NULL,
+                CreatedAt          DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt          DATETIME2        NULL,
+                CONSTRAINT FK_InventoryItems_Types FOREIGN KEY (InventoryTypeId)
+                    REFERENCES dbo.InventoryTypes(Id)
+            );
+        END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'EquipmentTransfers' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.EquipmentTransfers (
+                Id              UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                InventoryItemId UNIQUEIDENTIFIER NOT NULL,
+                FromDepartment  NVARCHAR(200)    NULL,
+                FromPerson      NVARCHAR(200)    NULL,
+                ToDepartment    NVARCHAR(200)    NULL,
+                ToPerson        NVARCHAR(200)    NULL,
+                TransferDate    DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                Notes           NVARCHAR(MAX)    NULL,
+                CreatedBy       NVARCHAR(200)    NULL,
+                CreatedAt       DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                CONSTRAINT FK_EquipmentTransfers_Items FOREIGN KEY (InventoryItemId)
+                    REFERENCES dbo.InventoryItems(Id) ON DELETE CASCADE
+            );
+        END
+        """;
+    await cmd3.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
