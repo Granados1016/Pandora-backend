@@ -142,6 +142,14 @@ builder.Services.AddRateLimiter(options =>
         config.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
         config.QueueLimit           = 0;
     });
+    // Tickets: máx 10 creaciones por IP cada 5 minutos (anti-spam)
+    options.AddFixedWindowLimiter("tickets-policy", config =>
+    {
+        config.PermitLimit          = 10;
+        config.Window               = TimeSpan.FromMinutes(5);
+        config.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        config.QueueLimit           = 0;
+    });
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = async (context, token) =>
     {

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
 using System.Net.Mail;
 using System.Net;
@@ -136,6 +137,28 @@ public class TicketsController(
                     Body       NVARCHAR(MAX)    NOT NULL,
                     CreatedAt  DATETIME2        NOT NULL DEFAULT GETUTCDATE()
                 );
+            END
+
+            -- Migración: agregar columna Area a Tickets si no existe
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.Tickets') AND name = 'Area')
+            BEGIN
+                ALTER TABLE dbo.Tickets ADD Area NVARCHAR(100) NULL;
+            END
+
+            -- Configuración de correos por área
+            IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.TicketAreaConfigs') AND type = N'U')
+            BEGIN
+                CREATE TABLE dbo.TicketAreaConfigs (
+                    Id                UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                    Area              NVARCHAR(100)    NOT NULL UNIQUE,
+                    NotificationEmail NVARCHAR(200)    NULL,
+                    UpdatedAt         DATETIME2        NULL
+                );
+                INSERT INTO dbo.TicketAreaConfigs (Area) VALUES
+                    (N'Administración'), (N'Comercial'), (N'TI'),
+                    (N'MKT'), (N'Programas Académicos');
             END
             """;
         await cmd.ExecuteNonQueryAsync(ct);
@@ -331,6 +354,7 @@ public class TicketsController(
     public async Task<IActionResult> GetTickets(
         [FromQuery] string? status   = null,
         [FromQuery] string? priority = null,
+        [FromQuery] string? area     = null,
         [FromQuery] string? search   = null,
         CancellationToken ct = default)
     {
@@ -344,10 +368,11 @@ public class TicketsController(
             if (!IsAdmin)                              where.Add("SubmittedBy = @User");
             if (!string.IsNullOrWhiteSpace(status))   where.Add("Status = @Status");
             if (!string.IsNullOrWhiteSpace(priority)) where.Add("Priority = @Priority");
-            if (!string.IsNullOrWhiteSpace(search))   where.Add("(Title LIKE @Search OR TicketNumber LIKE @Search OR Department LIKE @Search)");
+            if (!string.IsNullOrWhiteSpace(area))     where.Add("(Area = @Area OR Department = @Area)");
+            if (!string.IsNullOrWhiteSpace(search))   where.Add("(Title LIKE @Search OR TicketNumber LIKE @Search OR Department LIKE @Search OR Area LIKE @Search)");
 
             var sql = $"""
-                SELECT Id, TicketNumber, Title, Status, Priority, Department, AssignedTo, SubmittedBy, CreatedAt, UpdatedAt
+                SELECT Id, TicketNumber, Title, Status, Priority, Area, Department, AssignedTo, SubmittedBy, CreatedAt, UpdatedAt
                 FROM dbo.Tickets
                 {(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "")}
                 ORDER BY CreatedAt DESC
@@ -358,6 +383,7 @@ public class TicketsController(
             if (!IsAdmin)                              cmd.Parameters.AddWithValue("@User",     CurrentUser);
             if (!string.IsNullOrWhiteSpace(status))   cmd.Parameters.AddWithValue("@Status",   status);
             if (!string.IsNullOrWhiteSpace(priority)) cmd.Parameters.AddWithValue("@Priority", priority);
+            if (!string.IsNullOrWhiteSpace(area))     cmd.Parameters.AddWithValue("@Area",     area);
             if (!string.IsNullOrWhiteSpace(search))   cmd.Parameters.AddWithValue("@Search",   $"%{search}%");
 
             var list = new List<object>();
@@ -370,6 +396,7 @@ public class TicketsController(
                     title        = r.GetString(r.GetOrdinal("Title")),
                     status       = r.GetString(r.GetOrdinal("Status")),
                     priority     = r.GetString(r.GetOrdinal("Priority")),
+                    area         = Ns(r, "Area"),
                     department   = Ns(r, "Department"),
                     assignedTo   = Ns(r, "AssignedTo"),
                     submittedBy  = r.GetString(r.GetOrdinal("SubmittedBy")),
@@ -486,6 +513,7 @@ public class TicketsController(
     }
 
     [HttpPost]
+    [EnableRateLimiting("tickets-policy")]
     [RequestSizeLimit(55_000_000)]
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> CreateTicket([FromForm] CreateTicketFormDto dto, CancellationToken ct)
@@ -521,10 +549,10 @@ public class TicketsController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.Tickets
-                    (Id, TicketNumber, Title, TemplateId, Status, Priority, Department,
+                    (Id, TicketNumber, Title, TemplateId, Status, Priority, Area, Department,
                      AssignedTo, SubmittedBy, SubmittedByEmail, CreatedAt)
                 VALUES
-                    (@Id, @Num, @Title, @TplId, 'Abierto', @Priority, @Dept,
+                    (@Id, @Num, @Title, @TplId, 'Abierto', @Priority, @Area, @Dept,
                      @Assigned, @User, @Email, GETUTCDATE())
                 """;
             cmd.Parameters.AddWithValue("@Id",       id);
@@ -532,10 +560,11 @@ public class TicketsController(
             cmd.Parameters.AddWithValue("@Title",    dto.Title.Trim());
             cmd.Parameters.AddWithValue("@TplId",    tplId.Value);
             cmd.Parameters.AddWithValue("@Priority", string.IsNullOrWhiteSpace(dto.Priority) ? "Media" : dto.Priority);
-            cmd.Parameters.AddWithValue("@Dept",     string.IsNullOrWhiteSpace(dto.Department)       ? DBNull.Value : dto.Department.Trim());
-            cmd.Parameters.AddWithValue("@Assigned", string.IsNullOrWhiteSpace(dto.AssignedTo)       ? DBNull.Value : dto.AssignedTo.Trim());
+            cmd.Parameters.AddWithValue("@Area",     string.IsNullOrWhiteSpace(dto.Area)           ? DBNull.Value : (object)dto.Area.Trim());
+            cmd.Parameters.AddWithValue("@Dept",     string.IsNullOrWhiteSpace(dto.Department)     ? DBNull.Value : (object)dto.Department.Trim());
+            cmd.Parameters.AddWithValue("@Assigned", string.IsNullOrWhiteSpace(dto.AssignedTo)     ? DBNull.Value : (object)dto.AssignedTo.Trim());
             cmd.Parameters.AddWithValue("@User",     CurrentUser);
-            cmd.Parameters.AddWithValue("@Email",    string.IsNullOrWhiteSpace(dto.SubmittedByEmail) ? DBNull.Value : dto.SubmittedByEmail.Trim());
+            cmd.Parameters.AddWithValue("@Email",    string.IsNullOrWhiteSpace(dto.SubmittedByEmail) ? DBNull.Value : (object)dto.SubmittedByEmail.Trim());
             await cmd.ExecuteNonQueryAsync(ct);
 
             // Field values
@@ -588,7 +617,11 @@ public class TicketsController(
             }
 
             logger.LogInformation("Ticket created: {Num} — {Title} by {User}", ticketNumber, dto.Title, CurrentUser);
-            _ = Task.Run(() => SendCreatedEmailAsync(ticketNumber, dto.Title, dto.Department ?? "—", CurrentUser), CancellationToken.None);
+            // Notificación a correo general del sistema
+            _ = Task.Run(() => SendCreatedEmailAsync(ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", CurrentUser), CancellationToken.None);
+            // Notificación al correo configurado del área
+            if (!string.IsNullOrWhiteSpace(dto.Area))
+                _ = Task.Run(() => SendAreaNotificationAsync(ticketNumber, dto.Title, dto.Area, CurrentUser, dto.SubmittedByEmail), CancellationToken.None);
 
             return Ok(new { id, ticketNumber });
         }
@@ -776,6 +809,101 @@ public class TicketsController(
                                ?? config.GetSection("SmtpSettings")["FromEmail"]
                                ?? "";
 
+    // ════════════════════════════════════════════════════════════════════════════
+    //  AREA CONFIGS — correos de notificación por área
+    // ════════════════════════════════════════════════════════════════════════════
+
+    [HttpGet("area-configs")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> GetAreaConfigs(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureTablesAsync(conn, ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Id, Area, NotificationEmail, UpdatedAt FROM dbo.TicketAreaConfigs ORDER BY Area";
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new
+                {
+                    id                = r.GetGuid(r.GetOrdinal("Id")),
+                    area              = r.GetString(r.GetOrdinal("Area")),
+                    notificationEmail = Ns(r, "NotificationEmail"),
+                    updatedAt         = N(r, "UpdatedAt"),
+                });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetAreaConfigs"); return StatusCode(500, ex.Message); }
+    }
+
+    [HttpPut("area-configs")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> UpdateAreaConfigs([FromBody] List<AreaConfigDto> configs, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureTablesAsync(conn, ct);
+            foreach (var cfg in configs)
+            {
+                if (string.IsNullOrWhiteSpace(cfg.Area)) continue;
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    UPDATE dbo.TicketAreaConfigs
+                    SET NotificationEmail = @Email, UpdatedAt = GETUTCDATE()
+                    WHERE Area = @Area
+                    """;
+                cmd.Parameters.AddWithValue("@Email", string.IsNullOrWhiteSpace(cfg.NotificationEmail)
+                    ? DBNull.Value : (object)cfg.NotificationEmail.Trim());
+                cmd.Parameters.AddWithValue("@Area", cfg.Area);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+            return Ok();
+        }
+        catch (Exception ex) { logger.LogError(ex, "UpdateAreaConfigs"); return StatusCode(500, ex.Message); }
+    }
+
+    private async Task SendAreaNotificationAsync(string ticketNumber, string title, string area, string submittedBy, string? submittedByEmail)
+    {
+        try
+        {
+            string? areaEmail = null;
+            await using var conn2 = Conn();
+            await conn2.OpenAsync();
+            await using var cmd = conn2.CreateCommand();
+            cmd.CommandText = "SELECT NotificationEmail FROM dbo.TicketAreaConfigs WHERE Area = @Area";
+            cmd.Parameters.AddWithValue("@Area", area);
+            areaEmail = (string?)await cmd.ExecuteScalarAsync();
+            if (string.IsNullOrWhiteSpace(areaEmail)) return;
+
+            var (client, msg) = BuildEmail($"[HelpDesk] Nuevo ticket {ticketNumber} — {area}", areaEmail);
+            if (client == null || msg == null) return;
+            msg.Body = $"""
+                <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
+                <div style="max-width:600px;margin:0 auto">
+                  <div style="background:#1a237e;padding:20px;border-radius:8px 8px 0 0">
+                    <h2 style="color:white;margin:0">🎫 Nuevo ticket — Área: {area}</h2>
+                  </div>
+                  <div style="border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px">
+                    <table style="width:100%;border-collapse:collapse">
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555;width:40%">Ticket</td><td style="padding:8px"><strong>{ticketNumber}</strong></td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Título</td><td style="padding:8px">{System.Net.WebUtility.HtmlEncode(title)}</td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Área</td><td style="padding:8px">{area}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Solicitante</td><td style="padding:8px">{submittedBy}{(string.IsNullOrWhiteSpace(submittedByEmail) ? "" : $" &lt;{submittedByEmail}&gt;")}</td></tr>
+                    </table>
+                    <p style="margin-top:16px;font-size:12px;color:#999">Por favor atiende este ticket a la brevedad. — Pandora HelpDesk iMET</p>
+                  </div>
+                </div></body></html>
+                """;
+            await client.SendMailAsync(msg);
+        }
+        catch (Exception ex) { logger.LogWarning("SendAreaNotification failed: {Msg}", ex.Message); }
+    }
+
     private async Task SendCreatedEmailAsync(string ticketNumber, string title, string department, string submittedBy)
     {
         try
@@ -882,12 +1010,15 @@ public class CreateTicketFormDto
 {
     public string           Title             { get; set; } = "";
     public string?          Priority          { get; set; }
+    public string?          Area              { get; set; }
     public string?          Department        { get; set; }
     public string?          AssignedTo        { get; set; }
     public string?          SubmittedByEmail  { get; set; }
     public string?          FieldValuesJson   { get; set; }
     public List<IFormFile>? Files             { get; set; }
 }
+
+public record AreaConfigDto(string Area, string? NotificationEmail);
 
 public record UpdateTicketStatusDto(
     string  Status,
