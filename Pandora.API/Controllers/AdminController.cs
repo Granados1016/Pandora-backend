@@ -21,7 +21,6 @@ public class AdminController(
     /// Si el motor no lo soporta (LocalDB, permisos, etc.) genera un .sql ejecutable.
     /// </summary>
     [HttpGet("backup/download")]
-    [RequestTimeout(300_000)] // 5 min
     public async Task<IActionResult> DownloadBackup(CancellationToken ct)
     {
         var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
