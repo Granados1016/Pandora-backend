@@ -1,0 +1,11 @@
+tools/
+Pandora.Application/bin/
+Pandora.Application/obj/
+Pandora.Domain/bin/
+Pandora.Domain/obj/
+Pandora.Infrastructure/bin/
+Pandora.Infrastructure/obj/
+Pandora.API/bin/
+Pandora.API/obj/
+*.user
+.vs/
