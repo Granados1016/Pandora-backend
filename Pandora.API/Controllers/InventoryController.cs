@@ -165,12 +165,13 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
+            // TRY_CAST cubre tanto Status INT (1,2,3,4) como NVARCHAR ('Activo',...)
             cmd.CommandText = """
                 SELECT
                     COUNT(*) AS Total,
-                    ISNULL(SUM(CASE WHEN Status = 'Activo'        THEN 1 ELSE 0 END), 0) AS Activos,
-                    ISNULL(SUM(CASE WHEN Status = 'Mantenimiento' THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
-                    ISNULL(SUM(CASE WHEN Status = 'Dado de baja'  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')        THEN 1 ELSE 0 END), 0) AS Activos,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento') THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja')  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
                 FROM dbo.InventoryItems
                 """;
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -506,7 +507,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         brand               = r.IsDBNull(r.GetOrdinal("Brand"))               ? null : r.GetString(r.GetOrdinal("Brand")),
         model               = r.IsDBNull(r.GetOrdinal("Model"))               ? null : r.GetString(r.GetOrdinal("Model")),
         serialNumber        = r.IsDBNull(r.GetOrdinal("SerialNumber"))        ? null : r.GetString(r.GetOrdinal("SerialNumber")),
-        status              = r.IsDBNull(r.GetOrdinal("Status"))              ? null : r.GetString(r.GetOrdinal("Status")),
+        // Normaliza INT o NVARCHAR a etiqueta de texto
+        status              = r.IsDBNull(r.GetOrdinal("Status")) ? null
+                            : r.GetValue(r.GetOrdinal("Status")) is int si
+                                ? InventoryHelpers.StatusToString(si)
+                                : r.GetValue(r.GetOrdinal("Status"))?.ToString(),
         department          = r.IsDBNull(r.GetOrdinal("Department"))          ? null : r.GetString(r.GetOrdinal("Department")),
         assignedTo          = r.IsDBNull(r.GetOrdinal("AssignedTo"))          ? null : r.GetString(r.GetOrdinal("AssignedTo")),
         assignedEmployeeId  = r.IsDBNull(r.GetOrdinal("AssignedEmployeeId"))  ? (Guid?)null : r.GetGuid(r.GetOrdinal("AssignedEmployeeId")),

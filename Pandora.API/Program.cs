@@ -615,10 +615,16 @@ using (var scope3 = app.Services.CreateScope())
     await cmd3.ExecuteNonQueryAsync();
 
     // ── Migración: Status INT → NVARCHAR(50) en InventoryItems ──────────────
-    // La tabla puede existir con Status como INT (versión anterior).
-    // Si es así, convertimos los valores numéricos a etiquetas de texto.
+    // Robusta: limpia restos de ejecuciones anteriores fallidas, elimina
+    // constraints e índices antes de DROP COLUMN.
     await using var cmdMigrate = conn3.CreateCommand();
     cmdMigrate.CommandText = """
+        -- Limpiar columna temporal de intentos previos fallidos
+        IF EXISTS (SELECT 1 FROM sys.columns
+                   WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
+            ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
+
+        -- Solo migrar si Status sigue siendo INT
         IF EXISTS (
             SELECT 1 FROM sys.columns
             WHERE object_id = OBJECT_ID('dbo.InventoryItems')
@@ -626,39 +632,46 @@ using (var scope3 = app.Services.CreateScope())
               AND system_type_id = TYPE_ID('int')
         )
         BEGIN
-            -- 1. Columna temporal de texto
+            -- 1. Columna temporal
             ALTER TABLE dbo.InventoryItems ADD StatusText NVARCHAR(50) NULL;
 
-            -- 2. Copiar valores convertidos
-            UPDATE dbo.InventoryItems
-            SET StatusText = CASE
-                WHEN TRY_CAST(Status AS INT) = 1 THEN 'Activo'
-                WHEN TRY_CAST(Status AS INT) = 2 THEN 'Mantenimiento'
-                WHEN TRY_CAST(Status AS INT) = 3 THEN 'Dado de baja'
-                WHEN TRY_CAST(Status AS INT) = 4 THEN 'En almacén'
+            -- 2. Copiar con mapeo directo (Status es INT aquí)
+            UPDATE dbo.InventoryItems SET StatusText = CASE Status
+                WHEN 1 THEN 'Activo'
+                WHEN 2 THEN 'Mantenimiento'
+                WHEN 3 THEN 'Dado de baja'
+                WHEN 4 THEN 'En almacén'
                 ELSE 'Activo'
             END;
 
-            -- 3. Eliminar constraint DEFAULT de Status si existe
-            DECLARE @cn NVARCHAR(200);
-            SELECT @cn = d.name
-            FROM sys.default_constraints d
-            JOIN sys.columns c
-              ON d.parent_object_id = c.object_id
-             AND d.parent_column_id = c.column_id
+            -- 3. Eliminar DEFAULT constraints sobre Status
+            DECLARE @ddl NVARCHAR(MAX) = N'';
+            SELECT @ddl += N'ALTER TABLE dbo.InventoryItems DROP CONSTRAINT [' + dc.name + N'];'
+            FROM sys.default_constraints dc
+            JOIN sys.columns c ON dc.parent_object_id = c.object_id
+                               AND dc.parent_column_id = c.column_id
             WHERE c.object_id = OBJECT_ID('dbo.InventoryItems') AND c.name = 'Status';
-            IF @cn IS NOT NULL EXEC('ALTER TABLE dbo.InventoryItems DROP CONSTRAINT ' + @cn);
 
-            -- 4. Eliminar columna INT
+            -- 4. Eliminar índices no-PK sobre Status
+            SELECT @ddl += N'DROP INDEX [' + i.name + N'] ON dbo.InventoryItems;'
+            FROM sys.indexes i
+            JOIN sys.index_columns ic ON i.object_id = ic.object_id
+                                      AND i.index_id  = ic.index_id
+            JOIN sys.columns c ON ic.object_id = c.object_id
+                               AND ic.column_id = c.column_id
+            WHERE c.object_id = OBJECT_ID('dbo.InventoryItems')
+              AND c.name = 'Status'
+              AND i.is_primary_key = 0
+              AND i.is_unique_constraint = 0;
+
+            IF LEN(@ddl) > 0 EXEC sp_executesql @ddl;
+
+            -- 5. Eliminar columna INT y agregar NVARCHAR
             ALTER TABLE dbo.InventoryItems DROP COLUMN Status;
-
-            -- 5. Agregar columna NVARCHAR con default
             ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT 'Activo';
 
-            -- 6. Restaurar valores
-            UPDATE dbo.InventoryItems SET Status = StatusText;
-
-            -- 7. Limpiar columna temporal
+            -- 6. Restaurar valores y limpiar temporal
+            UPDATE dbo.InventoryItems SET Status = ISNULL(StatusText, 'Activo');
             ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
         END
         """;
