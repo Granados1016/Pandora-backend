@@ -676,51 +676,92 @@ using (var scope3 = app.Services.CreateScope())
     await cmdCols.ExecuteNonQueryAsync();
 
     // ── Migración: Status INT → NVARCHAR(50) en InventoryItems ──────────────
-    // NOTA: el cuerpo usa EXEC sp_executesql para diferir la compilación de
-    // referencias a StatusText — evita "Invalid column name" cuando la columna
-    // ya no existe (migración ejecutada en deployment anterior).
-    await using var cmdMigrate = conn3.CreateCommand();
-    cmdMigrate.CommandText = """
-        -- Limpiar columna temporal de intentos previos fallidos
-        IF EXISTS (SELECT 1 FROM sys.columns
-                   WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
-            ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
+    // Cada paso en su propio ExecuteNonQueryAsync para que SQL Server compile
+    // cada batch de forma independiente (evita "Invalid column name" en tiempo
+    // de compilación para columnas que se agregan en pasos anteriores).
 
-        -- Solo migrar si Status sigue siendo INT
-        IF EXISTS (
-            SELECT 1 FROM sys.columns
-            WHERE object_id = OBJECT_ID('dbo.InventoryItems')
-              AND name = 'Status'
-              AND system_type_id = TYPE_ID('int')
-        )
-        EXEC sp_executesql N'
-            ALTER TABLE dbo.InventoryItems ADD StatusText NVARCHAR(50) NULL;
-            UPDATE dbo.InventoryItems SET StatusText = CASE Status
-                WHEN 1 THEN ''Activo''
-                WHEN 2 THEN ''Mantenimiento''
-                WHEN 3 THEN ''Dado de baja''
-                WHEN 4 THEN ''En almacén''
-                ELSE ''Activo''
-            END;
-            DECLARE @ddl NVARCHAR(MAX) = N'''';
-            SELECT @ddl += N''ALTER TABLE dbo.InventoryItems DROP CONSTRAINT ['' + dc.name + N''];''
-            FROM sys.default_constraints dc
-            JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
-            WHERE c.object_id = OBJECT_ID(''dbo.InventoryItems'') AND c.name = ''Status'';
-            SELECT @ddl += N''DROP INDEX ['' + i.name + N''] ON dbo.InventoryItems;''
-            FROM sys.indexes i
-            JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            WHERE c.object_id = OBJECT_ID(''dbo.InventoryItems'') AND c.name = ''Status''
-              AND i.is_primary_key = 0 AND i.is_unique_constraint = 0;
-            IF LEN(@ddl) > 0 EXEC sp_executesql @ddl;
-            ALTER TABLE dbo.InventoryItems DROP COLUMN Status;
-            ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT ''Activo'';
-            UPDATE dbo.InventoryItems SET Status = ISNULL(StatusText, ''Activo'');
-            ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
-        ';
-        """;
-    await cmdMigrate.ExecuteNonQueryAsync();
+    // Paso 0: Limpiar columna temporal de intentos previos
+    await using (var m0 = conn3.CreateCommand()) {
+        m0.CommandText = """
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
+                ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
+            """;
+        await m0.ExecuteNonQueryAsync();
+    }
+
+    // Paso 1: Agregar columna temporal StatusText (solo si Status es INT)
+    await using (var m1 = conn3.CreateCommand()) {
+        m1.CommandText = """
+            IF EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.InventoryItems')
+                  AND name = 'Status' AND system_type_id = TYPE_ID('int')
+            )
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText'
+                )
+                    ALTER TABLE dbo.InventoryItems ADD StatusText NVARCHAR(50) NULL;
+            END
+            """;
+        await m1.ExecuteNonQueryAsync();
+    }
+
+    // Paso 2: Copiar valores — solo si StatusText existe (batch propio → compila correctamente)
+    await using (var m2 = conn3.CreateCommand()) {
+        m2.CommandText = """
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
+            EXEC sp_executesql N'
+                UPDATE dbo.InventoryItems SET StatusText = CASE Status
+                    WHEN 1 THEN ''Activo''
+                    WHEN 2 THEN ''Mantenimiento''
+                    WHEN 3 THEN ''Dado de baja''
+                    WHEN 4 THEN ''En almacén''
+                    ELSE ''Activo''
+                END;';
+            """;
+        await m2.ExecuteNonQueryAsync();
+    }
+
+    // Paso 3: Eliminar constraints e índices sobre Status (solo si StatusText existe)
+    await using (var m3 = conn3.CreateCommand()) {
+        m3.CommandText = """
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
+            BEGIN
+                DECLARE @ddl NVARCHAR(MAX) = N'';
+                SELECT @ddl += N'ALTER TABLE dbo.InventoryItems DROP CONSTRAINT [' + dc.name + N'];'
+                FROM sys.default_constraints dc
+                JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+                WHERE c.object_id = OBJECT_ID('dbo.InventoryItems') AND c.name = 'Status';
+                SELECT @ddl += N'DROP INDEX [' + i.name + N'] ON dbo.InventoryItems;'
+                FROM sys.indexes i
+                JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                WHERE c.object_id = OBJECT_ID('dbo.InventoryItems') AND c.name = 'Status'
+                  AND i.is_primary_key = 0 AND i.is_unique_constraint = 0;
+                IF LEN(@ddl) > 0 EXEC sp_executesql @ddl;
+                ALTER TABLE dbo.InventoryItems DROP COLUMN Status;
+                ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT 'Activo';
+            END
+            """;
+        await m3.ExecuteNonQueryAsync();
+    }
+
+    // Paso 4: Restaurar valores de Status y eliminar StatusText
+    await using (var m4 = conn3.CreateCommand()) {
+        m4.CommandText = """
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'StatusText')
+            EXEC sp_executesql N'
+                UPDATE dbo.InventoryItems SET Status = ISNULL(StatusText, ''Activo'');
+                ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;';
+            """;
+        await m4.ExecuteNonQueryAsync();
+    }
 }
 
 await app.RunAsync();
