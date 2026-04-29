@@ -81,7 +81,16 @@ string[] allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("PandoraPolicy", p =>
-        p.WithOrigins(allowedOrigins)
+        p.SetIsOriginAllowed(origin =>
+        {
+            if (string.IsNullOrEmpty(origin)) return false;
+            var uri = new Uri(origin);
+            // Permitir cualquier subdominio de vercel.app y railway.app
+            if (uri.Host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)) return true;
+            if (uri.Host.EndsWith(".railway.app", StringComparison.OrdinalIgnoreCase)) return true;
+            // Permitir orígenes explícitos configurados (localhost, etc.)
+            return allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase);
+        })
          .AllowAnyHeader()
          .AllowAnyMethod()
          .AllowCredentials());

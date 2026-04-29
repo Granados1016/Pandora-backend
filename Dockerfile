@@ -2,6 +2,10 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
+# Fuerza rebuild completo sin caché
+ARG BUILDTIME=20260429-cors
+RUN echo "Build: $BUILDTIME"
+
 # Copiar csproj y restaurar NuGet (capa cacheada mientras no cambie el csproj)
 COPY Pandora.API/Pandora.API.csproj ./Pandora.API/
 
