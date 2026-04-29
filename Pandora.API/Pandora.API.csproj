@@ -6,9 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Pandora.API</RootNamespace>
     <AssemblyName>Pandora.API</AssemblyName>
-    <!-- Output fuera de OneDrive para evitar conflictos de sincronizacion con OneDrive -->
-    <OutputPath>C:\PandoraRun</OutputPath>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Output local (solo Windows dev) -->
+    <OutputPath Condition="$([MSBuild]::IsOSPlatform('Windows'))">C:\PandoraRun</OutputPath>
+    <AppendTargetFrameworkToOutputPath Condition="$([MSBuild]::IsOSPlatform('Windows'))">false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
   <!-- Paquetes NuGet -->
@@ -27,19 +27,19 @@
 
   <!-- DLLs pre-compilados (source cloud-only) -->
   <PropertyGroup>
-    <BinDir>$(MSBuildProjectDirectory)\bin\Debug\net8.0</BinDir>
+    <BinDir>$(MSBuildProjectDirectory)/bin/Debug/net8.0</BinDir>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="Pandora.Application">
-      <HintPath>$(BinDir)\Pandora.Application.dll</HintPath>
+      <HintPath>$(BinDir)/Pandora.Application.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="Pandora.Infrastructure">
-      <HintPath>$(BinDir)\Pandora.Infrastructure.dll</HintPath>
+      <HintPath>$(BinDir)/Pandora.Infrastructure.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="Pandora.Domain">
-      <HintPath>$(BinDir)\Pandora.Domain.dll</HintPath>
+      <HintPath>$(BinDir)/Pandora.Domain.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
