@@ -676,8 +676,9 @@ using (var scope3 = app.Services.CreateScope())
     await cmdCols.ExecuteNonQueryAsync();
 
     // ── Migración: Status INT → NVARCHAR(50) en InventoryItems ──────────────
-    // Robusta: limpia restos de ejecuciones anteriores fallidas, elimina
-    // constraints e índices antes de DROP COLUMN.
+    // NOTA: el cuerpo usa EXEC sp_executesql para diferir la compilación de
+    // referencias a StatusText — evita "Invalid column name" cuando la columna
+    // ya no existe (migración ejecutada en deployment anterior).
     await using var cmdMigrate = conn3.CreateCommand();
     cmdMigrate.CommandText = """
         -- Limpiar columna temporal de intentos previos fallidos
@@ -692,49 +693,32 @@ using (var scope3 = app.Services.CreateScope())
               AND name = 'Status'
               AND system_type_id = TYPE_ID('int')
         )
-        BEGIN
-            -- 1. Columna temporal
+        EXEC sp_executesql N'
             ALTER TABLE dbo.InventoryItems ADD StatusText NVARCHAR(50) NULL;
-
-            -- 2. Copiar con mapeo directo (Status es INT aquí)
             UPDATE dbo.InventoryItems SET StatusText = CASE Status
-                WHEN 1 THEN 'Activo'
-                WHEN 2 THEN 'Mantenimiento'
-                WHEN 3 THEN 'Dado de baja'
-                WHEN 4 THEN 'En almacén'
-                ELSE 'Activo'
+                WHEN 1 THEN ''Activo''
+                WHEN 2 THEN ''Mantenimiento''
+                WHEN 3 THEN ''Dado de baja''
+                WHEN 4 THEN ''En almacén''
+                ELSE ''Activo''
             END;
-
-            -- 3. Eliminar DEFAULT constraints sobre Status
-            DECLARE @ddl NVARCHAR(MAX) = N'';
-            SELECT @ddl += N'ALTER TABLE dbo.InventoryItems DROP CONSTRAINT [' + dc.name + N'];'
+            DECLARE @ddl NVARCHAR(MAX) = N'''';
+            SELECT @ddl += N''ALTER TABLE dbo.InventoryItems DROP CONSTRAINT ['' + dc.name + N''];''
             FROM sys.default_constraints dc
-            JOIN sys.columns c ON dc.parent_object_id = c.object_id
-                               AND dc.parent_column_id = c.column_id
-            WHERE c.object_id = OBJECT_ID('dbo.InventoryItems') AND c.name = 'Status';
-
-            -- 4. Eliminar índices no-PK sobre Status
-            SELECT @ddl += N'DROP INDEX [' + i.name + N'] ON dbo.InventoryItems;'
+            JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+            WHERE c.object_id = OBJECT_ID(''dbo.InventoryItems'') AND c.name = ''Status'';
+            SELECT @ddl += N''DROP INDEX ['' + i.name + N''] ON dbo.InventoryItems;''
             FROM sys.indexes i
-            JOIN sys.index_columns ic ON i.object_id = ic.object_id
-                                      AND i.index_id  = ic.index_id
-            JOIN sys.columns c ON ic.object_id = c.object_id
-                               AND ic.column_id = c.column_id
-            WHERE c.object_id = OBJECT_ID('dbo.InventoryItems')
-              AND c.name = 'Status'
-              AND i.is_primary_key = 0
-              AND i.is_unique_constraint = 0;
-
+            JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            WHERE c.object_id = OBJECT_ID(''dbo.InventoryItems'') AND c.name = ''Status''
+              AND i.is_primary_key = 0 AND i.is_unique_constraint = 0;
             IF LEN(@ddl) > 0 EXEC sp_executesql @ddl;
-
-            -- 5. Eliminar columna INT y agregar NVARCHAR
             ALTER TABLE dbo.InventoryItems DROP COLUMN Status;
-            ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT 'Activo';
-
-            -- 6. Restaurar valores y limpiar temporal
-            UPDATE dbo.InventoryItems SET Status = ISNULL(StatusText, 'Activo');
+            ALTER TABLE dbo.InventoryItems ADD Status NVARCHAR(50) NULL DEFAULT ''Activo'';
+            UPDATE dbo.InventoryItems SET Status = ISNULL(StatusText, ''Activo'');
             ALTER TABLE dbo.InventoryItems DROP COLUMN StatusText;
-        END
+        ';
         """;
     await cmdMigrate.ExecuteNonQueryAsync();
 }
