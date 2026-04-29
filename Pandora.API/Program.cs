@@ -611,8 +611,60 @@ using (var scope3 = app.Services.CreateScope())
                     REFERENCES dbo.InventoryItems(Id) ON DELETE CASCADE
             );
         END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'Employees' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Employees (
+                Id           UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                FullName     NVARCHAR(200)    NOT NULL,
+                Email        NVARCHAR(200)    NULL,
+                Phone        NVARCHAR(50)     NULL,
+                Position     NVARCHAR(200)    NULL,
+                DepartmentId UNIQUEIDENTIFIER NULL,
+                IsActive     BIT              NOT NULL DEFAULT 1,
+                CreatedAt    DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt    DATETIME2        NULL
+            );
+        END
         """;
     await cmd3.ExecuteNonQueryAsync();
+
+    // ── Columnas añadidas después del esquema inicial (ALTER idempotente) ─────
+    await using var cmdCols = conn3.CreateCommand();
+    cmdCols.CommandText = """
+        -- InventoryItems: columnas que pueden faltar en instancias anteriores
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'AssignedEmployeeId')
+            ALTER TABLE dbo.InventoryItems ADD AssignedEmployeeId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'IsPhone')
+            ALTER TABLE dbo.InventoryItems ADD IsPhone BIT NOT NULL DEFAULT 0;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'PurchaseDate')
+            ALTER TABLE dbo.InventoryItems ADD PurchaseDate DATETIME2 NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'PurchasePrice')
+            ALTER TABLE dbo.InventoryItems ADD PurchasePrice DECIMAL(18,2) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'Accessories')
+            ALTER TABLE dbo.InventoryItems ADD Accessories NVARCHAR(MAX) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'DecommissionDate')
+            ALTER TABLE dbo.InventoryItems ADD DecommissionDate DATETIME2 NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'DecommissionReason')
+            ALTER TABLE dbo.InventoryItems ADD DecommissionReason NVARCHAR(MAX) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'IsActive')
+            ALTER TABLE dbo.InventoryItems ADD IsActive BIT NOT NULL DEFAULT 1;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryItems') AND name = 'UpdatedAt')
+            ALTER TABLE dbo.InventoryItems ADD UpdatedAt DATETIME2 NULL;
+
+        -- InventoryTypes: columna UpdatedAt
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.InventoryTypes') AND name = 'UpdatedAt')
+            ALTER TABLE dbo.InventoryTypes ADD UpdatedAt DATETIME2 NULL;
+        """;
+    await cmdCols.ExecuteNonQueryAsync();
 
     // ── Migración: Status INT → NVARCHAR(50) en InventoryItems ──────────────
     // Robusta: limpia restos de ejecuciones anteriores fallidas, elimina
