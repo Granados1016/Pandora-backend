@@ -303,7 +303,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
+            cmd.Parameters.AddWithValue("@Status",     InventoryHelpers.StatusToString(dto.Status));
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -343,7 +343,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Brand",      (object?)dto.Brand          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Model",      (object?)dto.Model          ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Serial",     (object?)dto.SerialNumber   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Status",     dto.Status ?? "Activo");
+            cmd.Parameters.AddWithValue("@Status",     InventoryHelpers.StatusToString(dto.Status));
             cmd.Parameters.AddWithValue("@Dept",       (object?)dto.Department     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AssignedTo", (object?)dto.AssignedTo     ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmpId",      (object?)dto.AssignedEmployeeId ?? DBNull.Value);
@@ -521,6 +521,19 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
     };
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+static class InventoryHelpers
+{
+    public static string StatusToString(int? code) => code switch
+    {
+        1 => "Activo",
+        2 => "Mantenimiento",
+        3 => "Dado de baja",
+        4 => "En almacén",
+        _ => "Activo"
+    };
+}
+
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 public record InventoryTypeDto(string Name, string? Description, string? Department, bool IsActive);
 
@@ -530,7 +543,7 @@ public record InventoryItemDto(
     string?  Brand,
     string?  Model,
     string?  SerialNumber,
-    string?  Status,
+    int?     Status,           // 1=Activo 2=Mantenimiento 3=Dado de baja 4=En almacén
     string?  Department,
     string?  AssignedTo,
     Guid?    AssignedEmployeeId,
