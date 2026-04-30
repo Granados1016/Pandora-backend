@@ -34,6 +34,18 @@ public class TicketsController(
         User.IsInRole("Admin") ||
         User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin");
 
+    // Bit 2048 = HD_GLOBAL: puede ver todos los tickets, no solo los propios
+    private const int HD_GLOBAL_BIT = 2048;
+    private bool CanSeeAllTickets
+    {
+        get
+        {
+            if (IsAdmin) return true;
+            var claim = User.Claims.FirstOrDefault(c => c.Type == "modules")?.Value;
+            return int.TryParse(claim, out int m) && (m & HD_GLOBAL_BIT) != 0;
+        }
+    }
+
     private static string? Ns(SqlDataReader r, string col) =>
         r.IsDBNull(r.GetOrdinal(col)) ? null : r.GetString(r.GetOrdinal(col));
 
@@ -409,7 +421,7 @@ public class TicketsController(
             await EnsureTablesAsync(conn, ct);
 
             var where = new List<string>();
-            if (!IsAdmin)                              where.Add("SubmittedBy = @User");
+            if (!CanSeeAllTickets)                     where.Add("SubmittedBy = @User");
             if (!string.IsNullOrWhiteSpace(status))   where.Add("Status = @Status");
             if (!string.IsNullOrWhiteSpace(priority)) where.Add("Priority = @Priority");
             if (!string.IsNullOrWhiteSpace(area))     where.Add("(Area = @Area OR Department = @Area)");
@@ -424,7 +436,7 @@ public class TicketsController(
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = sql;
-            if (!IsAdmin)                              cmd.Parameters.AddWithValue("@User",     CurrentUser);
+            if (!CanSeeAllTickets)                     cmd.Parameters.AddWithValue("@User",     CurrentUser);
             if (!string.IsNullOrWhiteSpace(status))   cmd.Parameters.AddWithValue("@Status",   status);
             if (!string.IsNullOrWhiteSpace(priority)) cmd.Parameters.AddWithValue("@Priority", priority);
             if (!string.IsNullOrWhiteSpace(area))     cmd.Parameters.AddWithValue("@Area",     area);
