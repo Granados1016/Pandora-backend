@@ -31,18 +31,19 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     // Serialize user row from reader
     private static object ReadUser(SqlDataReader r) => new
     {
-        id             = r.GetGuid(r.GetOrdinal("Id")),
-        username       = r.GetString(r.GetOrdinal("Username")),
-        fullName       = r.IsDBNull(r.GetOrdinal("FullName"))   ? null : r.GetString(r.GetOrdinal("FullName")),
-        email          = r.IsDBNull(r.GetOrdinal("Email"))      ? null : r.GetString(r.GetOrdinal("Email")),
-        role           = r.IsDBNull(r.GetOrdinal("Role"))       ? "User" : r.GetString(r.GetOrdinal("Role")),
-        modules        = r.GetInt32(r.GetOrdinal("Modules")),
-        isActive       = r.GetBoolean(r.GetOrdinal("IsActive")),
-        position       = r.IsDBNull(r.GetOrdinal("Position"))        ? null : r.GetString(r.GetOrdinal("Position")),
-        smtpEmail      = r.IsDBNull(r.GetOrdinal("SmtpEmail"))        ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
-        profilePhotoUrl= r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl"))  ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
-        bannerPhotoUrl = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))   ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
-        createdAt      = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+        id               = r.GetGuid(r.GetOrdinal("Id")),
+        username         = r.GetString(r.GetOrdinal("Username")),
+        fullName         = r.IsDBNull(r.GetOrdinal("FullName"))        ? null : r.GetString(r.GetOrdinal("FullName")),
+        email            = r.IsDBNull(r.GetOrdinal("Email"))           ? null : r.GetString(r.GetOrdinal("Email")),
+        role             = r.IsDBNull(r.GetOrdinal("Role"))            ? "User" : r.GetString(r.GetOrdinal("Role")),
+        modules          = r.GetInt32(r.GetOrdinal("Modules")),
+        modulesViewOnly  = r.IsDBNull(r.GetOrdinal("ModulesViewOnly")) ? 0 : r.GetInt32(r.GetOrdinal("ModulesViewOnly")),
+        isActive         = r.GetBoolean(r.GetOrdinal("IsActive")),
+        position         = r.IsDBNull(r.GetOrdinal("Position"))        ? null : r.GetString(r.GetOrdinal("Position")),
+        smtpEmail        = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
+        profilePhotoUrl  = r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl")) ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
+        bannerPhotoUrl   = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))  ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
+        createdAt        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
     };
 
     // ── GET /api/users  (Admin) ───────────────────────────────────────────────
@@ -56,7 +57,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, Username, FullName, Email, Role, Modules, IsActive,
+                SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
                        Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
                 FROM dbo.AppUsers
                 ORDER BY CreatedAt DESC
@@ -81,7 +82,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, Username, FullName, Email, Role, Modules, IsActive,
+                SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
                        Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
                 FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User)
                 """;
@@ -110,21 +111,22 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.AppUsers
-                    (Id, Username, FullName, Email, PasswordHash, Role, Modules,
+                    (Id, Username, FullName, Email, PasswordHash, Role, Modules, ModulesViewOnly,
                      IsActive, Position, CreatedAt)
                 VALUES
-                    (@Id, @Username, @FullName, @Email, @Hash, @Role, @Modules,
+                    (@Id, @Username, @FullName, @Email, @Hash, @Role, @Modules, @ModulesViewOnly,
                      @IsActive, @Position, GETUTCDATE())
                 """;
-            cmd.Parameters.AddWithValue("@Id",       id);
-            cmd.Parameters.AddWithValue("@Username", dto.Username.Trim().ToLower());
-            cmd.Parameters.AddWithValue("@FullName", (object?)dto.FullName   ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Email",    (object?)dto.Email       ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Hash",     hash);
-            cmd.Parameters.AddWithValue("@Role",     dto.Role ?? "User");
-            cmd.Parameters.AddWithValue("@Modules",  dto.Modules);
-            cmd.Parameters.AddWithValue("@IsActive", dto.IsActive);
-            cmd.Parameters.AddWithValue("@Position", (object?)dto.Position ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Id",              id);
+            cmd.Parameters.AddWithValue("@Username",        dto.Username.Trim().ToLower());
+            cmd.Parameters.AddWithValue("@FullName",        (object?)dto.FullName   ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Email",           (object?)dto.Email       ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Hash",            hash);
+            cmd.Parameters.AddWithValue("@Role",            dto.Role ?? "User");
+            cmd.Parameters.AddWithValue("@Modules",         dto.Modules);
+            cmd.Parameters.AddWithValue("@ModulesViewOnly", dto.ModulesViewOnly);
+            cmd.Parameters.AddWithValue("@IsActive",        dto.IsActive);
+            cmd.Parameters.AddWithValue("@Position",        (object?)dto.Position ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
             return Ok(new { id });
         }
@@ -149,20 +151,22 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             // Construir SET dinámico para contraseña opcional
             var setParts = new List<string>
             {
-                "FullName   = @FullName",
-                "Email      = @Email",
-                "Role       = @Role",
-                "Modules    = @Modules",
-                "IsActive   = @IsActive",
-                "Position   = @Position",
-                "UpdatedAt  = GETUTCDATE()"
+                "FullName        = @FullName",
+                "Email           = @Email",
+                "Role            = @Role",
+                "Modules         = @Modules",
+                "ModulesViewOnly = @ModulesViewOnly",
+                "IsActive        = @IsActive",
+                "Position        = @Position",
+                "UpdatedAt       = GETUTCDATE()"
             };
-            cmd.Parameters.AddWithValue("@FullName",  (object?)dto.FullName  ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Email",     (object?)dto.Email      ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Role",      dto.Role ?? "User");
-            cmd.Parameters.AddWithValue("@Modules",   dto.Modules);
-            cmd.Parameters.AddWithValue("@IsActive",  dto.IsActive);
-            cmd.Parameters.AddWithValue("@Position",  (object?)dto.Position ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@FullName",        (object?)dto.FullName  ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Email",           (object?)dto.Email      ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Role",            dto.Role ?? "User");
+            cmd.Parameters.AddWithValue("@Modules",         dto.Modules);
+            cmd.Parameters.AddWithValue("@ModulesViewOnly", dto.ModulesViewOnly);
+            cmd.Parameters.AddWithValue("@IsActive",        dto.IsActive);
+            cmd.Parameters.AddWithValue("@Position",        (object?)dto.Position ?? DBNull.Value);
 
             if (!string.IsNullOrWhiteSpace(dto.Password))
             {
@@ -369,6 +373,7 @@ public record UserCreateDto(
     string  Password,
     string? Role,
     int     Modules,
+    int     ModulesViewOnly,
     bool    IsActive,
     string? Position
 );
@@ -379,6 +384,7 @@ public record UserUpdateDto(
     string? Password,
     string? Role,
     int     Modules,
+    int     ModulesViewOnly,
     bool    IsActive,
     string? Position
 );

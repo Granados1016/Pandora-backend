@@ -483,6 +483,22 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+// ── Columnas AppUsers añadidas después del modelo EF inicial ─────────────────
+using (var scopeU = app.Services.CreateScope())
+{
+    var cfgU = scopeU.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connU = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgU.GetConnectionString("PandoraDb"));
+    await connU.OpenAsync();
+    await using var cmdU = connU.CreateCommand();
+    cmdU.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ModulesViewOnly')
+            ALTER TABLE dbo.AppUsers ADD ModulesViewOnly INT NOT NULL DEFAULT 0;
+        """;
+    await cmdU.ExecuteNonQueryAsync();
+}
+
 // ── Tabla Licencias (fuera del modelo EF — migración manual) ─────────────────
 using (var scope2 = app.Services.CreateScope())
 {
