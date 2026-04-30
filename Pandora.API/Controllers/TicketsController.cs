@@ -678,6 +678,9 @@ public class TicketsController(
             // Notificación al correo configurado del área
             if (!string.IsNullOrWhiteSpace(dto.Area))
                 _ = Task.Run(() => SendAreaNotificationAsync(ticketNumber, dto.Title, dto.Area, CurrentUser, dto.SubmittedByEmail), CancellationToken.None);
+            // Confirmación al solicitante
+            if (!string.IsNullOrWhiteSpace(dto.SubmittedByEmail))
+                _ = Task.Run(() => SendSubmitterConfirmationAsync(dto.SubmittedByEmail!, ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", id), CancellationToken.None);
 
             return Ok(new { id, ticketNumber });
         }
@@ -865,6 +868,10 @@ public class TicketsController(
                                ?? config.GetSection("SmtpSettings")["FromEmail"]
                                ?? "";
 
+    private string FrontendUrl => config.GetSection("SmtpSettings")["FrontendUrl"]
+                                ?? config["FrontendUrl"]
+                                ?? "https://pandora-frontend-web-production.up.railway.app";
+
     // ════════════════════════════════════════════════════════════════════════════
     //  AREA CONFIGS — correos de notificación por área
     // ════════════════════════════════════════════════════════════════════════════
@@ -1044,6 +1051,99 @@ public class TicketsController(
         catch (Exception ex) { logger.LogWarning("SendAreaNotification failed: {Msg}", ex.Message); }
     }
 
+    private async Task SendSubmitterConfirmationAsync(string toEmail, string ticketNumber, string title, string area, Guid ticketId)
+    {
+        try
+        {
+            var (client, msg) = BuildEmail($"✅ Tu ticket {ticketNumber} fue registrado — Pandora HelpDesk", toEmail);
+            if (client == null || msg == null) return;
+            var ticketUrl = $"{FrontendUrl}/tickets/{ticketId}";
+            msg.Body = $"""
+                <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:0">
+                <div style="max-width:600px;margin:32px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+
+                  <!-- Header -->
+                  <div style="background:linear-gradient(135deg,#1a237e 0%,#283593 100%);padding:28px 32px">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td>
+                          <div style="font-size:22px;font-weight:800;color:white;letter-spacing:2px">PANDORA</div>
+                          <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:2px">Sistema de Gestión iMET</div>
+                        </td>
+                        <td align="right">
+                          <span style="background:rgba(255,255,255,0.15);color:white;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600">HelpDesk</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </div>
+
+                  <!-- Body -->
+                  <div style="padding:32px;background:#ffffff">
+                    <h2 style="margin:0 0 8px;color:#1a237e;font-size:20px">¡Tu solicitud fue registrada! 🎫</h2>
+                    <p style="margin:0 0 24px;color:#555;font-size:14px;line-height:1.6">
+                      Hemos recibido tu ticket de soporte. Nuestro equipo de TI lo revisará a la brevedad.
+                      Te notificaremos a este correo cuando haya actualizaciones.
+                    </p>
+
+                    <!-- Ticket card -->
+                    <div style="background:#f8f9ff;border:1px solid #e3e8ff;border-radius:8px;padding:20px;margin-bottom:24px">
+                      <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td style="padding-bottom:12px">
+                            <span style="font-size:11px;font-weight:700;color:#8c9eff;text-transform:uppercase;letter-spacing:1px">Número de ticket</span><br>
+                            <span style="font-size:22px;font-weight:800;color:#1a237e;font-family:monospace">{ticketNumber}</span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td style="border-top:1px solid #e3e8ff;padding-top:12px;padding-bottom:8px">
+                            <span style="font-size:11px;color:#888">Título</span><br>
+                            <span style="font-size:14px;font-weight:600;color:#222">{System.Net.WebUtility.HtmlEncode(title)}</span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td style="padding-top:8px">
+                            <span style="font-size:11px;color:#888">Área / Puesto</span><br>
+                            <span style="font-size:14px;color:#444">{System.Net.WebUtility.HtmlEncode(area)}</span>
+                          </td>
+                        </tr>
+                      </table>
+                    </div>
+
+                    <!-- Status indicator -->
+                    <div style="background:#e3f2fd;border-radius:8px;padding:12px 16px;margin-bottom:24px;display:flex;align-items:center">
+                      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#1565c0;margin-right:8px"></span>
+                      <span style="color:#1565c0;font-weight:600;font-size:13px">Estatus actual: Abierto</span>
+                    </div>
+
+                    <!-- CTA -->
+                    <div style="text-align:center;margin-bottom:24px">
+                      <a href="{ticketUrl}"
+                        style="display:inline-block;background:#1a237e;color:white;padding:13px 32px;border-radius:8px;
+                               text-decoration:none;font-weight:700;font-size:14px;letter-spacing:0.3px">
+                        Ver mi ticket →
+                      </a>
+                    </div>
+
+                    <p style="font-size:12px;color:#999;text-align:center;margin:0;line-height:1.6">
+                      Si tienes dudas, responde a este correo o contacta directamente al área de TI.<br>
+                      <strong>Pandora HelpDesk — iMET</strong>
+                    </p>
+                  </div>
+
+                  <!-- Footer -->
+                  <div style="background:#f5f5f5;padding:14px 32px;text-align:center">
+                    <span style="font-size:11px;color:#aaa">Este es un mensaje automático. Por favor no respondas directamente a este correo.</span>
+                  </div>
+
+                </div>
+                </body></html>
+                """;
+            await client.SendMailAsync(msg);
+            logger.LogInformation("Confirmation email sent to {Email} for ticket {Num}", toEmail, ticketNumber);
+        }
+        catch (Exception ex) { logger.LogWarning("SendSubmitterConfirmation failed: {Msg}", ex.Message); }
+    }
+
     private async Task SendCreatedEmailAsync(string ticketNumber, string title, string department, string submittedBy)
     {
         try
@@ -1064,7 +1164,7 @@ public class TicketsController(
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Solicitante</td><td style="padding:8px">{submittedBy}</td></tr>
                     </table>
                     <div style="margin-top:20px;text-align:center">
-                      <a href="http://localhost:3000/tickets" style="background:#1a237e;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Ver tickets →</a>
+                      <a href="{FrontendUrl}/tickets" style="background:#1a237e;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Ver tickets →</a>
                     </div>
                     <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora — Sistema de Gestión iMET</p>
                   </div>
