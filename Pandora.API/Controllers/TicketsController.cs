@@ -35,7 +35,10 @@ public class TicketsController(
         User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin");
 
     // Bit 2048 = HD_GLOBAL: puede ver todos los tickets, no solo los propios
-    private const int HD_GLOBAL_BIT = 2048;
+    private const int HD_GLOBAL_BIT  = 2048;
+    // Bit 8192 = HD_REQUEST: puede solicitar/crear nuevos tickets
+    private const int HD_REQUEST_BIT = 8192;
+
     private bool CanSeeAllTickets
     {
         get
@@ -43,6 +46,17 @@ public class TicketsController(
             if (IsAdmin) return true;
             var claim = User.Claims.FirstOrDefault(c => c.Type == "modules")?.Value;
             return int.TryParse(claim, out int m) && (m & HD_GLOBAL_BIT) != 0;
+        }
+    }
+
+    private bool CanCreateTicket
+    {
+        get
+        {
+            if (IsAdmin) return true;
+            var claim = User.Claims.FirstOrDefault(c => c.Type == "modules")?.Value;
+            if (!int.TryParse(claim, out int m)) return false;
+            return (m & HD_REQUEST_BIT) != 0 || (m & HD_GLOBAL_BIT) != 0;
         }
     }
 
@@ -574,6 +588,7 @@ public class TicketsController(
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> CreateTicket([FromForm] CreateTicketFormDto dto, CancellationToken ct)
     {
+        if (!CanCreateTicket) return Forbid();
         if (string.IsNullOrWhiteSpace(dto.Title)) return BadRequest("Título requerido.");
 
         var files = dto.Files ?? [];

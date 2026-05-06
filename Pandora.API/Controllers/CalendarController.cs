@@ -25,6 +25,25 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         User.FindFirstValue("name") ??
         User.Claims.FirstOrDefault(c => c.Type.EndsWith("name", StringComparison.OrdinalIgnoreCase))?.Value;
 
+    private bool IsAdmin =>
+        User.IsInRole("Admin") ||
+        User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin");
+
+    // Bit 128 = CALENDARIO_ADMIN, Bit 16384 = CAL_REQUEST: puede solicitar salas
+    private const int CALENDARIO_ADMIN_BIT = 128;
+    private const int CAL_REQUEST_BIT      = 16384;
+
+    private bool CanRequestRoom
+    {
+        get
+        {
+            if (IsAdmin) return true;
+            var claim = User.Claims.FirstOrDefault(c => c.Type == "modules")?.Value;
+            if (!int.TryParse(claim, out int m)) return false;
+            return (m & CALENDARIO_ADMIN_BIT) != 0 || (m & CAL_REQUEST_BIT) != 0;
+        }
+    }
+
     private async Task EnsureAttendeesColumnAsync(SqlConnection conn, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
@@ -254,6 +273,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     [HttpPost("reservations")]
     public async Task<IActionResult> CreateReservation([FromBody] ReservationDto dto, CancellationToken ct)
     {
+        if (!CanRequestRoom) return Forbid();
         if (string.IsNullOrWhiteSpace(dto.Title))  return BadRequest("Título requerido.");
         if (dto.RoomId == Guid.Empty)              return BadRequest("Sala requerida.");
         if (dto.StartTime >= dto.EndTime)          return BadRequest("La hora de inicio debe ser antes del fin.");
@@ -333,6 +353,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     [HttpPut("reservations/{id:guid}")]
     public async Task<IActionResult> UpdateReservation(Guid id, [FromBody] ReservationDto dto, CancellationToken ct)
     {
+        if (!CanRequestRoom) return Forbid();
         if (string.IsNullOrWhiteSpace(dto.Title)) return BadRequest("Título requerido.");
         if (dto.StartTime >= dto.EndTime)          return BadRequest("La hora de inicio debe ser antes del fin.");
         try
