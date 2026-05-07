@@ -302,23 +302,25 @@ public class IndicadoresController(
         ws.Columns(1, 3).AdjustToContents();
 
         // ── Hoja 2: Campañas por mes ─────────────────────────────────────────
-        if (mail?.TryGetProperty("monthlySent", out var ms2) == true && ms2.ValueKind == System.Text.Json.JsonValueKind.Array)
+        if (mail.HasValue && mail.Value.TryGetProperty("monthlySent", out var ms2)
+            && ms2.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             var wsM = wb.AddWorksheet("Campañas por mes");
-            wsM.Cell(1, 1).Value = "Mes";   StyleHeader(wsM.Cell(1, 1));
+            wsM.Cell(1, 1).Value = "Mes";      StyleHeader(wsM.Cell(1, 1));
             wsM.Cell(1, 2).Value = "Enviadas"; StyleHeader(wsM.Cell(1, 2));
             int r = 2;
             foreach (var item in ms2.EnumerateArray())
             {
-                wsM.Cell(r, 1).Value = item.TryGetProperty("month", out var m) ? m.GetString() : "";
-                wsM.Cell(r, 2).Value = item.TryGetProperty("count", out var c) ? c.GetInt32() : 0;
+                wsM.Cell(r, 1).Value = item.TryGetProperty("month", out var m)  ? m.GetString() : "";
+                wsM.Cell(r, 2).Value = item.TryGetProperty("count", out var c)  ? c.GetInt32()  : 0;
                 r++;
             }
             wsM.Columns(1, 2).AdjustToContents();
         }
 
         // ── Hoja 3: Inventario por categoría ────────────────────────────────
-        if (inv?.TryGetProperty("byType", out var byType) == true && byType.ValueKind == System.Text.Json.JsonValueKind.Array)
+        if (inv.HasValue && inv.Value.TryGetProperty("byType", out var byType)
+            && byType.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             var wsI = wb.AddWorksheet("Inventario por categoría");
             wsI.Cell(1, 1).Value = "Categoría"; StyleHeader(wsI.Cell(1, 1));
@@ -327,14 +329,15 @@ public class IndicadoresController(
             foreach (var item in byType.EnumerateArray())
             {
                 wsI.Cell(r, 1).Value = item.TryGetProperty("typeName", out var tn) ? tn.GetString() : "";
-                wsI.Cell(r, 2).Value = item.TryGetProperty("count",    out var c2) ? c2.GetInt32() : 0;
+                wsI.Cell(r, 2).Value = item.TryGetProperty("count",    out var c2) ? c2.GetInt32()  : 0;
                 r++;
             }
             wsI.Columns(1, 2).AdjustToContents();
         }
 
         // ── Hoja 4: Tickets por estado ───────────────────────────────────────
-        if (tickets?.TryGetProperty("byStatus", out var byStatus) == true && byStatus.ValueKind == System.Text.Json.JsonValueKind.Array)
+        if (tickets.HasValue && tickets.Value.TryGetProperty("byStatus", out var byStatus)
+            && byStatus.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             var wsT = wb.AddWorksheet("Tickets por estado");
             wsT.Cell(1, 1).Value = "Estado";   StyleHeader(wsT.Cell(1, 1));
@@ -342,7 +345,7 @@ public class IndicadoresController(
             int r = 2;
             foreach (var item in byStatus.EnumerateArray())
             {
-                wsT.Cell(r, 1).Value = item.TryGetProperty("status", out var s) ? s.GetString() : "";
+                wsT.Cell(r, 1).Value = item.TryGetProperty("status", out var s)  ? s.GetString() : "";
                 wsT.Cell(r, 2).Value = item.TryGetProperty("count",  out var c3) ? c3.GetInt32() : 0;
                 r++;
             }
@@ -350,7 +353,8 @@ public class IndicadoresController(
         }
 
         // ── Hoja 5: Licencias por estado ─────────────────────────────────────
-        if (lic?.TryGetProperty("byEstado", out var byEstado) == true && byEstado.ValueKind == System.Text.Json.JsonValueKind.Array)
+        if (lic.HasValue && lic.Value.TryGetProperty("byEstado", out var byEstado)
+            && byEstado.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             var wsL = wb.AddWorksheet("Licencias por estado");
             wsL.Cell(1, 1).Value = "Estado";   StyleHeader(wsL.Cell(1, 1));
@@ -358,7 +362,7 @@ public class IndicadoresController(
             int r = 2;
             foreach (var item in byEstado.EnumerateArray())
             {
-                wsL.Cell(r, 1).Value = item.TryGetProperty("estado", out var e) ? e.GetString() : "";
+                wsL.Cell(r, 1).Value = item.TryGetProperty("estado", out var e)  ? e.GetString() : "";
                 wsL.Cell(r, 2).Value = item.TryGetProperty("count",  out var c4) ? c4.GetInt32() : 0;
                 r++;
             }
