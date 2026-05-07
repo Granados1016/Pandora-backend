@@ -66,6 +66,10 @@ public class ProcedimientosController(
         var id = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
         logger.LogInformation("Procedimiento #{Id} '{Title}' subido por {User} ({Size} KB)",
             id, title, CurrentUser(), bytes.Length / 1024);
+        _ = AuditHelper.Log(config.GetConnectionString("PandoraDb")!,
+            CurrentUser() ?? "?", "Upload", "Procedimientos", id.ToString(),
+            $"Archivo: {file.FileName} ({bytes.Length / 1024} KB)",
+            HttpContext.Connection.RemoteIpAddress?.ToString());
         return Ok(new { id });
     }
 
@@ -186,6 +190,9 @@ public class ProcedimientosController(
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) return NotFound();
         logger.LogInformation("Procedimiento #{Id} eliminado por {User}", id, CurrentUser());
+        _ = AuditHelper.Log(config.GetConnectionString("PandoraDb")!,
+            CurrentUser() ?? "?", "Delete", "Procedimientos", id.ToString(),
+            null, HttpContext.Connection.RemoteIpAddress?.ToString());
         return NoContent();
     }
 

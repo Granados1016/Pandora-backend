@@ -120,6 +120,7 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
                 var path = context.HttpContext.Request.Path;
                 if (path.StartsWithSegments("/hubs") ||
                     path.StartsWithSegments("/api/inventory/excel") ||
+                    path.StartsWithSegments("/api/procedimientos") ||
                     (path.Value?.Contains("/visualizar") == true))
                 {
                     context.Token = accessToken;
@@ -210,6 +211,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 app.MapHub<ProgressHub>("/hubs/progress");
+app.MapHub<NotificationsHub>("/hubs/notifications");
 app.MapFallbackToFile("index.html");
 
 // ── Migraciones + Seed ────────────────────────────────────────────────────
@@ -879,6 +881,67 @@ using (var scopeProc = app.Services.CreateScope())
         END
         """;
     await cmdProc.ExecuteNonQueryAsync();
+}
+
+// ── Tablas: Notificaciones, Comunicados, AuditLogs ───────────────────────────
+using (var scopeExtra = app.Services.CreateScope())
+{
+    var cfgX = scopeExtra.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connX = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgX.GetConnectionString("PandoraDb"));
+    await connX.OpenAsync();
+    await using var cmdX = connX.CreateCommand();
+    cmdX.CommandText = """
+        -- Notificaciones
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Notifications' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Notifications (
+                Id          INT           IDENTITY(1,1) PRIMARY KEY,
+                Title       NVARCHAR(200) NOT NULL,
+                Message     NVARCHAR(1000) NOT NULL,
+                Type        NVARCHAR(20)  NOT NULL DEFAULT 'info',
+                IsRead      BIT           NOT NULL DEFAULT 0,
+                TargetUser  NVARCHAR(100) NULL,
+                CreatedBy   NVARCHAR(100) NOT NULL DEFAULT 'system',
+                IsDeleted   BIT           NOT NULL DEFAULT 0,
+                CreatedAt   DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+
+        -- Comunicados
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Comunicados' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Comunicados (
+                Id          INT           IDENTITY(1,1) PRIMARY KEY,
+                Title       NVARCHAR(200) NOT NULL,
+                Content     NVARCHAR(MAX) NOT NULL,
+                Priority    NVARCHAR(20)  NOT NULL DEFAULT 'normal',
+                Author      NVARCHAR(100) NOT NULL,
+                IsPublished BIT           NOT NULL DEFAULT 1,
+                ExpiresAt   DATETIME2     NULL,
+                CreatedAt   DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+                IsDeleted   BIT           NOT NULL DEFAULT 0
+            );
+        END
+
+        -- Log de auditoría
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AuditLogs' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.AuditLogs (
+                Id         INT           IDENTITY(1,1) PRIMARY KEY,
+                UserName   NVARCHAR(100) NOT NULL,
+                Action     NVARCHAR(50)  NOT NULL,
+                Module     NVARCHAR(50)  NOT NULL,
+                EntityId   NVARCHAR(50)  NULL,
+                Details    NVARCHAR(MAX) NULL,
+                IpAddress  NVARCHAR(50)  NULL,
+                CreatedAt  DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_AuditLogs_CreatedAt ON dbo.AuditLogs (CreatedAt DESC);
+            CREATE INDEX IX_AuditLogs_Module    ON dbo.AuditLogs (Module);
+        END
+        """;
+    await cmdX.ExecuteNonQueryAsync();
 }
 
 await app.RunAsync();
