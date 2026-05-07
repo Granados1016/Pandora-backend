@@ -121,7 +121,9 @@ public class AdminController(
             try
             {
                 await using var dCmd = conn.CreateCommand();
-                dCmd.CommandText = $"SELECT * FROM {table}";
+                // Escapar con corchetes: "dbo.Tabla" → "[dbo].[Tabla]"
+                var safeName = string.Join(".", table.Split('.').Select(p => $"[{p}]"));
+                dCmd.CommandText = $"SELECT * FROM {safeName}";
                 await using var r = await dCmd.ExecuteReaderAsync(ct);
 
                 var cols = Enumerable.Range(0, r.FieldCount)
