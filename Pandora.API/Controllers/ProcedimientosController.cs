@@ -70,15 +70,41 @@ public class ProcedimientosController(
     }
 
     // ── GET /api/procedimientos ───────────────────────────────────────────────
-    /// <summary>Lista procedimientos con filtros opcionales. No devuelve binarios.</summary>
+    /// <summary>Lista procedimientos con filtros y paginación. No devuelve binarios.</summary>
     [HttpGet]
     public async Task<IActionResult> GetAll(
         [FromQuery] string? search,
         [FromQuery] string? category,
-        CancellationToken ct)
+        [FromQuery] int page     = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
     {
+        page     = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        int offset = (page - 1) * pageSize;
+
         await using var conn = Conn();
         await conn.OpenAsync(ct);
+
+        // Total de registros (para calcular páginas)
+        int total = 0;
+        await using (var cntCmd = conn.CreateCommand())
+        {
+            cntCmd.CommandText = """
+                SELECT COUNT(*)
+                FROM dbo.Procedimientos
+                WHERE IsDeleted = 0
+                  AND (@Search IS NULL OR Title       LIKE '%' + @Search + '%'
+                                       OR Description LIKE '%' + @Search + '%')
+                  AND (@Cat    IS NULL OR Category = @Cat)
+                """;
+            cntCmd.Parameters.AddWithValue("@Search",
+                string.IsNullOrWhiteSpace(search)   ? (object)DBNull.Value : search.Trim());
+            cntCmd.Parameters.AddWithValue("@Cat",
+                string.IsNullOrWhiteSpace(category) ? (object)DBNull.Value : category.Trim());
+            total = (int)(await cntCmd.ExecuteScalarAsync(ct) ?? 0);
+        }
+
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT Id, Title, Description, Category,
@@ -89,16 +115,19 @@ public class ProcedimientosController(
                                    OR Description LIKE '%' + @Search + '%')
               AND (@Cat    IS NULL OR Category = @Cat)
             ORDER BY UploadedAt DESC
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             """;
         cmd.Parameters.AddWithValue("@Search",
             string.IsNullOrWhiteSpace(search)   ? (object)DBNull.Value : search.Trim());
         cmd.Parameters.AddWithValue("@Cat",
             string.IsNullOrWhiteSpace(category) ? (object)DBNull.Value : category.Trim());
+        cmd.Parameters.AddWithValue("@Offset",   offset);
+        cmd.Parameters.AddWithValue("@PageSize", pageSize);
 
-        var results = new List<object>();
+        var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
-            results.Add(new
+            items.Add(new
             {
                 id              = r.GetInt32(0),
                 title           = r.GetString(1),
@@ -110,7 +139,15 @@ public class ProcedimientosController(
                 uploadedBy      = r.GetString(7),
                 uploadedAt      = r.GetDateTime(8),
             });
-        return Ok(results);
+
+        return Ok(new
+        {
+            items,
+            total,
+            page,
+            pageSize,
+            totalPages = (int)Math.Ceiling(total / (double)pageSize),
+        });
     }
 
     // ── GET /api/procedimientos/{id}/view ─────────────────────────────────────

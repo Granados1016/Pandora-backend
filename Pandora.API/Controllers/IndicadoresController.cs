@@ -1,3 +1,4 @@
+using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -238,4 +239,163 @@ public class IndicadoresController(
             },
         });
     }
+
+    // ── GET /api/indicadores/export ───────────────────────────────────────────
+    /// <summary>Exporta el snapshot de indicadores a un archivo Excel.</summary>
+    [HttpGet("export")]
+    public async Task<IActionResult> Export(CancellationToken ct)
+    {
+        // Reutilizamos la misma lógica de consulta llamando al propio método
+        // (evitamos duplicar SQL — deserializamos el OkObjectResult)
+        var kpiResult = await GetAll(ct) as OkObjectResult;
+        if (kpiResult?.Value is null) return StatusCode(500, "Error generando indicadores.");
+
+        // Serializar/deserializar para obtener un objeto dinámico
+        var json    = System.Text.Json.JsonSerializer.Serialize(kpiResult.Value);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var root    = doc.RootElement;
+
+        var now     = DateTime.Now;
+        using var wb = new XLWorkbook();
+
+        // ── Hoja 1: Resumen general ──────────────────────────────────────────
+        var ws = wb.AddWorksheet("Resumen");
+        ws.Cell(1, 1).Value = "Indicadores Pandora";
+        ws.Cell(1, 1).Style.Font.Bold = true;
+        ws.Cell(1, 1).Style.Font.FontSize = 16;
+        ws.Cell(2, 1).Value = $"Generado el {now:dd/MM/yyyy HH:mm}";
+        ws.Cell(2, 1).Style.Font.Italic = true;
+
+        int row = 4;
+        ws.Cell(row, 1).Value = "Módulo";          StyleHeader(ws.Cell(row, 1));
+        ws.Cell(row, 2).Value = "Indicador";        StyleHeader(ws.Cell(row, 2));
+        ws.Cell(row, 3).Value = "Valor";            StyleHeader(ws.Cell(row, 3));
+
+        row++;
+        void AddRow(string mod, string ind, object? val) { ws.Cell(row, 1).Value = mod; ws.Cell(row, 2).Value = ind; ws.Cell(row, 3).Value = val?.ToString() ?? "-"; row++; }
+
+        var users = root.GetPropertyOrDefault("users");
+        AddRow("Usuarios", "Total",   users?.GetInt("total"));
+        AddRow("Usuarios", "Activos", users?.GetInt("active"));
+
+        var mail = root.GetPropertyOrDefault("mail");
+        AddRow("Mail+", "Campañas enviadas (total)", mail?.GetInt("sent"));
+        AddRow("Mail+", "Este mes",                  mail?.GetInt("thisMonth"));
+
+        var inv = root.GetPropertyOrDefault("inventory");
+        AddRow("Inventario", "Artículos totales", inv?.GetInt("totalItems"));
+        AddRow("Inventario", "Categorías",        inv?.GetInt("types"));
+
+        var tickets = root.GetPropertyOrDefault("tickets");
+        AddRow("Tickets", "Total",    tickets?.GetInt("total"));
+        AddRow("Tickets", "Abiertos", tickets?.GetInt("open"));
+        AddRow("Tickets", "Resueltos",tickets?.GetInt("resolved"));
+
+        var lic = root.GetPropertyOrDefault("licencias");
+        AddRow("Licencias", "Activas",        lic?.GetInt("active"));
+        AddRow("Licencias", "Por vencer (30d)",lic?.GetInt("expiringSoon"));
+
+        var cal = root.GetPropertyOrDefault("calendar");
+        AddRow("Calendario", "Reservas este mes", cal?.GetInt("thisMonth"));
+        AddRow("Calendario", "Próximas",           cal?.GetInt("upcoming"));
+
+        ws.Columns(1, 3).AdjustToContents();
+
+        // ── Hoja 2: Campañas por mes ─────────────────────────────────────────
+        if (mail?.TryGetProperty("monthlySent", out var ms2) == true && ms2.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var wsM = wb.AddWorksheet("Campañas por mes");
+            wsM.Cell(1, 1).Value = "Mes";   StyleHeader(wsM.Cell(1, 1));
+            wsM.Cell(1, 2).Value = "Enviadas"; StyleHeader(wsM.Cell(1, 2));
+            int r = 2;
+            foreach (var item in ms2.EnumerateArray())
+            {
+                wsM.Cell(r, 1).Value = item.TryGetProperty("month", out var m) ? m.GetString() : "";
+                wsM.Cell(r, 2).Value = item.TryGetProperty("count", out var c) ? c.GetInt32() : 0;
+                r++;
+            }
+            wsM.Columns(1, 2).AdjustToContents();
+        }
+
+        // ── Hoja 3: Inventario por categoría ────────────────────────────────
+        if (inv?.TryGetProperty("byType", out var byType) == true && byType.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var wsI = wb.AddWorksheet("Inventario por categoría");
+            wsI.Cell(1, 1).Value = "Categoría"; StyleHeader(wsI.Cell(1, 1));
+            wsI.Cell(1, 2).Value = "Artículos"; StyleHeader(wsI.Cell(1, 2));
+            int r = 2;
+            foreach (var item in byType.EnumerateArray())
+            {
+                wsI.Cell(r, 1).Value = item.TryGetProperty("typeName", out var tn) ? tn.GetString() : "";
+                wsI.Cell(r, 2).Value = item.TryGetProperty("count",    out var c2) ? c2.GetInt32() : 0;
+                r++;
+            }
+            wsI.Columns(1, 2).AdjustToContents();
+        }
+
+        // ── Hoja 4: Tickets por estado ───────────────────────────────────────
+        if (tickets?.TryGetProperty("byStatus", out var byStatus) == true && byStatus.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var wsT = wb.AddWorksheet("Tickets por estado");
+            wsT.Cell(1, 1).Value = "Estado";   StyleHeader(wsT.Cell(1, 1));
+            wsT.Cell(1, 2).Value = "Cantidad"; StyleHeader(wsT.Cell(1, 2));
+            int r = 2;
+            foreach (var item in byStatus.EnumerateArray())
+            {
+                wsT.Cell(r, 1).Value = item.TryGetProperty("status", out var s) ? s.GetString() : "";
+                wsT.Cell(r, 2).Value = item.TryGetProperty("count",  out var c3) ? c3.GetInt32() : 0;
+                r++;
+            }
+            wsT.Columns(1, 2).AdjustToContents();
+        }
+
+        // ── Hoja 5: Licencias por estado ─────────────────────────────────────
+        if (lic?.TryGetProperty("byEstado", out var byEstado) == true && byEstado.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            var wsL = wb.AddWorksheet("Licencias por estado");
+            wsL.Cell(1, 1).Value = "Estado";   StyleHeader(wsL.Cell(1, 1));
+            wsL.Cell(1, 2).Value = "Cantidad"; StyleHeader(wsL.Cell(1, 2));
+            int r = 2;
+            foreach (var item in byEstado.EnumerateArray())
+            {
+                wsL.Cell(r, 1).Value = item.TryGetProperty("estado", out var e) ? e.GetString() : "";
+                wsL.Cell(r, 2).Value = item.TryGetProperty("count",  out var c4) ? c4.GetInt32() : 0;
+                r++;
+            }
+            wsL.Columns(1, 2).AdjustToContents();
+        }
+
+        // ── Serializar y devolver ────────────────────────────────────────────
+        using var stream = new MemoryStream();
+        wb.SaveAs(stream);
+        var bytes    = stream.ToArray();
+        var filename = $"Indicadores_Pandora_{now:yyyyMMdd_HHmm}.xlsx";
+        logger.LogInformation("Export indicadores por {User}", User.Identity?.Name);
+        return File(bytes,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename);
+    }
+
+    // ── Helpers privados ─────────────────────────────────────────────────────
+    private static void StyleHeader(IXLCell cell)
+    {
+        cell.Style.Font.Bold = true;
+        cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#E8EAED");
+    }
+}
+
+// ── Extensiones para JsonElement nullable ─────────────────────────────────────
+internal static class JsonElementExtensions
+{
+    public static System.Text.Json.JsonElement? GetPropertyOrDefault(
+        this System.Text.Json.JsonElement el, string name) =>
+        el.TryGetProperty(name, out var v) ? v : null;
+
+    public static System.Text.Json.JsonElement? GetPropertyOrDefault(
+        this System.Text.Json.JsonElement? el, string name) =>
+        el.HasValue && el.Value.TryGetProperty(name, out var v) ? v : null;
+
+    public static int? GetInt(this System.Text.Json.JsonElement? el, string name) =>
+        el.HasValue && el.Value.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
+            ? v.GetInt32() : null;
 }
