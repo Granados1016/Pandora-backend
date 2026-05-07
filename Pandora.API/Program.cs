@@ -77,7 +77,7 @@ builder.Services.AddSwaggerGen(c =>
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 string[] allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>()
-                          ?? ["http://localhost:3000"];
+                          ?? ["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"];
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("PandoraPolicy", p =>
@@ -802,6 +802,36 @@ using (var scopeRt = app.Services.CreateScope())
         END
         """;
     await cmdRt.ExecuteNonQueryAsync();
+}
+
+// ── Tabla Procedimientos ──────────────────────────────────────────────────────
+using (var scopeProc = app.Services.CreateScope())
+{
+    var cfgProc = scopeProc.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connProc = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgProc.GetConnectionString("PandoraDb"));
+    await connProc.OpenAsync();
+    await using var cmdProc = connProc.CreateCommand();
+    cmdProc.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables
+                       WHERE name = 'Procedimientos' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Procedimientos (
+                Id              INT            IDENTITY(1,1) PRIMARY KEY,
+                Title           NVARCHAR(200)  NOT NULL,
+                Description     NVARCHAR(MAX)  NULL,
+                Category        NVARCHAR(100)  NULL,
+                FileName        NVARCHAR(300)  NOT NULL,
+                FileContentType NVARCHAR(100)  NOT NULL,
+                FileSize        BIGINT         NOT NULL DEFAULT 0,
+                FilePath        NVARCHAR(500)  NOT NULL,
+                UploadedBy      NVARCHAR(100)  NOT NULL,
+                UploadedAt      DATETIME2      NOT NULL DEFAULT GETUTCDATE(),
+                IsDeleted       BIT            NOT NULL DEFAULT 0
+            );
+        END
+        """;
+    await cmdProc.ExecuteNonQueryAsync();
 }
 
 await app.RunAsync();
