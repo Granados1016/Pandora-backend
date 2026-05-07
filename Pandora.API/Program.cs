@@ -780,6 +780,30 @@ using (var scope3 = app.Services.CreateScope())
     }
 }
 
+// ── Tabla RefreshTokens ────────────────────────────────────────────────────────
+using (var scopeRt = app.Services.CreateScope())
+{
+    var cfgRt = scopeRt.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connRt = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgRt.GetConnectionString("PandoraDb"));
+    await connRt.OpenAsync();
+    await using var cmdRt = connRt.CreateCommand();
+    cmdRt.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables
+                       WHERE name = 'RefreshTokens' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.RefreshTokens (
+                Id        INT           IDENTITY(1,1) PRIMARY KEY,
+                Token     NVARCHAR(200) NOT NULL UNIQUE,
+                Username  NVARCHAR(100) NOT NULL,
+                ExpiresAt DATETIME2     NOT NULL,
+                CreatedAt DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+        """;
+    await cmdRt.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
