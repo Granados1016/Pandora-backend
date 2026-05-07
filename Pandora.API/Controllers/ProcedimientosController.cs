@@ -156,6 +156,143 @@ public class ProcedimientosController(
         return NoContent();
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // CATEGORÍAS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── GET /api/procedimientos/categorias ────────────────────────────────────
+    /// <summary>Lista todas las categorías activas.</summary>
+    [HttpGet("categorias")]
+    public async Task<IActionResult> GetCategorias(CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT Id, Name, Color, SortOrder,
+                   (SELECT COUNT(*) FROM dbo.Procedimientos p
+                    WHERE p.Category = c.Name AND p.IsDeleted = 0) AS UsageCount
+            FROM dbo.ProcedimientoCategorias c
+            WHERE IsActive = 1
+            ORDER BY SortOrder, Name
+            """;
+        var list = new List<object>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add(new
+            {
+                id         = r.GetInt32(0),
+                name       = r.GetString(1),
+                color      = r.IsDBNull(2) ? "default" : r.GetString(2),
+                sortOrder  = r.GetInt32(3),
+                usageCount = r.GetInt32(4),
+            });
+        return Ok(list);
+    }
+
+    // ── POST /api/procedimientos/categorias ───────────────────────────────────
+    /// <summary>Crea una nueva categoría. Solo Admin.</summary>
+    [HttpPost("categorias")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> CreateCategoria([FromBody] CategoriaDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Name))
+            return BadRequest("El nombre es requerido.");
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            IF EXISTS (SELECT 1 FROM dbo.ProcedimientoCategorias WHERE Name = @Name AND IsActive = 1)
+                SELECT -1 AS Id
+            ELSE
+                INSERT INTO dbo.ProcedimientoCategorias (Name, Color, SortOrder)
+                OUTPUT INSERTED.Id
+                VALUES (@Name, @Color, @SortOrder)
+            """;
+        cmd.Parameters.AddWithValue("@Name",      dto.Name.Trim());
+        cmd.Parameters.AddWithValue("@Color",     (object?)dto.Color?.Trim() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@SortOrder", dto.SortOrder);
+
+        var result = await cmd.ExecuteScalarAsync(ct);
+        int newId = Convert.ToInt32(result);
+        if (newId == -1)
+            return Conflict("Ya existe una categoría con ese nombre.");
+
+        return Ok(new { id = newId });
+    }
+
+    // ── PUT /api/procedimientos/categorias/{id} ───────────────────────────────
+    /// <summary>Actualiza nombre y color de una categoría. Solo Admin.</summary>
+    [HttpPut("categorias/{id:int}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> UpdateCategoria(int id, [FromBody] CategoriaDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Name))
+            return BadRequest("El nombre es requerido.");
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        // Actualizar también el campo Category en Procedimientos si cambió el nombre
+        string? oldName = null;
+        await using (var q = conn.CreateCommand())
+        {
+            q.CommandText = "SELECT Name FROM dbo.ProcedimientoCategorias WHERE Id = @Id AND IsActive = 1";
+            q.Parameters.AddWithValue("@Id", id);
+            oldName = await q.ExecuteScalarAsync(ct) as string;
+        }
+        if (oldName is null) return NotFound();
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE dbo.ProcedimientoCategorias
+            SET Name = @Name, Color = @Color, SortOrder = @SortOrder
+            WHERE Id = @Id AND IsActive = 1;
+
+            UPDATE dbo.Procedimientos
+            SET Category = @Name
+            WHERE Category = @OldName AND IsDeleted = 0;
+            """;
+        cmd.Parameters.AddWithValue("@Id",        id);
+        cmd.Parameters.AddWithValue("@Name",      dto.Name.Trim());
+        cmd.Parameters.AddWithValue("@Color",     (object?)dto.Color?.Trim() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@SortOrder", dto.SortOrder);
+        cmd.Parameters.AddWithValue("@OldName",   oldName);
+        await cmd.ExecuteNonQueryAsync(ct);
+        return NoContent();
+    }
+
+    // ── DELETE /api/procedimientos/categorias/{id} ────────────────────────────
+    /// <summary>Desactiva (soft-delete) una categoría. Solo Admin.</summary>
+    [HttpDelete("categorias/{id:int}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> DeleteCategoria(int id, CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        // Verificar si tiene procedimientos activos
+        await using (var q = conn.CreateCommand())
+        {
+            q.CommandText = """
+                SELECT COUNT(*) FROM dbo.Procedimientos p
+                JOIN dbo.ProcedimientoCategorias c ON c.Name = p.Category
+                WHERE c.Id = @Id AND p.IsDeleted = 0
+                """;
+            q.Parameters.AddWithValue("@Id", id);
+            int count = (int)(await q.ExecuteScalarAsync(ct) ?? 0);
+            if (count > 0)
+                return Conflict($"Esta categoría tiene {count} procedimiento(s) activos. Reasígnalos antes de eliminarla.");
+        }
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE dbo.ProcedimientoCategorias SET IsActive = 0 WHERE Id = @Id";
+        cmd.Parameters.AddWithValue("@Id", id);
+        int rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows == 0 ? NotFound() : NoContent();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     private async Task<IActionResult> ServeFile(int id, bool inline, CancellationToken ct)
     {
@@ -222,3 +359,6 @@ public class ProcedimientosController(
         catch { return Task.FromResult(false); }
     }
 }
+
+// ── DTOs ──────────────────────────────────────────────────────────────────────
+public record CategoriaDto(string Name, string? Color, int SortOrder = 0);

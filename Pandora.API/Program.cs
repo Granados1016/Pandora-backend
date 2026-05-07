@@ -804,6 +804,42 @@ using (var scopeRt = app.Services.CreateScope())
     await cmdRt.ExecuteNonQueryAsync();
 }
 
+// ── Tabla ProcedimientoCategorias ────────────────────────────────────────────
+using (var scopeCat = app.Services.CreateScope())
+{
+    var cfgCat = scopeCat.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connCat = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgCat.GetConnectionString("PandoraDb"));
+    await connCat.OpenAsync();
+    await using var cmdCat = connCat.CreateCommand();
+    cmdCat.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables
+                       WHERE name = 'ProcedimientoCategorias' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.ProcedimientoCategorias (
+                Id        INT           IDENTITY(1,1) PRIMARY KEY,
+                Name      NVARCHAR(100) NOT NULL,
+                Color     NVARCHAR(30)  NULL,
+                SortOrder INT           NOT NULL DEFAULT 0,
+                IsActive  BIT           NOT NULL DEFAULT 1,
+                CreatedAt DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+                CONSTRAINT UQ_ProcCat_Name UNIQUE (Name)
+            );
+            -- Categorías por defecto
+            INSERT INTO dbo.ProcedimientoCategorias (Name, Color, SortOrder) VALUES
+                (N'Académico',        'primary',   1),
+                (N'Administrativo',   'secondary', 2),
+                (N'Recursos Humanos', 'success',   3),
+                (N'Finanzas',         'warning',   4),
+                (N'Tecnología',       'info',      5),
+                (N'Legal',            'error',     6),
+                (N'Comunicaciones',   'default',   7),
+                (N'Otros',            'default',   8);
+        END
+        """;
+    await cmdCat.ExecuteNonQueryAsync();
+}
+
 // ── Tabla Procedimientos ──────────────────────────────────────────────────────
 using (var scopeProc = app.Services.CreateScope())
 {
