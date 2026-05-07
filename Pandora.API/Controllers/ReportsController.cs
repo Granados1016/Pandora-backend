@@ -74,11 +74,23 @@ public class ReportsController(IConfiguration config, ILogger<ReportsController>
             await using var cmdType = conn.CreateCommand();
             cmdType.CommandText = """
                 SELECT
-                    ISNULL(NULLIF(ProgramType,''), 'Sin especificar') AS Name,
+                    CASE ISNULL(ProgramType, 0)
+                        WHEN 1 THEN 'Licenciatura'
+                        WHEN 2 THEN 'Posgrado'
+                        WHEN 3 THEN 'Preparatoria'
+                        WHEN 4 THEN 'Notificaciones'
+                        ELSE 'General'
+                    END AS Name,
                     COUNT(*) AS Value
                 FROM dbo.EmailCampaigns
                 WHERE IsDeleted = 0
-                GROUP BY ISNULL(NULLIF(ProgramType,''), 'Sin especificar')
+                GROUP BY CASE ISNULL(ProgramType, 0)
+                    WHEN 1 THEN 'Licenciatura'
+                    WHEN 2 THEN 'Posgrado'
+                    WHEN 3 THEN 'Preparatoria'
+                    WHEN 4 THEN 'Notificaciones'
+                    ELSE 'General'
+                END
                 ORDER BY Value DESC
                 """;
             var byProgramType = new List<object>();
