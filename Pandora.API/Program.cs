@@ -840,7 +840,7 @@ using (var scopeCat = app.Services.CreateScope())
     await cmdCat.ExecuteNonQueryAsync();
 }
 
-// ── Tabla Procedimientos ──────────────────────────────────────────────────────
+// ── Tabla Procedimientos (almacenamiento en BD, persistente en Railway) ───────
 using (var scopeProc = app.Services.CreateScope())
 {
     var cfgProc = scopeProc.ServiceProvider.GetRequiredService<IConfiguration>();
@@ -849,22 +849,33 @@ using (var scopeProc = app.Services.CreateScope())
     await connProc.OpenAsync();
     await using var cmdProc = connProc.CreateCommand();
     cmdProc.CommandText = """
+        -- Crear tabla si no existe
         IF NOT EXISTS (SELECT 1 FROM sys.tables
                        WHERE name = 'Procedimientos' AND schema_id = SCHEMA_ID('dbo'))
         BEGIN
             CREATE TABLE dbo.Procedimientos (
-                Id              INT            IDENTITY(1,1) PRIMARY KEY,
-                Title           NVARCHAR(200)  NOT NULL,
-                Description     NVARCHAR(MAX)  NULL,
-                Category        NVARCHAR(100)  NULL,
-                FileName        NVARCHAR(300)  NOT NULL,
-                FileContentType NVARCHAR(100)  NOT NULL,
-                FileSize        BIGINT         NOT NULL DEFAULT 0,
-                FilePath        NVARCHAR(500)  NOT NULL,
-                UploadedBy      NVARCHAR(100)  NOT NULL,
-                UploadedAt      DATETIME2      NOT NULL DEFAULT GETUTCDATE(),
-                IsDeleted       BIT            NOT NULL DEFAULT 0
+                Id              INT              IDENTITY(1,1) PRIMARY KEY,
+                Title           NVARCHAR(200)    NOT NULL,
+                Description     NVARCHAR(MAX)    NULL,
+                Category        NVARCHAR(100)    NULL,
+                FileName        NVARCHAR(300)    NOT NULL,
+                FileContentType NVARCHAR(100)    NOT NULL,
+                FileSize        BIGINT           NOT NULL DEFAULT 0,
+                FileData        VARBINARY(MAX)   NULL,
+                UploadedBy      NVARCHAR(100)    NOT NULL,
+                UploadedAt      DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                IsDeleted       BIT              NOT NULL DEFAULT 0
             );
+        END
+        ELSE
+        BEGIN
+            -- Migración: añadir FileData si la tabla ya existía (versión anterior usaba disco)
+            IF NOT EXISTS (SELECT 1 FROM sys.columns
+                           WHERE object_id = OBJECT_ID('dbo.Procedimientos')
+                             AND name = 'FileData')
+            BEGIN
+                ALTER TABLE dbo.Procedimientos ADD FileData VARBINARY(MAX) NULL;
+            END
         END
         """;
     await cmdProc.ExecuteNonQueryAsync();
