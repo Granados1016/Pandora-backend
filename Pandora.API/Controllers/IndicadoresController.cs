@@ -402,4 +402,8 @@ internal static class JsonElementExtensions
     public static int? GetInt(this System.Text.Json.JsonElement? el, string name) =>
         el.HasValue && el.Value.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
             ? v.GetInt32() : null;
+
+    public static int? GetInt(this System.Text.Json.JsonElement el, string name) =>
+        el.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
+            ? v.GetInt32() : null;
 }
