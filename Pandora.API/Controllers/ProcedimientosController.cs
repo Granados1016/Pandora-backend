@@ -318,6 +318,209 @@ public class ProcedimientosController(
         return rows == 0 ? NotFound() : NoContent();
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // VERSIONES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Sube una nueva versión del documento (guarda la anterior en historial).</summary>
+    [HttpPost("{id:int}/versions")]
+    [RequestSizeLimit(52_428_800)]
+    public async Task<IActionResult> UploadVersion(int id, IFormFile file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0)
+            return BadRequest(new { title = "Archivo requerido." });
+
+        using var ms = new MemoryStream();
+        await file.CopyToAsync(ms, ct);
+        var newBytes = ms.ToArray();
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        try
+        {
+            // 1. Auto-create versions table if needed
+            await using (var createCmd = conn.CreateCommand())
+            {
+                createCmd.Transaction = (SqlTransaction)tx;
+                createCmd.CommandText = """
+                    IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.ProcedimientoVersiones') AND type = N'U')
+                    CREATE TABLE dbo.ProcedimientoVersiones (
+                        Id              INT IDENTITY PRIMARY KEY,
+                        ProcedimientoId INT NOT NULL,
+                        VersionNumber   INT NOT NULL,
+                        FileName        NVARCHAR(512) NOT NULL,
+                        FileContentType NVARCHAR(256) NOT NULL,
+                        FileSize        BIGINT NOT NULL,
+                        FileData        VARBINARY(MAX) NOT NULL,
+                        UploadedBy      NVARCHAR(256) NULL,
+                        UploadedAt      DATETIME2 NOT NULL,
+                        Notes           NVARCHAR(1000) NULL
+                    );
+                    """;
+                await createCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // 2. Read current document
+            string? curContentType = null, curFileName = null, curUploader = null;
+            byte[]? curData = null;
+            DateTime curUploadedAt = DateTime.UtcNow;
+            int curVersion = 1;
+
+            await using (var readCmd = conn.CreateCommand())
+            {
+                readCmd.Transaction = (SqlTransaction)tx;
+                readCmd.CommandText = """
+                    SELECT FileName, FileContentType, FileData, UploadedBy, UploadedAt
+                    FROM dbo.Procedimientos WHERE Id = @Id AND IsDeleted = 0
+                    """;
+                readCmd.Parameters.AddWithValue("@Id", id);
+                await using var r = await readCmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return NotFound();
+                curFileName    = r.GetString(0);
+                curContentType = r.GetString(1);
+                curData        = r.IsDBNull(2) ? null : (byte[])r.GetValue(2);
+                curUploader    = r.IsDBNull(3) ? null : r.GetString(3);
+                curUploadedAt  = r.GetDateTime(4);
+            }
+
+            // 3. Get next version number
+            await using (var vCmd = conn.CreateCommand())
+            {
+                vCmd.Transaction = (SqlTransaction)tx;
+                vCmd.CommandText = "SELECT ISNULL(MAX(VersionNumber), 0) FROM dbo.ProcedimientoVersiones WHERE ProcedimientoId = @Id";
+                vCmd.Parameters.AddWithValue("@Id", id);
+                curVersion = (int)(await vCmd.ExecuteScalarAsync(ct) ?? 0) + 1;
+            }
+
+            // 4. Archive current as a version
+            if (curData is not null)
+            {
+                await using var archCmd = conn.CreateCommand();
+                archCmd.Transaction = (SqlTransaction)tx;
+                archCmd.CommandText = """
+                    INSERT INTO dbo.ProcedimientoVersiones
+                      (ProcedimientoId, VersionNumber, FileName, FileContentType, FileSize, FileData, UploadedBy, UploadedAt)
+                    VALUES (@ProcId, @Ver, @FileName, @CT, @Size, @Data, @User, @Date)
+                    """;
+                archCmd.Parameters.AddWithValue("@ProcId",   id);
+                archCmd.Parameters.AddWithValue("@Ver",      curVersion);
+                archCmd.Parameters.AddWithValue("@FileName", curFileName ?? "documento");
+                archCmd.Parameters.AddWithValue("@CT",       curContentType ?? "application/octet-stream");
+                archCmd.Parameters.AddWithValue("@Size",     curData.Length);
+                archCmd.Parameters.AddWithValue("@Data",     curData);
+                archCmd.Parameters.AddWithValue("@User",     (object?)curUploader ?? DBNull.Value);
+                archCmd.Parameters.AddWithValue("@Date",     curUploadedAt);
+                await archCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // 5. Update main record with new file
+            await using var updCmd = conn.CreateCommand();
+            updCmd.Transaction = (SqlTransaction)tx;
+            updCmd.CommandText = """
+                UPDATE dbo.Procedimientos
+                SET FileName = @FileName, FileContentType = @CT, FileSize = @Size,
+                    FileData = @Data, UploadedBy = @User, UploadedAt = GETUTCDATE()
+                WHERE Id = @Id
+                """;
+            updCmd.Parameters.AddWithValue("@FileName", file.FileName);
+            updCmd.Parameters.AddWithValue("@CT",       file.ContentType ?? "application/octet-stream");
+            updCmd.Parameters.AddWithValue("@Size",     newBytes.Length);
+            updCmd.Parameters.AddWithValue("@Data",     newBytes);
+            updCmd.Parameters.AddWithValue("@User",     (object?)CurrentUser() ?? DBNull.Value);
+            updCmd.Parameters.AddWithValue("@Id",       id);
+            await updCmd.ExecuteNonQueryAsync(ct);
+
+            await tx.CommitAsync(ct);
+
+            logger.LogInformation("Procedimiento #{Id} nueva versión {Ver} por {User}", id, curVersion + 1, CurrentUser());
+            return Ok(new { versionNumber = curVersion + 1 });
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync(ct);
+            logger.LogError(ex, "UploadVersion {Id}", id);
+            return StatusCode(500, new { title = ex.Message });
+        }
+    }
+
+    /// <summary>Lista el historial de versiones (sin binarios).</summary>
+    [HttpGet("{id:int}/versions")]
+    public async Task<IActionResult> GetVersions(int id, CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        // Ensure table exists
+        await using (var createCmd = conn.CreateCommand())
+        {
+            createCmd.CommandText = """
+                IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.ProcedimientoVersiones') AND type = N'U')
+                CREATE TABLE dbo.ProcedimientoVersiones (
+                    Id INT IDENTITY PRIMARY KEY, ProcedimientoId INT NOT NULL,
+                    VersionNumber INT NOT NULL, FileName NVARCHAR(512) NOT NULL,
+                    FileContentType NVARCHAR(256) NOT NULL, FileSize BIGINT NOT NULL,
+                    FileData VARBINARY(MAX) NOT NULL, UploadedBy NVARCHAR(256) NULL,
+                    UploadedAt DATETIME2 NOT NULL, Notes NVARCHAR(1000) NULL);
+                """;
+            await createCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT Id, VersionNumber, FileName, FileContentType, FileSize, UploadedBy, UploadedAt
+            FROM dbo.ProcedimientoVersiones
+            WHERE ProcedimientoId = @Id
+            ORDER BY VersionNumber DESC
+            """;
+        cmd.Parameters.AddWithValue("@Id", id);
+        var list = new List<object>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add(new {
+                id            = r.GetInt32(0),
+                versionNumber = r.GetInt32(1),
+                fileName      = r.GetString(2),
+                contentType   = r.GetString(3),
+                fileSize      = r.GetInt64(4),
+                uploadedBy    = r.IsDBNull(5) ? null : r.GetString(5),
+                uploadedAt    = r.GetDateTime(6),
+            });
+        return Ok(list);
+    }
+
+    /// <summary>Descarga una versión archivada específica.</summary>
+    [HttpGet("{id:int}/versions/{vId:int}/download")]
+    [AllowAnonymous]
+    public async Task<IActionResult> DownloadVersion(
+        int id, int vId, [FromQuery] string? access_token, CancellationToken ct)
+    {
+        if (!await ValidateToken(access_token)) return Unauthorized();
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandTimeout = 120;
+        cmd.CommandText = """
+            SELECT FileName, FileContentType, FileData
+            FROM dbo.ProcedimientoVersiones
+            WHERE Id = @VId AND ProcedimientoId = @Id
+            """;
+        cmd.Parameters.AddWithValue("@VId", vId);
+        cmd.Parameters.AddWithValue("@Id",  id);
+        await using var r = await cmd.ExecuteReaderAsync(
+            System.Data.CommandBehavior.SequentialAccess, ct);
+        if (!await r.ReadAsync(ct)) return NotFound();
+
+        var fileName    = r.GetString(0);
+        var contentType = r.GetString(1);
+        var data        = r.IsDBNull(2) ? null : (byte[])r.GetValue(2);
+        if (data is null) return NotFound("Archivo no disponible.");
+
+        Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
+        return File(data, contentType);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     private async Task<IActionResult> ServeFile(int id, bool inline, CancellationToken ct)
     {

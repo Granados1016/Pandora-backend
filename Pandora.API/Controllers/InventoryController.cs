@@ -1,3 +1,4 @@
+using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -495,6 +496,234 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         }
         catch (Exception ex) { logger.LogError(ex, "Export Inventory"); return StatusCode(500, ex.Message); }
     }
+
+    // ── Excel Template ────────────────────────────────────────────────────────
+    [HttpGet("excel/template")]
+    [AllowAnonymous]
+    public IActionResult Template([FromQuery] string? access_token)
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Inventario");
+
+        // Headers
+        var headers = new[] { "NumInventario","Nombre*","Marca","Modelo","NumSerie",
+            "Estado","Departamento","AsignadoA","Tipo*","FechaCompra(yyyy-MM-dd)","Precio","Accesorios" };
+        for (int c = 0; c < headers.Length; c++)
+        {
+            var cell = ws.Cell(1, c + 1);
+            cell.Value = headers[c];
+            cell.Style.Font.Bold = true;
+            cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#1a237e");
+            cell.Style.Font.FontColor = XLColor.White;
+        }
+
+        // Sample row
+        ws.Cell(2, 1).Value = ""; // auto-generated if blank
+        ws.Cell(2, 2).Value = "Laptop Dell XPS 15";
+        ws.Cell(2, 3).Value = "Dell";
+        ws.Cell(2, 4).Value = "XPS 15";
+        ws.Cell(2, 5).Value = "SN-001-DEMO";
+        ws.Cell(2, 6).Value = "Activo";
+        ws.Cell(2, 7).Value = "Sistemas";
+        ws.Cell(2, 8).Value = "Juan Pérez";
+        ws.Cell(2, 9).Value = "Computadoras";  // debe coincidir con un tipo existente
+        ws.Cell(2, 10).Value = "2024-01-15";
+        ws.Cell(2, 11).Value = 28000.00;
+        ws.Cell(2, 12).Value = "Cargador, Funda";
+
+        // Note row
+        ws.Cell(4, 1).Value = "* Campos obligatorios. Estado válido: Activo, Mantenimiento, Dado de baja, En almacén";
+        ws.Cell(4, 1).Style.Font.Italic = true;
+        ws.Cell(4, 1).Style.Font.FontColor = XLColor.Gray;
+
+        ws.Columns().AdjustToContents();
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        return File(ms.ToArray(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "plantilla_inventario.xlsx");
+    }
+
+    // ── Excel Import — Preview ────────────────────────────────────────────────
+    [HttpPost("excel/import/preview")]
+    public async Task<IActionResult> ImportPreview(IFormFile file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0)
+            return BadRequest(new { title = "Archivo vacío o no proporcionado." });
+        if (!file.FileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { title = "Solo se aceptan archivos .xlsx." });
+
+        try
+        {
+            // Load type catalog
+            var typeMap = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+            await using (var conn = Conn())
+            {
+                await conn.OpenAsync(ct);
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT Id, Name FROM dbo.InventoryTypes WHERE IsActive = 1";
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    typeMap[r.GetString(1)] = r.GetGuid(0);
+            }
+
+            using var stream = file.OpenReadStream();
+            using var wb     = new XLWorkbook(stream);
+            var ws           = wb.Worksheets.First();
+
+            var validRows = new List<object>();
+            var errors    = new List<object>();
+            int totalRows = 0;
+
+            // Skip header row (row 1)
+            foreach (var row in ws.RowsUsed().Skip(1))
+            {
+                totalRows++;
+                string Cell(int c) => row.Cell(c).GetString().Trim();
+
+                var name     = Cell(2);
+                var typeName = Cell(9);
+                var rowErrs  = new List<object>();
+
+                if (string.IsNullOrWhiteSpace(name))
+                    rowErrs.Add(new { rowNumber = row.RowNumber(), field = "Nombre", message = "El nombre es obligatorio." });
+                if (string.IsNullOrWhiteSpace(typeName))
+                    rowErrs.Add(new { rowNumber = row.RowNumber(), field = "Tipo", message = "El tipo es obligatorio." });
+                else if (!typeMap.ContainsKey(typeName))
+                    rowErrs.Add(new { rowNumber = row.RowNumber(), field = "Tipo", message = $"Tipo '{typeName}' no existe en catálogo." });
+
+                if (rowErrs.Count > 0) { errors.AddRange(rowErrs); continue; }
+
+                var rawStatus = Cell(6);
+                var status = rawStatus switch
+                {
+                    "Activo"        => "Activo",
+                    "Mantenimiento" => "Mantenimiento",
+                    "Dado de baja"  => "Dado de baja",
+                    "En almacén"    => "En almacén",
+                    _               => "Activo",
+                };
+
+                validRows.Add(new
+                {
+                    inventoryNumber = Cell(1),
+                    name,
+                    category     = typeName,
+                    categoryId   = typeMap[typeName],
+                    brand        = Cell(3),
+                    model        = Cell(4),
+                    serialNumber = Cell(5),
+                    status,
+                    department   = Cell(7),
+                    assignedTo   = Cell(8),
+                    purchaseDate = Cell(10),
+                    purchasePrice= Cell(11),
+                    accessories  = Cell(12),
+                });
+            }
+
+            return Ok(new { totalRows, validRows, errors });
+        }
+        catch (Exception ex) { logger.LogError(ex, "ImportPreview"); return StatusCode(500, new { title = ex.Message }); }
+    }
+
+    // ── Excel Import — Confirm ────────────────────────────────────────────────
+    [HttpPost("excel/import/confirm")]
+    public async Task<IActionResult> ImportConfirm(
+        [FromBody] List<System.Text.Json.JsonElement> rows, CancellationToken ct)
+    {
+        try
+        {
+            int inserted = 0, skipped = 0, autoGenerated = 0;
+            var warnings = new List<string>();
+
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            foreach (var row in rows)
+            {
+                string S(string k)  => row.TryGetProperty(k, out var v) ? v.GetString() ?? "" : "";
+                Guid   G(string k)  => row.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                                       ? Guid.TryParse(v.GetString(), out var g) ? g : Guid.Empty : Guid.Empty;
+
+                var name        = S("name");
+                var typeIdGuid  = G("categoryId");
+
+                if (string.IsNullOrWhiteSpace(name) || typeIdGuid == Guid.Empty)
+                { skipped++; warnings.Add($"Fila omitida: nombre='{name}'"); continue; }
+
+                // Auto-generate inventory number if blank
+                var invNum = S("inventoryNumber");
+                if (string.IsNullOrWhiteSpace(invNum))
+                {
+                    await using var numCmd = conn.CreateCommand();
+                    numCmd.CommandText = """
+                        SELECT TOP 1 InventoryNumber FROM dbo.InventoryItems
+                        WHERE InventoryNumber LIKE 'AUTO-%'
+                        ORDER BY CreatedAt DESC
+                        """;
+                    var last = await numCmd.ExecuteScalarAsync(ct) as string;
+                    int seq = 1;
+                    if (last is not null && last.StartsWith("AUTO-") && int.TryParse(last[5..], out int prev))
+                        seq = prev + 1;
+                    invNum = $"AUTO-{seq:D4}";
+                    autoGenerated++;
+                }
+
+                // Parse optional fields
+                DateTime? purchaseDate = DateTime.TryParse(S("purchaseDate"), out var pd) ? pd : null;
+                decimal?  purchasePrice = decimal.TryParse(S("purchasePrice"), System.Globalization.NumberStyles.Any,
+                                          System.Globalization.CultureInfo.InvariantCulture, out var pp) ? pp : null;
+
+                var statusStr = S("status");
+                int statusInt = statusStr switch
+                {
+                    "Activo"        => 1,
+                    "Mantenimiento" => 2,
+                    "Dado de baja"  => 3,
+                    "En almacén"    => 4,
+                    _               => 1,
+                };
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO dbo.InventoryItems
+                      (Id, InventoryNumber, Name, Brand, Model, SerialNumber, Status,
+                       Department, AssignedTo, InventoryTypeId, PurchaseDate, PurchasePrice,
+                       Accessories, IsPhone, CreatedAt)
+                    VALUES
+                      (NEWID(), @Num, @Name, @Brand, @Model, @Serial, @Status,
+                       @Dept, @Assigned, @TypeId, @PurchDate, @PurchPrice,
+                       @Accessories, 0, GETUTCDATE())
+                    """;
+                cmd.Parameters.AddWithValue("@Num",         invNum);
+                cmd.Parameters.AddWithValue("@Name",        name);
+                cmd.Parameters.AddWithValue("@Brand",       (object?)S("brand")        ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Model",       (object?)S("model")        ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Serial",      (object?)S("serialNumber") ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Status",      statusInt);
+                cmd.Parameters.AddWithValue("@Dept",        (object?)NullIfEmpty(S("department"))  ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Assigned",    (object?)NullIfEmpty(S("assignedTo"))  ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@TypeId",      typeIdGuid);
+                cmd.Parameters.AddWithValue("@PurchDate",   (object?)purchaseDate  ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@PurchPrice",  (object?)purchasePrice ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@Accessories", (object?)NullIfEmpty(S("accessories")) ?? DBNull.Value);
+
+                try { await cmd.ExecuteNonQueryAsync(ct); inserted++; }
+                catch (Exception ex)
+                {
+                    skipped++;
+                    warnings.Add($"Error insertando '{name}': {ex.Message}");
+                }
+            }
+
+            return Ok(new { inserted, skipped, autoGenerated, warnings });
+        }
+        catch (Exception ex) { logger.LogError(ex, "ImportConfirm"); return StatusCode(500, new { title = ex.Message }); }
+    }
+
+    private static string? NullIfEmpty(string s) => string.IsNullOrWhiteSpace(s) ? null : s;
 
     private static string Csv(string s) =>
         s.Contains(',') || s.Contains('"') ? $"\"{s.Replace("\"", "\"\"")}\"" : s;

@@ -135,6 +135,9 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
 builder.Services.AddSignalR();
 builder.Services.AddScoped<IProgressNotifier, SignalRProgressNotifier>();
 
+// ── Servicios en segundo plano ────────────────────────────────────────────────
+builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
+
 // ── Infraestructura (EF Core, repositorios, servicios) ───────────────────────
 builder.Services.AddInfrastructure(builder.Configuration);
 
