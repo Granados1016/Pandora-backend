@@ -29,8 +29,8 @@ public class SearchController(IConfiguration config) : ControllerBase
 
         // ── Procedimientos ────────────────────────────────────────────────────
         await TrySearch(conn, ct, results, """
-            SELECT TOP 5 'procedimiento' AS Type, Id, Title AS Label,
-                   ISNULL(Description,'') AS Subtitle, Category AS Tag
+            SELECT TOP 8 'procedimiento' AS Type, Id, Title AS Label,
+                   ISNULL(Description,'') AS Subtitle, Category AS Tag, UploadedAt AS Date
             FROM dbo.Procedimientos
             WHERE IsDeleted = 0
               AND (Title LIKE '%' + @Q + '%' OR Description LIKE '%' + @Q + '%')
@@ -39,8 +39,8 @@ public class SearchController(IConfiguration config) : ControllerBase
 
         // ── Comunicados ───────────────────────────────────────────────────────
         await TrySearch(conn, ct, results, """
-            SELECT TOP 5 'comunicado' AS Type, Id, Title AS Label,
-                   LEFT(Content,120) AS Subtitle, Priority AS Tag
+            SELECT TOP 8 'comunicado' AS Type, Id, Title AS Label,
+                   LEFT(Content,120) AS Subtitle, Priority AS Tag, CreatedAt AS Date
             FROM dbo.Comunicados
             WHERE IsDeleted = 0 AND IsPublished = 1
               AND (Title LIKE '%' + @Q + '%' OR Content LIKE '%' + @Q + '%')
@@ -49,9 +49,9 @@ public class SearchController(IConfiguration config) : ControllerBase
 
         // ── Inventario ────────────────────────────────────────────────────────
         await TrySearch(conn, ct, results, """
-            SELECT TOP 5 'inventario' AS Type, CAST(Id AS NVARCHAR(36)), Name AS Label,
+            SELECT TOP 8 'inventario' AS Type, CAST(Id AS NVARCHAR(36)), Name AS Label,
                    ISNULL(Brand,'') + ' ' + ISNULL(Model,'') AS Subtitle,
-                   ISNULL(Department,'') AS Tag
+                   ISNULL(Department,'') AS Tag, CreatedAt AS Date
             FROM dbo.InventoryItems
             WHERE IsActive = 1
               AND (Name LIKE '%' + @Q + '%' OR Brand LIKE '%' + @Q + '%'
@@ -61,20 +61,31 @@ public class SearchController(IConfiguration config) : ControllerBase
 
         // ── Licencias ─────────────────────────────────────────────────────────
         await TrySearch(conn, ct, results, """
-            SELECT TOP 5 'licencia' AS Type, CAST(Id AS NVARCHAR(10)), Plataforma AS Label,
-                   Area AS Subtitle, Estado AS Tag
+            SELECT TOP 8 'licencia' AS Type, CAST(Id AS NVARCHAR(10)), Plataforma AS Label,
+                   Area AS Subtitle, Estado AS Tag, GETUTCDATE() AS Date
             FROM dbo.Licencias
             WHERE (Plataforma LIKE '%' + @Q + '%' OR Area LIKE '%' + @Q + '%'
                 OR Responsable LIKE '%' + @Q + '%')
             ORDER BY Id
             """, term, "/licencias");
 
+        // ── Tickets ───────────────────────────────────────────────────────────
+        await TrySearch(conn, ct, results, """
+            SELECT TOP 8 'ticket' AS Type, CAST(Id AS NVARCHAR(36)), Title AS Label,
+                   TicketNumber AS Subtitle, Status AS Tag, CreatedAt AS Date
+            FROM dbo.Tickets
+            WHERE IsDeleted = 0
+              AND (Title LIKE '%' + @Q + '%' OR TicketNumber LIKE '%' + @Q + '%'
+                OR RequesterName LIKE '%' + @Q + '%')
+            ORDER BY CreatedAt DESC
+            """, term, "/tickets");
+
         // ── Usuarios (solo admin) ─────────────────────────────────────────────
         if (User.IsInRole("Admin"))
         {
             await TrySearch(conn, ct, results, """
                 SELECT TOP 5 'usuario' AS Type, Id, FullName AS Label,
-                       Username AS Subtitle, Role AS Tag
+                       Username AS Subtitle, Role AS Tag, CreatedAt AS Date
                 FROM dbo.AppUsers
                 WHERE IsActive = 1
                   AND (FullName LIKE '%' + @Q + '%' OR Username LIKE '%' + @Q + '%'
@@ -105,6 +116,7 @@ public class SearchController(IConfiguration config) : ControllerBase
                     label    = r.IsDBNull(2) ? "" : r.GetString(2),
                     subtitle = r.IsDBNull(3) ? "" : r.GetString(3),
                     tag      = r.IsDBNull(4) ? "" : r.GetString(4),
+                    date     = r.IsDBNull(5) ? (DateTime?)null : r.GetDateTime(5),
                     path,
                 });
             }
