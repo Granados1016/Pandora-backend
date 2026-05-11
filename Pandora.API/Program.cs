@@ -137,6 +137,7 @@ builder.Services.AddScoped<IProgressNotifier, SignalRProgressNotifier>();
 
 // ── Servicios en segundo plano ────────────────────────────────────────────────
 builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
+builder.Services.AddHostedService<Pandora.API.Services.CalendarReminderService>();
 
 // ── Infraestructura (EF Core, repositorios, servicios) ───────────────────────
 builder.Services.AddInfrastructure(builder.Configuration);
