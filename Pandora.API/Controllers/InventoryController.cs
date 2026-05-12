@@ -572,18 +572,70 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             using var wb     = new XLWorkbook(stream);
             var ws           = wb.Worksheets.First();
 
+            // ── Detectar la fila de encabezados por nombre (tolerante a columnas vacías,
+            //    filas en blanco al inicio, y orden alternativo de columnas) ──────────────
+            static string NormHeader(string raw)
+            {
+                var v = raw.Trim().TrimEnd('*').Trim().ToLowerInvariant()
+                           .Replace(" ", "").Replace("(yyyy-mm-dd)", "");
+                return v switch
+                {
+                    "numinventario" or "numerodeinventario" or "#"  => "NumInventario",
+                    "nombre"                                         => "Nombre",
+                    "marca"                                          => "Marca",
+                    "modelo"                                         => "Modelo",
+                    "numserie" or "numeroserie" or "serie"           => "NumSerie",
+                    "estado"                                         => "Estado",
+                    "departamento" or "depto" or "area"              => "Departamento",
+                    "asignadoa" or "asignado" or "responsable"       => "AsignadoA",
+                    "tipo"                                           => "Tipo",
+                    "fechacompra" or "fecha"                         => "FechaCompra",
+                    "precio" or "costo"                              => "Precio",
+                    "accesorios"                                     => "Accesorios",
+                    _                                                => raw.Trim(),
+                };
+            }
+
+            IXLRow? headerRow = null;
+            foreach (var r in ws.RowsUsed().Take(30))
+            {
+                bool hasNombre = r.Cells().Any(c =>
+                {
+                    var n = NormHeader(c.GetString());
+                    return n == "Nombre" || n == "NumInventario";
+                });
+                if (hasNombre) { headerRow = r; break; }
+            }
+
+            if (headerRow is null)
+                return BadRequest(new { title = "No se encontró la fila de encabezados. Asegúrese de que el archivo incluya columnas 'Nombre' y 'Tipo'." });
+
+            // Construir mapa nombre → número de columna
+            var colMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var cell in headerRow.CellsUsed())
+            {
+                var key = NormHeader(cell.GetString());
+                colMap.TryAdd(key, cell.Address.ColumnNumber);
+            }
+
+            // Función helper: obtener valor de columna por nombre de encabezado
+            string ColVal(IXLRow row, string colName) =>
+                colMap.TryGetValue(colName, out int c) ? row.Cell(c).GetString().Trim() : string.Empty;
+
             var validRows = new List<object>();
             var errors    = new List<object>();
             int totalRows = 0;
 
-            // Skip header row (row 1)
-            foreach (var row in ws.RowsUsed().Skip(1))
+            // Iterar filas de datos (después de la fila de encabezados)
+            foreach (var row in ws.RowsUsed().Where(r => r.RowNumber() > headerRow.RowNumber()))
             {
-                totalRows++;
-                string Cell(int c) => row.Cell(c).GetString().Trim();
+                // Ignorar filas completamente vacías
+                if (row.CellsUsed().All(c => string.IsNullOrWhiteSpace(c.GetString())))
+                    continue;
 
-                var name     = Cell(2);
-                var typeName = Cell(9);
+                totalRows++;
+                var name     = ColVal(row, "Nombre");
+                var typeName = ColVal(row, "Tipo");
                 var rowErrs  = new List<object>();
 
                 if (string.IsNullOrWhiteSpace(name))
@@ -595,7 +647,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 
                 if (rowErrs.Count > 0) { errors.AddRange(rowErrs); continue; }
 
-                var rawStatus = Cell(6);
+                var rawStatus = ColVal(row, "Estado");
                 var status = rawStatus switch
                 {
                     "Activo"        => "Activo",
@@ -605,21 +657,28 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     _               => "Activo",
                 };
 
+                // Precio: aceptar vacío, coma decimal, o formato moneda
+                decimal? price = null;
+                var priceRaw = ColVal(row, "Precio").Replace("$","").Replace(",","").Trim();
+                if (decimal.TryParse(priceRaw, System.Globalization.NumberStyles.Any,
+                        System.Globalization.CultureInfo.InvariantCulture, out var parsedPrice))
+                    price = parsedPrice;
+
                 validRows.Add(new
                 {
-                    inventoryNumber = Cell(1),
+                    inventoryNumber = ColVal(row, "NumInventario"),
                     name,
-                    category     = typeName,
-                    categoryId   = typeMap[typeName],
-                    brand        = Cell(3),
-                    model        = Cell(4),
-                    serialNumber = Cell(5),
+                    category      = typeName,
+                    categoryId    = typeMap[typeName],
+                    brand         = ColVal(row, "Marca"),
+                    model         = ColVal(row, "Modelo"),
+                    serialNumber  = ColVal(row, "NumSerie"),
                     status,
-                    department   = Cell(7),
-                    assignedTo   = Cell(8),
-                    purchaseDate = Cell(10),
-                    purchasePrice= Cell(11),
-                    accessories  = Cell(12),
+                    department    = ColVal(row, "Departamento"),
+                    assignedTo    = ColVal(row, "AsignadoA"),
+                    purchaseDate  = ColVal(row, "FechaCompra"),
+                    purchasePrice = priceRaw,
+                    accessories   = ColVal(row, "Accesorios"),
                 });
             }
 
