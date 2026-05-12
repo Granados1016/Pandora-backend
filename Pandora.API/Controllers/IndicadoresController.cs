@@ -40,12 +40,14 @@ public class IndicadoresController(
         {
             await using (var cmd = conn.CreateCommand())
             {
+                // Status en español: 'Completado' o 'Completado con errores' = campaña enviada
                 cmd.CommandText = """
                     SELECT
                         COUNT(*) AS Total,
                         SUM(CASE WHEN MONTH(SentAt) = MONTH(GETUTCDATE()) AND YEAR(SentAt) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisMonth
                     FROM dbo.EmailCampaigns
-                    WHERE IsDeleted = 0 AND Status = 'Sent'
+                    WHERE IsDeleted = 0
+                      AND Status IN ('Completado', 'Completado con errores')
                     """;
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (await r.ReadAsync(ct))
@@ -55,7 +57,7 @@ public class IndicadoresController(
                 }
             }
 
-            // Campañas por mes (últimos 6 meses)
+            // Campañas completadas por mes (últimos 6 meses)
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
@@ -63,7 +65,8 @@ public class IndicadoresController(
                         FORMAT(SentAt, 'MMM yy', 'es-MX') AS Month,
                         COUNT(*) AS Cnt
                     FROM dbo.EmailCampaigns
-                    WHERE IsDeleted = 0 AND Status = 'Sent'
+                    WHERE IsDeleted = 0
+                      AND Status IN ('Completado', 'Completado con errores')
                       AND SentAt >= DATEADD(MONTH, -5, DATEFROMPARTS(YEAR(GETUTCDATE()), MONTH(GETUTCDATE()), 1))
                     GROUP BY FORMAT(SentAt, 'MMM yy', 'es-MX'),
                              YEAR(SentAt) * 100 + MONTH(SentAt)
@@ -77,20 +80,19 @@ public class IndicadoresController(
         catch { /* tabla puede no existir en todos los entornos */ }
 
         // ── Inventario ────────────────────────────────────────────────────────
+        // InventoryItems no tiene columna IsDeleted; el FK real es InventoryTypeId
         int invItems = 0, invTypes = 0;
         var invByType = new List<object>();
         try
         {
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = """
-                    SELECT COUNT(*) FROM dbo.InventoryItems WHERE IsDeleted = 0
-                    """;
+                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems";
                 invItems = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryTypes WHERE IsDeleted = 0";
+                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryTypes WHERE IsActive = 1";
                 invTypes = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
             await using (var cmd = conn.CreateCommand())
@@ -98,9 +100,9 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT TOP 8 t.Name, COUNT(i.Id) AS Cnt
                     FROM dbo.InventoryTypes t
-                    LEFT JOIN dbo.InventoryItems i ON i.TypeId = t.Id AND i.IsDeleted = 0
-                    WHERE t.IsDeleted = 0
-                    GROUP BY t.Name
+                    LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
+                    WHERE t.IsActive = 1
+                    GROUP BY t.Id, t.Name
                     ORDER BY Cnt DESC
                     """;
                 await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -111,6 +113,7 @@ public class IndicadoresController(
         catch { }
 
         // ── Tickets ───────────────────────────────────────────────────────────
+        // Tickets usa hard-delete — no existe columna IsDeleted
         int ticketsTotal = 0, ticketsOpen = 0, ticketsResolved = 0;
         var ticketsByStatus = new List<object>();
         try
@@ -120,7 +123,6 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT Status, COUNT(*) AS Cnt
                     FROM dbo.Tickets
-                    WHERE IsDeleted = 0
                     GROUP BY Status
                     """;
                 await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -129,8 +131,8 @@ public class IndicadoresController(
                     var status = r.GetString(0);
                     var cnt    = r.GetInt32(1);
                     ticketsTotal += cnt;
-                    if (status is "Abierto" or "Open" or "Nuevo")   ticketsOpen     += cnt;
-                    if (status is "Resuelto" or "Closed" or "Cerrado") ticketsResolved += cnt;
+                    if (status is "Abierto" or "En Proceso" or "En Espera") ticketsOpen     += cnt;
+                    if (status is "Resuelto" or "Cerrado")                  ticketsResolved += cnt;
                     ticketsByStatus.Add(new { status, count = cnt });
                 }
             }
@@ -138,6 +140,7 @@ public class IndicadoresController(
         catch { }
 
         // ── Licencias ─────────────────────────────────────────────────────────
+        // Licencias usa hard-delete — no existe columna IsDeleted
         int licActive = 0, licExpiringSoon = 0;
         var licByEstado = new List<object>();
         try
@@ -147,7 +150,6 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT Estado, COUNT(*) AS Cnt
                     FROM dbo.Licencias
-                    WHERE IsDeleted = 0
                     GROUP BY Estado
                     """;
                 await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -163,10 +165,10 @@ public class IndicadoresController(
             {
                 cmd.CommandText = """
                     SELECT COUNT(*) FROM dbo.Licencias
-                    WHERE IsDeleted = 0 AND Estado = 'Activa'
-                      AND FechaVencimiento IS NOT NULL
-                      AND FechaVencimiento <= DATEADD(DAY, 30, GETUTCDATE())
-                      AND FechaVencimiento >= GETUTCDATE()
+                    WHERE Estado = 'Activa'
+                      AND ProximoPago IS NOT NULL
+                      AND ProximoPago <= DATEADD(DAY, 30, CAST(GETDATE() AS DATE))
+                      AND ProximoPago >= CAST(GETDATE() AS DATE)
                     """;
                 licExpiringSoon = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
@@ -174,6 +176,7 @@ public class IndicadoresController(
         catch { }
 
         // ── Calendario ────────────────────────────────────────────────────────
+        // Reservations usa hard-delete — no existe IsDeleted ni columna Status
         int calThisMonth = 0, calUpcoming = 0;
         try
         {
@@ -181,10 +184,9 @@ public class IndicadoresController(
             {
                 cmd.CommandText = """
                     SELECT
-                        SUM(CASE WHEN MONTH(StartTime) = MONTH(GETUTCDATE()) AND YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN StartTime >= GETUTCDATE() THEN 1 ELSE 0 END)
+                        ISNULL(SUM(CASE WHEN MONTH(StartTime) = MONTH(GETUTCDATE()) AND YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END), 0),
+                        ISNULL(SUM(CASE WHEN StartTime >= GETUTCDATE() THEN 1 ELSE 0 END), 0)
                     FROM dbo.Reservations
-                    WHERE IsDeleted = 0 AND Status <> 'Cancelada'
                     """;
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (await r.ReadAsync(ct))
