@@ -25,8 +25,14 @@ public class ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandling
             {
                 context.Response.StatusCode  = 500;
                 context.Response.ContentType = "application/json";
-                await context.Response.WriteAsync(
-                    JsonSerializer.Serialize(new { error = "Error interno del servidor. Inténtalo de nuevo." }));
+                // Exponer mensaje y tipo de excepción para facilitar diagnóstico.
+                // TODO: en producción estable, reemplazar por mensaje genérico.
+                await context.Response.WriteAsync(JsonSerializer.Serialize(new
+                {
+                    error  = ex.Message,
+                    type   = ex.GetType().Name,
+                    detail = ex.InnerException?.Message,
+                }));
             }
         }
     }

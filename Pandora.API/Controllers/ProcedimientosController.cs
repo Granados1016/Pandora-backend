@@ -60,7 +60,11 @@ public class ProcedimientosController(
         cmd.Parameters.AddWithValue("@FileName",    file.FileName);
         cmd.Parameters.AddWithValue("@ContentType", file.ContentType ?? "application/octet-stream");
         cmd.Parameters.AddWithValue("@FileSize",    file.Length);
-        cmd.Parameters.AddWithValue("@FileData",    bytes);
+        // VARBINARY(MAX) requiere Size = -1; AddWithValue infiere VarBinary(n)
+        // que falla para archivos > 8000 bytes en algunas configuraciones de SQL Server.
+        var pFileData = new Microsoft.Data.SqlClient.SqlParameter("@FileData",
+            System.Data.SqlDbType.VarBinary, -1) { Value = bytes };
+        cmd.Parameters.Add(pFileData);
         cmd.Parameters.AddWithValue("@UploadedBy",  CurrentUser() ?? "desconocido");
 
         var id = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
@@ -408,7 +412,8 @@ public class ProcedimientosController(
                 archCmd.Parameters.AddWithValue("@FileName", curFileName ?? "documento");
                 archCmd.Parameters.AddWithValue("@CT",       curContentType ?? "application/octet-stream");
                 archCmd.Parameters.AddWithValue("@Size",     curData.Length);
-                archCmd.Parameters.AddWithValue("@Data",     curData);
+                archCmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@Data",
+                    System.Data.SqlDbType.VarBinary, -1) { Value = curData });
                 archCmd.Parameters.AddWithValue("@User",     (object?)curUploader ?? DBNull.Value);
                 archCmd.Parameters.AddWithValue("@Date",     curUploadedAt);
                 await archCmd.ExecuteNonQueryAsync(ct);
@@ -426,7 +431,8 @@ public class ProcedimientosController(
             updCmd.Parameters.AddWithValue("@FileName", file.FileName);
             updCmd.Parameters.AddWithValue("@CT",       file.ContentType ?? "application/octet-stream");
             updCmd.Parameters.AddWithValue("@Size",     newBytes.Length);
-            updCmd.Parameters.AddWithValue("@Data",     newBytes);
+            updCmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@Data",
+                System.Data.SqlDbType.VarBinary, -1) { Value = newBytes });
             updCmd.Parameters.AddWithValue("@User",     (object?)CurrentUser() ?? DBNull.Value);
             updCmd.Parameters.AddWithValue("@Id",       id);
             await updCmd.ExecuteNonQueryAsync(ct);
