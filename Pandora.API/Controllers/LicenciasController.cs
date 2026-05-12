@@ -31,22 +31,25 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, Numero, Plataforma, Area, Responsable, FrecuenciaPago,
-                       FechaInicio, ProximoPago,
-                       DATEDIFF(day, CAST(GETDATE() AS DATE), ProximoPago) AS DiasRestantes,
-                       CostoMXN,
-                       CASE FrecuenciaPago
-                           WHEN 'Mensual'    THEN CostoMXN * 12
-                           WHEN 'Trimestral' THEN CostoMXN * 4
-                           WHEN 'Semestral'  THEN CostoMXN * 2
-                           WHEN 'Anual'      THEN CostoMXN
+                SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
+                       L.FechaInicio, L.ProximoPago,
+                       DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago) AS DiasRestantes,
+                       L.CostoMXN,
+                       CASE L.FrecuenciaPago
+                           WHEN 'Mensual'    THEN L.CostoMXN * 12
+                           WHEN 'Trimestral' THEN L.CostoMXN * 4
+                           WHEN 'Semestral'  THEN L.CostoMXN * 2
+                           WHEN 'Anual'      THEN L.CostoMXN
                            ELSE 0
                        END AS CostoAnualMXN,
-                       Estado, Notas, CreadoEn, ActualizadoEn
-                FROM dbo.Licencias
-                WHERE (@Area   IS NULL OR Area   = @Area)
-                  AND (@Estado IS NULL OR Estado = @Estado)
-                ORDER BY Numero
+                       L.Estado, L.Notas, L.CreadoEn, L.ActualizadoEn,
+                       (SELECT TOP 1 CONVERT(NVARCHAR(10), P.FechaPago, 120)
+                        FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
+                        ORDER BY P.FechaPago DESC) AS UltimoPago
+                FROM dbo.Licencias L
+                WHERE (@Area   IS NULL OR L.Area   = @Area)
+                  AND (@Estado IS NULL OR L.Estado = @Estado)
+                ORDER BY L.Numero
                 """;
             cmd.Parameters.AddWithValue("@Area",   (object?)area   ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Estado", (object?)estado ?? DBNull.Value);
@@ -150,22 +153,25 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, Numero, Plataforma, Area, Responsable, FrecuenciaPago,
-                       FechaInicio, ProximoPago,
-                       DATEDIFF(day, CAST(GETDATE() AS DATE), ProximoPago) AS DiasRestantes,
-                       CostoMXN,
-                       CASE FrecuenciaPago
-                           WHEN 'Mensual'    THEN CostoMXN * 12
-                           WHEN 'Trimestral' THEN CostoMXN * 4
-                           WHEN 'Semestral'  THEN CostoMXN * 2
-                           WHEN 'Anual'      THEN CostoMXN
+                SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
+                       L.FechaInicio, L.ProximoPago,
+                       DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago) AS DiasRestantes,
+                       L.CostoMXN,
+                       CASE L.FrecuenciaPago
+                           WHEN 'Mensual'    THEN L.CostoMXN * 12
+                           WHEN 'Trimestral' THEN L.CostoMXN * 4
+                           WHEN 'Semestral'  THEN L.CostoMXN * 2
+                           WHEN 'Anual'      THEN L.CostoMXN
                            ELSE 0
                        END AS CostoAnualMXN,
-                       Estado, Notas, CreadoEn, ActualizadoEn
-                FROM dbo.Licencias
-                WHERE Estado NOT IN ('Cancelada')
-                  AND DATEDIFF(day, CAST(GETDATE() AS DATE), ProximoPago) <= 10
-                ORDER BY DATEDIFF(day, CAST(GETDATE() AS DATE), ProximoPago)
+                       L.Estado, L.Notas, L.CreadoEn, L.ActualizadoEn,
+                       (SELECT TOP 1 CONVERT(NVARCHAR(10), P.FechaPago, 120)
+                        FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
+                        ORDER BY P.FechaPago DESC) AS UltimoPago
+                FROM dbo.Licencias L
+                WHERE L.Estado NOT IN ('Cancelada')
+                  AND DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago) <= 10
+                ORDER BY DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago)
                 """;
 
             var list = new List<object>();
@@ -187,19 +193,22 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, Numero, Plataforma, Area, Responsable, FrecuenciaPago,
-                       FechaInicio, ProximoPago,
-                       DATEDIFF(day, CAST(GETDATE() AS DATE), ProximoPago) AS DiasRestantes,
-                       CostoMXN,
-                       CASE FrecuenciaPago
-                           WHEN 'Mensual'    THEN CostoMXN * 12
-                           WHEN 'Trimestral' THEN CostoMXN * 4
-                           WHEN 'Semestral'  THEN CostoMXN * 2
-                           WHEN 'Anual'      THEN CostoMXN
+                SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
+                       L.FechaInicio, L.ProximoPago,
+                       DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago) AS DiasRestantes,
+                       L.CostoMXN,
+                       CASE L.FrecuenciaPago
+                           WHEN 'Mensual'    THEN L.CostoMXN * 12
+                           WHEN 'Trimestral' THEN L.CostoMXN * 4
+                           WHEN 'Semestral'  THEN L.CostoMXN * 2
+                           WHEN 'Anual'      THEN L.CostoMXN
                            ELSE 0
                        END AS CostoAnualMXN,
-                       Estado, Notas, CreadoEn, ActualizadoEn
-                FROM dbo.Licencias WHERE Id = @Id
+                       L.Estado, L.Notas, L.CreadoEn, L.ActualizadoEn,
+                       (SELECT TOP 1 CONVERT(NVARCHAR(10), P.FechaPago, 120)
+                        FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
+                        ORDER BY P.FechaPago DESC) AS UltimoPago
+                FROM dbo.Licencias L WHERE L.Id = @Id
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -355,6 +364,183 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         catch (Exception ex) { logger.LogError(ex, "ExportarExcel licencias"); return StatusCode(500, ex.Message); }
     }
 
+    // ── POST /api/licencias/{id}/pago ────────────────────────────────────────
+    [HttpPost("{id:int}/pago")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> RegistrarPago(int id, [FromBody] PagoRequest req, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Obtener frecuencia y próximo pago actual
+            await using var cmdGet = conn.CreateCommand();
+            cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago FROM dbo.Licencias WHERE Id = @Id";
+            cmdGet.Parameters.AddWithValue("@Id", id);
+            await using var r = await cmdGet.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return NotFound();
+            string   frecuencia  = r.GetString(0);
+            DateTime proximoPago = r.GetDateTime(1);
+            await r.CloseAsync();
+
+            // Calcular nuevo ProximoPago
+            int meses = frecuencia switch {
+                "Mensual"    => 1,
+                "Trimestral" => 3,
+                "Semestral"  => 6,
+                "Anual"      => 12,
+                _            => 1,
+            };
+            DateTime nuevoProxPago = proximoPago.AddMonths(meses);
+
+            string usuario = User.FindFirstValue(ClaimTypes.Name)
+                          ?? User.FindFirstValue("sub")
+                          ?? "sistema";
+
+            // Insertar registro de pago
+            await using var cmdIns = conn.CreateCommand();
+            cmdIns.CommandText = """
+                INSERT INTO dbo.LicenciaPagos
+                    (LicenciaId, FechaPago, Monto, NuevoProximoPago, Notas, RegistradoPor)
+                VALUES
+                    (@LicenciaId, @FechaPago, @Monto, @NuevoProximoPago, @Notas, @RegistradoPor)
+                """;
+            cmdIns.Parameters.AddWithValue("@LicenciaId",       id);
+            cmdIns.Parameters.AddWithValue("@FechaPago",        req.FechaPago.ToString("yyyy-MM-dd"));
+            cmdIns.Parameters.AddWithValue("@Monto",            req.Monto);
+            cmdIns.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
+            cmdIns.Parameters.AddWithValue("@Notas",            (object?)req.Notas ?? DBNull.Value);
+            cmdIns.Parameters.AddWithValue("@RegistradoPor",    usuario);
+            await cmdIns.ExecuteNonQueryAsync(ct);
+
+            // Actualizar licencia: nuevo ProximoPago + Estado Activa
+            await using var cmdUpd = conn.CreateCommand();
+            cmdUpd.CommandText = """
+                UPDATE dbo.Licencias
+                SET ProximoPago   = @NuevoProximoPago,
+                    Estado        = 'Activa',
+                    ActualizadoEn = GETUTCDATE()
+                WHERE Id = @Id
+                """;
+            cmdUpd.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
+            cmdUpd.Parameters.AddWithValue("@Id", id);
+            await cmdUpd.ExecuteNonQueryAsync(ct);
+
+            return Ok(new { nuevoProximoPago = nuevoProxPago.ToString("yyyy-MM-dd"), estado = "Activa" });
+        }
+        catch (Exception ex) { logger.LogError(ex, "RegistrarPago licencia {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // ── POST /api/licencias/pagos/masivo ─────────────────────────────────────
+    [HttpPost("pagos/masivo")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> PagoMasivo([FromBody] PagoMasivoRequest req, CancellationToken ct)
+    {
+        try
+        {
+            if (req.Ids == null || req.Ids.Length == 0) return BadRequest("Sin licencias seleccionadas");
+
+            string usuario = User.FindFirstValue(ClaimTypes.Name)
+                          ?? User.FindFirstValue("sub")
+                          ?? "sistema";
+            int actualizadas = 0;
+
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            foreach (int id in req.Ids)
+            {
+                await using var cmdGet = conn.CreateCommand();
+                cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago, CostoMXN FROM dbo.Licencias WHERE Id = @Id";
+                cmdGet.Parameters.AddWithValue("@Id", id);
+                await using var r = await cmdGet.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) continue;
+                string   frecuencia  = r.GetString(0);
+                DateTime proximoPago = r.GetDateTime(1);
+                decimal  costo       = r.GetDecimal(2);
+                await r.CloseAsync();
+
+                int meses = frecuencia switch {
+                    "Mensual"    => 1,
+                    "Trimestral" => 3,
+                    "Semestral"  => 6,
+                    "Anual"      => 12,
+                    _            => 1,
+                };
+                DateTime nuevoProxPago = proximoPago.AddMonths(meses);
+
+                await using var cmdIns = conn.CreateCommand();
+                cmdIns.CommandText = """
+                    INSERT INTO dbo.LicenciaPagos
+                        (LicenciaId, FechaPago, Monto, NuevoProximoPago, Notas, RegistradoPor)
+                    VALUES
+                        (@LicenciaId, @FechaPago, @Monto, @NuevoProximoPago, @Notas, @RegistradoPor)
+                    """;
+                cmdIns.Parameters.AddWithValue("@LicenciaId",       id);
+                cmdIns.Parameters.AddWithValue("@FechaPago",        req.FechaPago.ToString("yyyy-MM-dd"));
+                cmdIns.Parameters.AddWithValue("@Monto",            costo);
+                cmdIns.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
+                cmdIns.Parameters.AddWithValue("@Notas",            (object?)req.Notas ?? DBNull.Value);
+                cmdIns.Parameters.AddWithValue("@RegistradoPor",    usuario);
+                await cmdIns.ExecuteNonQueryAsync(ct);
+
+                await using var cmdUpd = conn.CreateCommand();
+                cmdUpd.CommandText = """
+                    UPDATE dbo.Licencias
+                    SET ProximoPago   = @NuevoProximoPago,
+                        Estado        = 'Activa',
+                        ActualizadoEn = GETUTCDATE()
+                    WHERE Id = @Id
+                    """;
+                cmdUpd.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
+                cmdUpd.Parameters.AddWithValue("@Id", id);
+                await cmdUpd.ExecuteNonQueryAsync(ct);
+                actualizadas++;
+            }
+
+            return Ok(new { actualizadas });
+        }
+        catch (Exception ex) { logger.LogError(ex, "PagoMasivo"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── GET /api/licencias/{id}/historial-pagos ───────────────────────────────
+    [HttpGet("{id:int}/historial-pagos")]
+    public async Task<IActionResult> HistorialPagos(int id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT Id, LicenciaId, FechaPago, Monto, NuevoProximoPago, Notas, RegistradoPor, CreadoEn
+                FROM dbo.LicenciaPagos
+                WHERE LicenciaId = @Id
+                ORDER BY FechaPago DESC, CreadoEn DESC
+                """;
+            cmd.Parameters.AddWithValue("@Id", id);
+
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new
+                {
+                    id               = r.GetInt32(r.GetOrdinal("Id")),
+                    licenciaId       = r.GetInt32(r.GetOrdinal("LicenciaId")),
+                    fechaPago        = r.GetDateTime(r.GetOrdinal("FechaPago")).ToString("yyyy-MM-dd"),
+                    monto            = r.GetDecimal(r.GetOrdinal("Monto")),
+                    nuevoProximoPago = r.IsDBNull(r.GetOrdinal("NuevoProximoPago")) ? null
+                                       : r.GetDateTime(r.GetOrdinal("NuevoProximoPago")).ToString("yyyy-MM-dd"),
+                    notas            = r.IsDBNull(r.GetOrdinal("Notas")) ? null : r.GetString(r.GetOrdinal("Notas")),
+                    registradoPor    = r.IsDBNull(r.GetOrdinal("RegistradoPor")) ? null : r.GetString(r.GetOrdinal("RegistradoPor")),
+                    creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+                });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "HistorialPagos licencia {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static object MapRow(SqlDataReader r) => new
@@ -374,6 +560,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         notas          = r.IsDBNull(r.GetOrdinal("Notas")) ? null : r.GetString(r.GetOrdinal("Notas")),
         creadoEn       = r.GetDateTime(r.GetOrdinal("CreadoEn")),
         actualizadoEn  = r.GetDateTime(r.GetOrdinal("ActualizadoEn")),
+        ultimoPago     = r.IsDBNull(r.GetOrdinal("UltimoPago")) ? null : r.GetString(r.GetOrdinal("UltimoPago")),
     };
 
     private static void AddParams(SqlCommand cmd, LicenciaRequest req)
@@ -669,3 +856,6 @@ public record LicenciaRequest(
     string Estado,
     string? Notas
 );
+
+public record PagoRequest(DateTime FechaPago, decimal Monto, string? Notas);
+public record PagoMasivoRequest(int[] Ids, DateTime FechaPago, string? Notas);

@@ -588,6 +588,36 @@ using (var scope2 = app.Services.CreateScope())
     }
 }
 
+// ── Tabla LicenciaPagos (historial de pagos por licencia) ────────────────────
+using (var scopePagos = app.Services.CreateScope())
+{
+    var cfgP = scopePagos.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connP = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgP.GetConnectionString("PandoraDb"));
+    await connP.OpenAsync();
+    await using var cmdP = connP.CreateCommand();
+    cmdP.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables
+                       WHERE name = 'LicenciaPagos' AND schema_id = SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.LicenciaPagos (
+                Id               INT           IDENTITY(1,1) PRIMARY KEY,
+                LicenciaId       INT           NOT NULL,
+                FechaPago        DATE          NOT NULL,
+                Monto            DECIMAL(12,2) NOT NULL DEFAULT 0,
+                NuevoProximoPago DATE          NULL,
+                Notas            NVARCHAR(500) NULL,
+                RegistradoPor    NVARCHAR(100) NULL,
+                CreadoEn         DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+                CONSTRAINT FK_LicenciaPagos_Licencias FOREIGN KEY (LicenciaId)
+                    REFERENCES dbo.Licencias(Id) ON DELETE CASCADE
+            );
+            CREATE INDEX IX_LicenciaPagos_LicenciaId ON dbo.LicenciaPagos (LicenciaId);
+        END
+        """;
+    await cmdP.ExecuteNonQueryAsync();
+}
+
 // ── Tablas de Inventario (fuera del modelo EF — migración manual) ─────────────
 using (var scope3 = app.Services.CreateScope())
 {
