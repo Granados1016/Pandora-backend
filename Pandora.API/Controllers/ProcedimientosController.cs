@@ -27,54 +27,87 @@ public class ProcedimientosController(
     [HttpPost]
     [RequestSizeLimit(52_428_800)] // 50 MB
     public async Task<IActionResult> Upload(
-        IFormFile file,
-        [FromForm] string title,
+        IFormFile? file,
+        [FromForm] string? title,
         [FromForm] string? description,
         [FromForm] string? category,
         CancellationToken ct)
     {
+        // ── Log de diagnóstico (ayuda a identificar problemas en producción) ──
+        logger.LogInformation("Upload: ContentType={CT} File={File} FileLen={Len} Title={Title}",
+            Request.ContentType, file?.FileName ?? "NULL", file?.Length ?? -1, title ?? "NULL");
+
         if (file is null || file.Length == 0)
-            return BadRequest("Archivo requerido.");
+            return BadRequest(new { error = "Archivo requerido. El campo 'file' no llegó al servidor." });
         if (string.IsNullOrWhiteSpace(title))
-            return BadRequest("El título es requerido.");
+            return BadRequest(new { error = "El título es requerido." });
 
-        // Leer bytes en memoria (límite 50 MB ya forzado por RequestSizeLimit)
-        using var ms = new MemoryStream();
-        await file.CopyToAsync(ms, ct);
-        var bytes = ms.ToArray();
+        try
+        {
+            // Leer bytes en memoria (límite 50 MB ya forzado por RequestSizeLimit)
+            using var ms = new MemoryStream();
+            await file.CopyToAsync(ms, ct);
+            var bytes = ms.ToArray();
 
-        await using var conn = Conn();
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandTimeout = 120;
-        cmd.CommandText = """
-            INSERT INTO dbo.Procedimientos
-                (Title, Description, Category, FileName, FileContentType, FileSize, FileData, UploadedBy, UploadedAt)
-            OUTPUT INSERTED.Id
-            VALUES
-                (@Title, @Desc, @Cat, @FileName, @ContentType, @FileSize, @FileData, @UploadedBy, GETUTCDATE())
-            """;
-        cmd.Parameters.AddWithValue("@Title",       title.Trim());
-        cmd.Parameters.AddWithValue("@Desc",        (object?)description?.Trim() ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@Cat",         (object?)category?.Trim()    ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@FileName",    file.FileName);
-        cmd.Parameters.AddWithValue("@ContentType", file.ContentType ?? "application/octet-stream");
-        cmd.Parameters.AddWithValue("@FileSize",    file.Length);
-        // VARBINARY(MAX) requiere Size = -1; AddWithValue infiere VarBinary(n)
-        // que falla para archivos > 8000 bytes en algunas configuraciones de SQL Server.
-        var pFileData = new Microsoft.Data.SqlClient.SqlParameter("@FileData",
-            System.Data.SqlDbType.VarBinary, -1) { Value = bytes };
-        cmd.Parameters.Add(pFileData);
-        cmd.Parameters.AddWithValue("@UploadedBy",  CurrentUser() ?? "desconocido");
+            logger.LogInformation("Upload: {Bytes} bytes leídos, abriendo conexión BD...", bytes.Length);
 
-        var id = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
-        logger.LogInformation("Procedimiento #{Id} '{Title}' subido por {User} ({Size} KB)",
-            id, title, CurrentUser(), bytes.Length / 1024);
-        _ = AuditHelper.Log(config.GetConnectionString("PandoraDb")!,
-            CurrentUser() ?? "?", "Upload", "Procedimientos", id.ToString(),
-            $"Archivo: {file.FileName} ({bytes.Length / 1024} KB)",
-            HttpContext.Connection.RemoteIpAddress?.ToString());
-        return Ok(new { id });
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandTimeout = 120;
+
+            // Primero verificar que la columna FileData existe (diagnóstico)
+            await using (var chk = conn.CreateCommand())
+            {
+                chk.CommandText = """
+                    IF NOT EXISTS (
+                        SELECT 1 FROM sys.columns
+                        WHERE object_id = OBJECT_ID('dbo.Procedimientos') AND name = 'FileData'
+                    )
+                        ALTER TABLE dbo.Procedimientos ADD FileData VARBINARY(MAX) NULL;
+                    """;
+                await chk.ExecuteNonQueryAsync(ct);
+            }
+
+            cmd.CommandText = """
+                INSERT INTO dbo.Procedimientos
+                    (Title, Description, Category, FileName, FileContentType, FileSize, FileData, UploadedBy, UploadedAt)
+                OUTPUT INSERTED.Id
+                VALUES
+                    (@Title, @Desc, @Cat, @FileName, @ContentType, @FileSize, @FileData, @UploadedBy, GETUTCDATE())
+                """;
+            cmd.Parameters.AddWithValue("@Title",       title.Trim());
+            cmd.Parameters.AddWithValue("@Desc",        (object?)description?.Trim() ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Cat",         (object?)category?.Trim()    ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@FileName",    file.FileName);
+            cmd.Parameters.AddWithValue("@ContentType", file.ContentType ?? "application/octet-stream");
+            cmd.Parameters.AddWithValue("@FileSize",    file.Length);
+            // VARBINARY(MAX) requiere Size = -1 explícito
+            var pFileData = new SqlParameter("@FileData", System.Data.SqlDbType.VarBinary, -1)
+                { Value = bytes };
+            cmd.Parameters.Add(pFileData);
+            cmd.Parameters.AddWithValue("@UploadedBy", CurrentUser() ?? "desconocido");
+
+            var id = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
+            logger.LogInformation("Upload OK: Procedimiento #{Id} '{Title}' por {User} ({Size} KB)",
+                id, title, CurrentUser(), bytes.Length / 1024);
+            _ = AuditHelper.Log(config.GetConnectionString("PandoraDb")!,
+                CurrentUser() ?? "?", "Upload", "Procedimientos", id.ToString(),
+                $"Archivo: {file.FileName} ({bytes.Length / 1024} KB)",
+                HttpContext.Connection.RemoteIpAddress?.ToString());
+            return Ok(new { id });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Upload FAILED: {Msg}", ex.Message);
+            return StatusCode(500, new
+            {
+                error  = ex.Message,
+                type   = ex.GetType().Name,
+                detail = ex.InnerException?.Message,
+                hint   = "Revisa los logs de Railway para más detalle.",
+            });
+        }
     }
 
     // ── GET /api/procedimientos ───────────────────────────────────────────────
