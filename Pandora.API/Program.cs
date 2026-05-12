@@ -29,6 +29,12 @@ using Swashbuckle.AspNetCore.SwaggerUI;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// ── Kestrel: límite de cuerpo de request para uploads grandes (50 MB) ────────
+builder.WebHost.ConfigureKestrel(opts =>
+{
+    opts.Limits.MaxRequestBodySize = 52_428_800; // 50 MB
+});
+
 // ── Resolver pipe de LocalDB si aplica ──────────────────────────────────────
 string rawConnStr = builder.Configuration.GetConnectionString("PandoraDb") ?? "";
 string resolvedConnStr = ResolveLocalDbPipe(rawConnStr);
@@ -177,6 +183,12 @@ builder.Services.AddRateLimiter(options =>
 // ════════════════════════════════════════════════════════════════════════════
 var app = builder.Build();
 // ════════════════════════════════════════════════════════════════════════════
+
+// ── Manejo global de excepciones (DEBE IR ANTES de CORS) ─────────────────
+// Captura cualquier excepción no manejada y garantiza que la respuesta 500
+// pase por el middleware de CORS (que se registra después), de modo que el
+// header Access-Control-Allow-Origin siempre esté presente.
+app.UseMiddleware<Pandora.API.Middleware.ErrorHandlingMiddleware>();
 
 // ── Security Headers ─────────────────────────────────────────────────────
 app.UseSecurityHeaders();

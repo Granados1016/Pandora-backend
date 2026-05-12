@@ -16,10 +16,18 @@ public class ErrorHandlingMiddleware(RequestDelegate next, ILogger<ErrorHandling
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Unhandled exception");
-            context.Response.StatusCode  = 500;
-            context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+            logger.LogError(ex, "Unhandled exception on {Method} {Path}",
+                context.Request.Method, context.Request.Path);
+
+            // Solo escribir si la respuesta no ha comenzado todavía;
+            // si ya empezó no podemos cambiar los headers/status.
+            if (!context.Response.HasStarted)
+            {
+                context.Response.StatusCode  = 500;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync(
+                    JsonSerializer.Serialize(new { error = "Error interno del servidor. Inténtalo de nuevo." }));
+            }
         }
     }
 }
