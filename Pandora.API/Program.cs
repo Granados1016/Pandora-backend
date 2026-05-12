@@ -895,6 +895,25 @@ using (var scopeProc = app.Services.CreateScope())
             BEGIN
                 ALTER TABLE dbo.Procedimientos ADD FileData VARBINARY(MAX) NULL;
             END
+
+            -- Migración: hacer nullable FilePath si existe (esquema antiguo con almacenamiento en disco)
+            -- Sin esto el INSERT falla con "Cannot insert NULL into FilePath"
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.Procedimientos')
+                         AND name = 'FilePath'
+                         AND is_nullable = 0)
+            BEGIN
+                ALTER TABLE dbo.Procedimientos ALTER COLUMN FilePath NVARCHAR(500) NULL;
+            END
+
+            -- Ídem para cualquier otra columna de disco que pudiera ser NOT NULL
+            IF EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.Procedimientos')
+                         AND name = 'StoragePath'
+                         AND is_nullable = 0)
+            BEGIN
+                ALTER TABLE dbo.Procedimientos ALTER COLUMN StoragePath NVARCHAR(1000) NULL;
+            END
         END
         """;
     await cmdProc.ExecuteNonQueryAsync();
