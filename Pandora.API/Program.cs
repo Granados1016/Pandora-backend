@@ -178,11 +178,8 @@ builder.Services.AddRateLimiter(options =>
 var app = builder.Build();
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── Security Headers (Sprint 2) ───────────────────────────────────────────
+// ── Security Headers ─────────────────────────────────────────────────────
 app.UseSecurityHeaders();
-
-// ── Rate Limiter (Sprint 2) ───────────────────────────────────────────────
-app.UseRateLimiter();
 
 // ── Directorios de almacenamiento ─────────────────────────────────────────
 string wwwroot     = app.Environment.WebRootPath ?? Path.Combine(Directory.GetCurrentDirectory(), "wwwroot");
@@ -210,7 +207,11 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 // ── Pipeline ──────────────────────────────────────────────────────────────
+// ORDEN CRÍTICO: CORS → RateLimit → Auth → Authorization
+// Si RateLimit va antes que CORS, las respuestas 429 salen sin header
+// Access-Control-Allow-Origin y el browser bloquea la respuesta.
 app.UseCors("PandoraPolicy");
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
