@@ -165,24 +165,95 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await using var cmd = conn.CreateCommand();
+
+            // ── KPIs principales ──────────────────────────────────────────────
             // TRY_CAST cubre tanto Status INT (1,2,3,4) como NVARCHAR ('Activo',...)
+            await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT
                     COUNT(*) AS Total,
                     ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')        THEN 1 ELSE 0 END), 0) AS Activos,
                     ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('2','Mantenimiento') THEN 1 ELSE 0 END), 0) AS EnMantenimiento,
-                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja')  THEN 1 ELSE 0 END), 0) AS DadosDeBaja
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('3','Dado de baja')  THEN 1 ELSE 0 END), 0) AS DadosDeBaja,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('4','En almacén')    THEN 1 ELSE 0 END), 0) AS EnAlmacen,
+                    ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')
+                                    THEN ISNULL(PurchasePrice, 0) ELSE 0 END), 0) AS ActiveValue,
+                    ISNULL(SUM(ISNULL(PurchasePrice, 0)), 0) AS TotalValue
                 FROM dbo.InventoryItems
                 """;
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
+            var total           = r.GetInt32(0);
+            var activos         = r.GetInt32(1);
+            var enMantenimiento = r.GetInt32(2);
+            var dadosDeBaja     = r.GetInt32(3);
+            var enAlmacen       = r.GetInt32(4);
+            var activeValue     = r.GetDecimal(5);
+            var totalValue      = r.GetDecimal(6);
+            await r.CloseAsync();
+
+            // ── Distribución por tipo ─────────────────────────────────────────
+            await using var cmd2 = conn.CreateCommand();
+            cmd2.CommandText = """
+                SELECT t.Name AS TypeName,
+                       COUNT(i.Id) AS TotalCount,
+                       ISNULL(SUM(CASE WHEN TRY_CAST(i.Status AS NVARCHAR(50)) IN ('1','Activo') THEN 1 ELSE 0 END), 0) AS ActiveCount
+                FROM dbo.InventoryTypes t
+                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
+                WHERE t.IsActive = 1
+                GROUP BY t.Id, t.Name
+                HAVING COUNT(i.Id) > 0
+                ORDER BY TotalCount DESC
+                """;
+            var byType = new List<object>();
+            await using var r2 = await cmd2.ExecuteReaderAsync(ct);
+            while (await r2.ReadAsync(ct))
+                byType.Add(new
+                {
+                    typeName    = r2.GetString(0),
+                    totalCount  = r2.GetInt32(1),
+                    activeCount = r2.GetInt32(2),
+                });
+            await r2.CloseAsync();
+
+            // ── Últimas transferencias ────────────────────────────────────────
+            await using var cmd3 = conn.CreateCommand();
+            cmd3.CommandText = """
+                SELECT TOP 5 et.Id, i.Name AS ItemName, et.FromPerson, et.ToPerson, et.TransferDate
+                FROM dbo.EquipmentTransfers et
+                JOIN dbo.InventoryItems i ON et.InventoryItemId = i.Id
+                ORDER BY et.TransferDate DESC
+                """;
+            var recentTransfers = new List<object>();
+            await using var r3 = await cmd3.ExecuteReaderAsync(ct);
+            while (await r3.ReadAsync(ct))
+                recentTransfers.Add(new
+                {
+                    id           = r3.GetGuid(0),
+                    itemName     = r3.GetString(1),
+                    fromPerson   = r3.IsDBNull(2) ? null : r3.GetString(2),
+                    toPerson     = r3.IsDBNull(3) ? null : r3.GetString(3),
+                    transferDate = r3.GetDateTime(4),
+                });
+
             return Ok(new
             {
-                total           = r.GetInt32(0),
-                activos         = r.GetInt32(1),
-                enMantenimiento = r.GetInt32(2),
-                dadosDeBaja     = r.GetInt32(3),
+                // Nombres en español — usados por Widgets.jsx (Dashboard)
+                total,
+                activos,
+                enMantenimiento,
+                dadosDeBaja,
+                // Aliases en inglés — usados por InventoryDashboard.jsx
+                totalCount          = total,
+                activeCount         = activos,
+                maintenanceCount    = enMantenimiento,
+                decommissionedCount = dadosDeBaja,
+                inStorageCount      = enAlmacen,
+                // Valores monetarios y listas
+                activeValue,
+                totalValue,
+                byType,
+                recentTransfers,
             });
         }
         catch (Exception ex) { logger.LogError(ex, "GetDashboard Inventory"); return StatusCode(500, ex.Message); }
