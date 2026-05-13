@@ -179,4 +179,103 @@ public class AdminController(
 
         return File(bytes, "application/octet-stream", $"PandoraDB_{timestamp}.sql");
     }
+
+    // ── POST /api/admin/fix-encoding ──────────────────────────────────────────
+    /// <summary>
+    /// Corrige mojibake UTF-8→Latin-1 en todas las columnas NVARCHAR de la BD.
+    /// Usar cuando aparezcan nombres con "Ã©" en lugar de "é", etc.
+    /// </summary>
+    [HttpPost("fix-encoding")]
+    public async Task<IActionResult> FixEncoding(CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        var tableCols = new (string Table, string[] Cols)[]
+        {
+            ("Employees",         ["FullName", "Email", "Phone", "Position"]),
+            ("AppUsers",          ["FullName", "Email"]),
+            ("InventoryTypes",    ["Name", "Description", "Department"]),
+            ("InventoryItems",    ["Name", "Brand", "Model", "SerialNumber",
+                                   "Department", "AssignedTo", "Accessories",
+                                   "DecommissionReason"]),
+            ("EquipmentTransfers",["FromDepartment", "FromPerson",
+                                   "ToDepartment", "ToPerson", "Notes", "CreatedBy"]),
+            ("Licencias",         ["Plataforma", "Area", "Responsable", "Notas"]),
+            ("Comunicados",       ["Title", "Content", "Author"]),
+            ("Notifications",     ["Title", "Message"]),
+            ("Rooms",             ["Name", "Location"]),
+            ("Reservations",      ["Title", "Description", "CreatedBy"]),
+            ("RoomRequests",      ["Title", "Description", "RequestedBy"]),
+            ("Procedimientos",    ["Title", "Description", "Category", "UploadedBy"]),
+            ("ProcedimientoCategorias", ["Name"]),
+            ("Tickets",           ["Title", "Description", "RequestedBy",
+                                   "AssignedTo", "Department", "Category"]),
+            ("Indicadores",       ["Nombre", "Descripcion", "Unidad",
+                                   "Responsable", "Area"]),
+            ("Departments",       ["Name"]),
+        };
+
+        var fixes = new (string SqlBad, string SqlGood)[]
+        {
+            ("NCHAR(0xC3)+NCHAR(0xA9)",  "NCHAR(0xE9)"),  // é
+            ("NCHAR(0xC3)+NCHAR(0xB3)",  "NCHAR(0xF3)"),  // ó
+            ("NCHAR(0xC3)+NCHAR(0xA1)",  "NCHAR(0xE1)"),  // á
+            ("NCHAR(0xC3)+NCHAR(0xB1)",  "NCHAR(0xF1)"),  // ñ
+            ("NCHAR(0xC3)+NCHAR(0xBA)",  "NCHAR(0xFA)"),  // ú
+            ("NCHAR(0xC3)+NCHAR(0xBC)",  "NCHAR(0xFC)"),  // ü
+            ("NCHAR(0xC3)+NCHAR(0xAD)",  "NCHAR(0xED)"),  // í
+            ("NCHAR(0xC3)+NCHAR(0x2030)","NCHAR(0xC9)"),  // É
+            ("NCHAR(0xC3)+NCHAR(0x201C)","NCHAR(0xD3)"),  // Ó
+            ("NCHAR(0xC3)+NCHAR(0x0161)","NCHAR(0xDA)"),  // Ú
+            ("NCHAR(0xC3)+NCHAR(0x2018)","NCHAR(0xD1)"),  // Ñ
+            ("NCHAR(0xC3)+NCHAR(0x0081)","NCHAR(0xC1)"),  // Á
+            ("NCHAR(0xC3)+NCHAR(0x008D)","NCHAR(0xCD)"),  // Í
+            ("NCHAR(0xC2)+NCHAR(0xBF)",  "NCHAR(0xBF)"),  // ¿
+            ("NCHAR(0xC2)+NCHAR(0xA1)",  "NCHAR(0xA1)"),  // ¡
+        };
+
+        string FixExpr(string col)
+        {
+            string expr = $"[{col}]";
+            foreach (var (sqlBad, sqlGood) in fixes)
+                expr = $"REPLACE({expr}, {sqlBad}, {sqlGood})";
+            return expr;
+        }
+
+        var results = new List<object>();
+
+        foreach (var (table, cols) in tableCols)
+        {
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                var whereClause = string.Join(" OR ", cols.Select(c =>
+                    $"([{c}] LIKE N'%' + NCHAR(0xC3) + N'%' OR [{c}] LIKE N'%' + NCHAR(0xC2) + N'%')"));
+                var setClause = string.Join(", ", cols.Select(c =>
+                    $"[{c}] = {FixExpr(c)}"));
+
+                cmd.CommandText = $"""
+                    IF OBJECT_ID('dbo.{table}') IS NOT NULL
+                    BEGIN
+                        UPDATE dbo.[{table}]
+                        SET {setClause}
+                        WHERE {whereClause};
+                        SELECT @@ROWCOUNT;
+                    END
+                    ELSE SELECT 0;
+                    """;
+
+                var rows = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
+                results.Add(new { table, rowsFixed = rows });
+            }
+            catch (Exception ex)
+            {
+                results.Add(new { table, error = ex.Message });
+            }
+        }
+
+        logger.LogInformation("fix-encoding ejecutado por {User}", User.Identity?.Name);
+        return Ok(new { message = "Corrección completada.", details = results });
+    }
 }

@@ -1010,6 +1010,108 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdX.ExecuteNonQueryAsync();
 }
 
+// ── Correccion de encoding: mojibake UTF-8 hacia Latin-1 en toda la BD ───────
+// Bytes UTF-8 de caracteres con tilde (e.g. C3 A9 = e-acento) almacenados
+// como dos chars Latin-1 en columnas NVARCHAR. Idempotente: sin datos corruptos
+// el bloque termina en <1 ms sin tocar nada.
+using (var scopeEnc = app.Services.CreateScope())
+{
+    var cfgEnc = scopeEnc.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connEnc = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgEnc.GetConnectionString("PandoraDb"));
+    await connEnc.OpenAsync();
+
+    await using var cmdEnc = connEnc.CreateCommand();
+    // Todo el trabajo ocurre en SQL puro (sin literales de cadena C# con comillas dobles).
+    // Idempotente: detecta si hay mojibake; si no, termina en <1 ms sin tocar datos.
+    cmdEnc.CommandText = """
+        SET NOCOUNT ON;
+        DECLARE @c3 NCHAR(1) = NCHAR(0xC3), @c2 NCHAR(1) = NCHAR(0xC2);
+
+        -- Verificar si hay datos corruptos antes de hacer cualquier UPDATE
+        IF NOT (
+               (OBJECT_ID('dbo.Employees')      IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.Employees      WHERE FullName LIKE '%' + @c3 + '%'))
+            OR (OBJECT_ID('dbo.AppUsers')        IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.AppUsers        WHERE FullName LIKE '%' + @c3 + '%'))
+            OR (OBJECT_ID('dbo.InventoryItems')  IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.InventoryItems  WHERE Name     LIKE '%' + @c3 + '%'))
+            OR (OBJECT_ID('dbo.Licencias')       IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.Licencias       WHERE Plataforma LIKE '%' + @c3 + '%'))
+            OR (OBJECT_ID('dbo.Comunicados')     IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.Comunicados     WHERE Title    LIKE '%' + @c3 + '%'))
+        ) RETURN;
+
+        -- Tabla de pares (tabla, columna) a corregir
+        DECLARE @cols TABLE (tbl SYSNAME NOT NULL, col SYSNAME NOT NULL);
+        INSERT INTO @cols (tbl, col) VALUES
+            ('Employees','FullName'),           ('Employees','Position'),
+            ('AppUsers','FullName'),             ('AppUsers','Email'),
+            ('InventoryTypes','Name'),           ('InventoryTypes','Description'),
+            ('InventoryTypes','Department'),
+            ('InventoryItems','Name'),           ('InventoryItems','Brand'),
+            ('InventoryItems','Model'),          ('InventoryItems','Department'),
+            ('InventoryItems','AssignedTo'),     ('InventoryItems','Accessories'),
+            ('InventoryItems','DecommissionReason'),
+            ('EquipmentTransfers','FromDepartment'),('EquipmentTransfers','FromPerson'),
+            ('EquipmentTransfers','ToDepartment'),  ('EquipmentTransfers','ToPerson'),
+            ('EquipmentTransfers','Notes'),         ('EquipmentTransfers','CreatedBy'),
+            ('Licencias','Plataforma'),          ('Licencias','Area'),
+            ('Licencias','Responsable'),         ('Licencias','Notas'),
+            ('Comunicados','Title'),             ('Comunicados','Content'),
+            ('Comunicados','Author'),
+            ('Notifications','Title'),           ('Notifications','Message'),
+            ('Rooms','Name'),                    ('Rooms','Location'),
+            ('Reservations','Title'),            ('Reservations','Description'),
+            ('RoomRequests','Title'),            ('RoomRequests','Description'),
+            ('Procedimientos','Title'),          ('Procedimientos','Description'),
+            ('Procedimientos','Category'),       ('ProcedimientoCategorias','Name'),
+            ('Tickets','Title'),                 ('Tickets','Description'),
+            ('Tickets','RequestedBy'),           ('Tickets','Department'),
+            ('Departments','Name'),
+            ('Indicadores','Nombre'),            ('Indicadores','Descripcion'),
+            ('Indicadores','Unidad'),            ('Indicadores','Responsable');
+
+        -- Plantilla del REPLACE encadenado (15 pares UTF-8/Latin-1 → correcto)
+        -- {COL} se sustituye por el nombre real de columna al generar el SQL dinamico
+        DECLARE @tmpl NVARCHAR(MAX);
+        SET @tmpl =
+            'REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(' +
+            '{COL},' +
+            'NCHAR(0xC3)+NCHAR(0xA9),NCHAR(0xE9)),' +
+            'NCHAR(0xC3)+NCHAR(0xB3),NCHAR(0xF3)),' +
+            'NCHAR(0xC3)+NCHAR(0xA1),NCHAR(0xE1)),' +
+            'NCHAR(0xC3)+NCHAR(0xB1),NCHAR(0xF1)),' +
+            'NCHAR(0xC3)+NCHAR(0xBA),NCHAR(0xFA)),' +
+            'NCHAR(0xC3)+NCHAR(0xBC),NCHAR(0xFC)),' +
+            'NCHAR(0xC3)+NCHAR(0xAD),NCHAR(0xED)),' +
+            'NCHAR(0xC3)+NCHAR(0x2030),NCHAR(0xC9)),' +
+            'NCHAR(0xC3)+NCHAR(0x201C),NCHAR(0xD3)),' +
+            'NCHAR(0xC3)+NCHAR(0x0161),NCHAR(0xDA)),' +
+            'NCHAR(0xC3)+NCHAR(0x2018),NCHAR(0xD1)),' +
+            'NCHAR(0xC3)+NCHAR(0x0081),NCHAR(0xC1)),' +
+            'NCHAR(0xC3)+NCHAR(0x008D),NCHAR(0xCD)),' +
+            'NCHAR(0xC2)+NCHAR(0xBF),NCHAR(0xBF)),' +
+            'NCHAR(0xC2)+NCHAR(0xA1),NCHAR(0xA1))';
+
+        -- Cursor: un UPDATE por cada (tabla, columna)
+        DECLARE @tbl SYSNAME, @col SYSNAME, @sql NVARCHAR(MAX);
+        DECLARE cur CURSOR LOCAL FAST_FORWARD FOR SELECT tbl, col FROM @cols;
+        OPEN cur;
+        FETCH NEXT FROM cur INTO @tbl, @col;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            IF OBJECT_ID('dbo.' + @tbl) IS NOT NULL
+            BEGIN
+                SET @sql =
+                    'UPDATE dbo.[' + @tbl + '] SET [' + @col + '] = ' +
+                    REPLACE(@tmpl, '{COL}', '[' + @col + ']') +
+                    ' WHERE [' + @col + '] LIKE ''%'' + NCHAR(0xC3) + ''%'' OR [' + @col + '] LIKE ''%'' + NCHAR(0xC2) + ''%'';';
+                EXEC sp_executesql @sql;
+            END
+            FETCH NEXT FROM cur INTO @tbl, @col;
+        END
+        CLOSE cur; DEALLOCATE cur;
+        """;
+    try { await cmdEnc.ExecuteNonQueryAsync(); }
+    catch (Exception ex) { Console.WriteLine("[Encoding] WARN: " + ex.Message); }
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
