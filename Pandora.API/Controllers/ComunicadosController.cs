@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Hubs;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -10,10 +12,39 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class ComunicadosController(
     IConfiguration config,
-    ILogger<ComunicadosController> logger) : ControllerBase
+    ILogger<ComunicadosController> logger,
+    IHubContext<NotificationsHub> hub) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private string? CurrentUser() => User.FindFirstValue(ClaimTypes.Name) ?? User.FindFirstValue("name");
+
+    // ── Helper: insertar notificación broadcast y emitir evento SignalR ─────────
+    private async Task BroadcastComunicadoAsync(string title, string author, SqlConnection conn, CancellationToken ct)
+    {
+        int notifId;
+        await using var notifCmd = conn.CreateCommand();
+        notifCmd.CommandText = """
+            INSERT INTO dbo.Notifications
+                (Title, Message, Type, IsRead, TargetUser, CreatedBy, CreatedAt, IsDeleted)
+            OUTPUT INSERTED.Id
+            VALUES (@Title, @Message, 'comunicado', 0, NULL, @CreatedBy, GETUTCDATE(), 0)
+            """;
+        notifCmd.Parameters.AddWithValue("@Title",     "📢 Nuevo comunicado institucional");
+        notifCmd.Parameters.AddWithValue("@Message",   title);
+        notifCmd.Parameters.AddWithValue("@CreatedBy", author);
+        notifId = (int)(await notifCmd.ExecuteScalarAsync(ct))!;
+
+        var payload = new
+        {
+            id      = notifId,
+            title   = "📢 Nuevo comunicado institucional",
+            message = title,
+            type    = "comunicado",
+            isRead  = false,
+            path    = "/comunicados",
+        };
+        await hub.Clients.Group("broadcast").SendAsync("NewNotification", payload, ct);
+    }
 
     // ── GET /api/comunicados ──────────────────────────────────────────────────
     [HttpGet]
@@ -132,6 +163,11 @@ public class ComunicadosController(
         cmd.Parameters.AddWithValue("@ExpiresAt",   (object?)dto.ExpiresAt ?? DBNull.Value);
 
         var newId = (int)(await cmd.ExecuteScalarAsync(ct))!;
+
+        // Notificar a todos los usuarios si el comunicado se publica de inmediato
+        if (dto.IsPublished)
+            await BroadcastComunicadoAsync(dto.Title, author, conn, ct);
+
         return Ok(new { id = newId });
     }
 
@@ -142,6 +178,20 @@ public class ComunicadosController(
     {
         await using var conn = Conn();
         await conn.OpenAsync(ct);
+
+        // Verificar estado anterior para detectar transición borrador → publicado
+        bool wasPublished = false;
+        await using (var checkCmd = conn.CreateCommand())
+        {
+            checkCmd.CommandText = """
+                SELECT IsPublished FROM dbo.Comunicados
+                WHERE Id = @Id AND IsDeleted = 0
+                """;
+            checkCmd.Parameters.AddWithValue("@Id", id);
+            var val = await checkCmd.ExecuteScalarAsync(ct);
+            if (val is bool b) wasPublished = b;
+        }
+
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             UPDATE dbo.Comunicados
@@ -160,7 +210,14 @@ public class ComunicadosController(
         cmd.Parameters.AddWithValue("@Id",          id);
 
         var rows = await cmd.ExecuteNonQueryAsync(ct);
-        return rows > 0 ? NoContent() : NotFound();
+        if (rows == 0) return NotFound();
+
+        // Notificar solo cuando se publica por primera vez (borrador → publicado)
+        var author = CurrentUser() ?? "system";
+        if (!wasPublished && dto.IsPublished)
+            await BroadcastComunicadoAsync(dto.Title, author, conn, ct);
+
+        return NoContent();
     }
 
     // ── DELETE /api/comunicados/{id} ──────────────────────────────────────────
