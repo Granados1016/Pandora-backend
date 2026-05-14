@@ -456,11 +456,25 @@ public class VacacionesController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT u.Username, u.FullName,
-                   ISNULL(p.TotalDays, 15) AS TotalDays,
-                   ISNULL(p.Id, 0)         AS PolicyId
+                   ISNULL(p.TotalDays, 15)  AS TotalDays,
+                   ISNULL(p.Id, 0)          AS PolicyId,
+                   ISNULL(e.Position, '')   AS Position,
+                   ISNULL(d.Name, '')       AS Department,
+                   ISNULL(u.Email, '')      AS Email,
+                   ISNULL(
+                       (SELECT ISNULL(SUM(r.TotalDays),0)
+                        FROM dbo.VacationRequests r
+                        WHERE r.Username = u.Username
+                          AND YEAR(r.StartDate) = @Year
+                          AND r.Status = 'Aprobado'
+                          AND r.IsDeleted = 0), 0) AS UsedDays
             FROM dbo.AppUsers u
             LEFT JOIN dbo.VacationPolicies p
                 ON p.Username = u.Username AND p.Year = @Year
+            LEFT JOIN dbo.Employees e
+                ON LOWER(e.Email) = LOWER(u.Email) OR LOWER(e.FullName) = LOWER(u.FullName)
+            LEFT JOIN dbo.Departments d
+                ON d.Id = e.DepartmentId
             WHERE u.IsActive = 1
             ORDER BY u.FullName
             """;
@@ -468,13 +482,22 @@ public class VacacionesController(
         var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
+        {
+            int total = r.GetInt32(2);
+            int used  = r.GetInt32(7);
             items.Add(new {
-                username  = r.GetString(0),
-                fullName  = r.IsDBNull(1) ? r.GetString(0) : r.GetString(1),
-                totalDays = r.GetInt32(2),
-                policyId  = r.GetInt32(3),
-                year      = y,
+                username   = r.GetString(0),
+                fullName   = r.IsDBNull(1) ? r.GetString(0) : r.GetString(1),
+                totalDays  = total,
+                policyId   = r.GetInt32(3),
+                position   = r.GetString(4),
+                department = r.GetString(5),
+                email      = r.GetString(6),
+                usedDays   = used,
+                available  = total - used,
+                year       = y,
             });
+        }
         return Ok(items);
     }
 
