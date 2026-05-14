@@ -1010,6 +1010,73 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdX.ExecuteNonQueryAsync();
 }
 
+// ── Módulo de Vacaciones: tablas y festivos iniciales ────────────────────────
+{
+    await using var connV = new Microsoft.Data.SqlClient.SqlConnection(
+        builder.Configuration.GetConnectionString("PandoraDb"));
+    await connV.OpenAsync();
+    await using var cmdV = connV.CreateCommand();
+    cmdV.CommandText = """
+        SET NOCOUNT ON;
+
+        -- Festivos
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='VacationHolidays' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.VacationHolidays (
+                Id          INT           IDENTITY(1,1) PRIMARY KEY,
+                HolidayDate DATE          NOT NULL,
+                Name        NVARCHAR(100) NOT NULL,
+                IsRecurring BIT           NOT NULL DEFAULT 1,
+                IsDeleted   BIT           NOT NULL DEFAULT 0
+            );
+            INSERT INTO dbo.VacationHolidays (HolidayDate, Name, IsRecurring) VALUES
+                ('2024-01-01', 'Año Nuevo',                  1),
+                ('2024-02-05', 'Día de la Constitución',     1),
+                ('2024-03-21', 'Natalicio de Benito Juárez', 1),
+                ('2024-05-01', 'Día del Trabajo',            1),
+                ('2024-09-16', 'Día de la Independencia',    1),
+                ('2024-11-20', 'Revolución Mexicana',        1),
+                ('2024-12-25', 'Navidad',                    1);
+        END
+
+        -- Políticas de vacaciones por usuario/año
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='VacationPolicies' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.VacationPolicies (
+                Id        INT           IDENTITY(1,1) PRIMARY KEY,
+                Username  NVARCHAR(100) NOT NULL,
+                Year      INT           NOT NULL,
+                TotalDays INT           NOT NULL DEFAULT 15,
+                CONSTRAINT UQ_VacPolicy UNIQUE (Username, Year)
+            );
+        END
+
+        -- Solicitudes de vacaciones
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='VacationRequests' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.VacationRequests (
+                Id          INT           IDENTITY(1,1) PRIMARY KEY,
+                Username    NVARCHAR(100) NOT NULL,
+                FullName    NVARCHAR(200) NULL,
+                StartDate   DATE          NOT NULL,
+                EndDate     DATE          NOT NULL,
+                TotalDays   INT           NOT NULL,
+                Type        NVARCHAR(30)  NOT NULL DEFAULT 'Vacaciones',
+                Status      NVARCHAR(20)  NOT NULL DEFAULT 'Pendiente',
+                Notes       NVARCHAR(500) NULL,
+                ReviewedBy  NVARCHAR(100) NULL,
+                ReviewedAt  DATETIME      NULL,
+                ReviewNotes NVARCHAR(500) NULL,
+                CreatedAt   DATETIME      NOT NULL DEFAULT GETUTCDATE(),
+                IsDeleted   BIT           NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IX_VacReq_Username ON dbo.VacationRequests (Username);
+            CREATE INDEX IX_VacReq_Status   ON dbo.VacationRequests (Status);
+        END
+        """;
+    await cmdV.ExecuteNonQueryAsync();
+}
+
 // ── Correccion de encoding: mojibake UTF-8 hacia Latin-1 en toda la BD ───────
 // Bytes UTF-8 de caracteres con tilde (e.g. C3 A9 = e-acento) almacenados
 // como dos chars Latin-1 en columnas NVARCHAR. Idempotente: sin datos corruptos
