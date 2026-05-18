@@ -201,6 +201,7 @@ Directory.CreateDirectory(Path.Combine(wwwroot,   "uploads", "templates"));
 string storageRoot = Path.Combine(app.Environment.ContentRootPath, "storage");
 Directory.CreateDirectory(Path.Combine(storageRoot, "libros"));
 Directory.CreateDirectory(Path.Combine(storageRoot, "portadas"));
+Directory.CreateDirectory(Path.Combine(storageRoot, "vacaciones-docs"));
 
 // ── Swagger ───────────────────────────────────────────────────────────────
 app.UseSwagger();
@@ -1075,6 +1076,20 @@ using (var scopeExtra = app.Services.CreateScope())
         END
         """;
     await cmdV.ExecuteNonQueryAsync();
+}
+
+// ── Migración: columna DocumentPath en VacationRequests ─────────────────────
+{
+    await using var connDoc = new Microsoft.Data.SqlClient.SqlConnection(
+        builder.Configuration.GetConnectionString("PandoraDb"));
+    await connDoc.OpenAsync();
+    await using var cmdDoc = connDoc.CreateCommand();
+    cmdDoc.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.VacationRequests') AND name = 'DocumentPath')
+            ALTER TABLE dbo.VacationRequests ADD DocumentPath NVARCHAR(500) NULL;
+        """;
+    await cmdDoc.ExecuteNonQueryAsync();
 }
 
 // ── Correccion de encoding: mojibake UTF-8 hacia Latin-1 en toda la BD ───────

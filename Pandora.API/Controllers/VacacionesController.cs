@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
@@ -12,6 +13,7 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class VacacionesController(
     IConfiguration config,
+    IWebHostEnvironment env,
     ILogger<VacacionesController> logger,
     IHubContext<NotificationsHub> hub) : ControllerBase
 {
@@ -29,6 +31,9 @@ public class VacacionesController(
     private bool IsAdmin =>
         User.IsInRole("Admin") ||
         User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin");
+
+    private string DocsPath =>
+        Path.Combine(env.ContentRootPath, "storage", "vacaciones-docs");
 
     // ── Helper: cuenta días hábiles (excluye sáb/dom + festivos) ─────────────
     private static int CountWorkdays(DateOnly start, DateOnly end, HashSet<DateOnly> holidays)
@@ -260,7 +265,8 @@ public class VacacionesController(
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT Id, StartDate, EndDate, TotalDays, Type, Status, Notes, ReviewNotes, CreatedAt
+            SELECT Id, StartDate, EndDate, TotalDays, Type, Status, Notes, ReviewNotes, CreatedAt,
+                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument
             FROM dbo.VacationRequests
             WHERE Username = @Username AND IsDeleted = 0
             ORDER BY CreatedAt DESC
@@ -279,6 +285,7 @@ public class VacacionesController(
                 notes       = r.IsDBNull(6) ? null : r.GetString(6),
                 reviewNotes = r.IsDBNull(7) ? null : r.GetString(7),
                 createdAt   = r.GetDateTime(8),
+                hasDocument = r.GetInt32(9) == 1,
             });
         return Ok(items);
     }
@@ -298,7 +305,8 @@ public class VacacionesController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT Id, Username, FullName, StartDate, EndDate, TotalDays,
-                   Type, Status, Notes, ReviewedBy, ReviewedAt, ReviewNotes, CreatedAt
+                   Type, Status, Notes, ReviewedBy, ReviewedAt, ReviewNotes, CreatedAt,
+                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument
             FROM dbo.VacationRequests
             WHERE IsDeleted = 0
               AND (@Status IS NULL OR Status = @Status)
@@ -322,6 +330,7 @@ public class VacacionesController(
                 reviewedAt  = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10),
                 reviewNotes = r.IsDBNull(11) ? null : r.GetString(11),
                 createdAt   = r.GetDateTime(12),
+                hasDocument = r.GetInt32(13) == 1,
             });
         return Ok(items);
     }
@@ -524,6 +533,110 @@ public class VacacionesController(
         cmd.Parameters.AddWithValue("@TotalDays", dto.TotalDays);
         await cmd.ExecuteNonQueryAsync(ct);
         return NoContent();
+    }
+    // ── POST /api/vacaciones/{id}/documento ──────────────────────────────────
+    [HttpPost("{id:int}/documento")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UploadDocumento(int id, IFormFile? file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0)
+            return BadRequest("No se recibió ningún archivo.");
+
+        var allowedExts = new[] { ".pdf", ".jpg", ".jpeg", ".png" };
+        var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (!allowedExts.Contains(ext))
+            return BadRequest("Solo se permiten archivos PDF, JPG o PNG.");
+        if (file.Length > 10 * 1024 * 1024)
+            return BadRequest("El archivo no puede superar 10 MB.");
+
+        var username = CurrentUser;
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        // Verificar que la solicitud existe y pertenece al usuario (o admin)
+        string? owner;
+        string? oldPath;
+        await using (var sel = conn.CreateCommand())
+        {
+            sel.CommandText = """
+                SELECT Username, DocumentPath
+                FROM dbo.VacationRequests
+                WHERE Id = @Id AND IsDeleted = 0
+                """;
+            sel.Parameters.AddWithValue("@Id", id);
+            await using var rr = await sel.ExecuteReaderAsync(ct);
+            if (!await rr.ReadAsync(ct)) return NotFound();
+            owner   = rr.GetString(0);
+            oldPath = rr.IsDBNull(1) ? null : rr.GetString(1);
+        }
+
+        if (!IsAdmin && owner != username) return Forbid();
+
+        // Eliminar archivo anterior si existe
+        if (!string.IsNullOrEmpty(oldPath) && System.IO.File.Exists(oldPath))
+            System.IO.File.Delete(oldPath);
+
+        // Guardar nuevo archivo
+        Directory.CreateDirectory(DocsPath);
+        var fileName = $"vacreq_{id}_{Guid.NewGuid():N}{ext}";
+        var filePath = Path.Combine(DocsPath, fileName);
+        await using (var stream = System.IO.File.Create(filePath))
+            await file.CopyToAsync(stream, ct);
+
+        // Actualizar BD
+        await using var upd = conn.CreateCommand();
+        upd.CommandText = """
+            UPDATE dbo.VacationRequests
+            SET DocumentPath = @Path
+            WHERE Id = @Id AND IsDeleted = 0
+            """;
+        upd.Parameters.AddWithValue("@Path", filePath);
+        upd.Parameters.AddWithValue("@Id",   id);
+        await upd.ExecuteNonQueryAsync(ct);
+
+        logger.LogInformation("Documento subido para solicitud #{Id} por {User}", id, username);
+        return Ok(new { fileName });
+    }
+
+    // ── GET /api/vacaciones/{id}/documento ────────────────────────────────────
+    [HttpGet("{id:int}/documento")]
+    public async Task<IActionResult> GetDocumento(int id, CancellationToken ct)
+    {
+        var username = CurrentUser;
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT Username, DocumentPath
+            FROM dbo.VacationRequests
+            WHERE Id = @Id AND IsDeleted = 0
+            """;
+        cmd.Parameters.AddWithValue("@Id", id);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return NotFound();
+
+        var owner   = r.GetString(0);
+        var docPath = r.IsDBNull(1) ? null : r.GetString(1);
+
+        if (!IsAdmin && owner != username)
+            return Forbid();
+        if (string.IsNullOrEmpty(docPath) || !System.IO.File.Exists(docPath))
+            return NotFound("No hay documento adjunto.");
+
+        var fileExt = Path.GetExtension(docPath).ToLowerInvariant();
+        var contentType = fileExt switch
+        {
+            ".pdf"            => "application/pdf",
+            ".png"            => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            _                 => "application/octet-stream"
+        };
+
+        var bytes = await System.IO.File.ReadAllBytesAsync(docPath, ct);
+        return File(bytes, contentType, Path.GetFileName(docPath));
     }
 }
 
