@@ -1092,6 +1092,30 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdDoc.ExecuteNonQueryAsync();
 }
 
+// ── Migración: tabla PasswordResetTokens (#11) ───────────────────────────────
+{
+    await using var connPrt = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connPrt.OpenAsync();
+    await using var cmdPrt = connPrt.CreateCommand();
+    cmdPrt.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='PasswordResetTokens' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.PasswordResetTokens (
+                Id         INT IDENTITY(1,1) PRIMARY KEY,
+                Token      NVARCHAR(200) NOT NULL UNIQUE,
+                Username   NVARCHAR(100) NOT NULL,
+                ExpiresAt  DATETIME2     NOT NULL,
+                UsedAt     DATETIME2     NULL,
+                CreatedAt  DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_PRT_Token    ON dbo.PasswordResetTokens (Token);
+            CREATE INDEX IX_PRT_Username ON dbo.PasswordResetTokens (Username);
+        END
+        """;
+    await cmdPrt.ExecuteNonQueryAsync();
+}
+
 // ── Migración: tabla InventoryChangeLogs (#12) ───────────────────────────────
 {
     await using var connCl = new Microsoft.Data.SqlClient.SqlConnection(
