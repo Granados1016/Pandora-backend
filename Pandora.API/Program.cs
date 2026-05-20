@@ -1092,6 +1092,31 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdDoc.ExecuteNonQueryAsync();
 }
 
+// ── Migración: tabla InventoryChangeLogs (#12) ───────────────────────────────
+{
+    await using var connCl = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connCl.OpenAsync();
+    await using var cmdCl = connCl.CreateCommand();
+    cmdCl.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='InventoryChangeLogs' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.InventoryChangeLogs (
+                Id             UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                InventoryItemId UNIQUEIDENTIFIER NOT NULL,
+                FieldName      NVARCHAR(100)   NOT NULL,
+                OldValue       NVARCHAR(500)   NULL,
+                NewValue       NVARCHAR(500)   NULL,
+                ChangedBy      NVARCHAR(100)   NULL,
+                ChangedAt      DATETIME2       NOT NULL DEFAULT GETUTCDATE(),
+                Notes          NVARCHAR(500)   NULL
+            );
+            CREATE INDEX IX_InvCL_ItemId ON dbo.InventoryChangeLogs (InventoryItemId);
+        END
+        """;
+    await cmdCl.ExecuteNonQueryAsync();
+}
+
 // ── Correccion de encoding: mojibake UTF-8 hacia Latin-1 en toda la BD ───────
 // Bytes UTF-8 de caracteres con tilde (e.g. C3 A9 = e-acento) almacenados
 // como dos chars Latin-1 en columnas NVARCHAR. Idempotente: sin datos corruptos

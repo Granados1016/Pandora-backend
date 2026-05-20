@@ -399,6 +399,22 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // ── Leer valores anteriores para el changelog ─────────────────────
+            string? oldStatus = null, oldDept = null, oldAssigned = null;
+            await using (var cmdPrev = conn.CreateCommand())
+            {
+                cmdPrev.CommandText = "SELECT Status, Department, AssignedTo FROM dbo.InventoryItems WHERE Id = @Id";
+                cmdPrev.Parameters.AddWithValue("@Id", id);
+                await using var rp = await cmdPrev.ExecuteReaderAsync(ct);
+                if (await rp.ReadAsync(ct))
+                {
+                    oldStatus   = rp.IsDBNull(0) ? null : rp.GetString(0);
+                    oldDept     = rp.IsDBNull(1) ? null : rp.GetString(1);
+                    oldAssigned = rp.IsDBNull(2) ? null : rp.GetString(2);
+                }
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 UPDATE dbo.InventoryItems
@@ -427,6 +443,33 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd.Parameters.AddWithValue("@Acc",        (object?)dto.Accessories    ?? DBNull.Value);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Equipo no encontrado.");
+
+            // ── Registrar cambios detectados en changelog ─────────────────────
+            var newStatus   = InventoryHelpers.StatusToString(dto.Status);
+            var newDept     = dto.Department;
+            var newAssigned = dto.AssignedTo;
+            var changes = new List<(string field, string? oldVal, string? newVal)>();
+            if (oldStatus   != newStatus)   changes.Add(("Estatus",     oldStatus,   newStatus));
+            if (oldDept     != newDept)     changes.Add(("Departamento", oldDept,    newDept));
+            if (oldAssigned != newAssigned) changes.Add(("Asignado a",  oldAssigned, newAssigned));
+
+            foreach (var (field, oldVal, newVal) in changes)
+            {
+                await using var cmdLog = conn.CreateCommand();
+                cmdLog.CommandText = """
+                    INSERT INTO dbo.InventoryChangeLogs
+                        (Id, InventoryItemId, FieldName, OldValue, NewValue, ChangedBy, ChangedAt)
+                    VALUES
+                        (NEWID(), @ItemId, @Field, @Old, @New, @By, GETUTCDATE())
+                    """;
+                cmdLog.Parameters.AddWithValue("@ItemId", id);
+                cmdLog.Parameters.AddWithValue("@Field",  field);
+                cmdLog.Parameters.AddWithValue("@Old",    (object?)oldVal ?? DBNull.Value);
+                cmdLog.Parameters.AddWithValue("@New",    (object?)newVal ?? DBNull.Value);
+                cmdLog.Parameters.AddWithValue("@By",     (object?)CurrentUsername ?? DBNull.Value);
+                await cmdLog.ExecuteNonQueryAsync(ct);
+            }
+
             return Ok(new { id });
         }
         catch (Exception ex) { logger.LogError(ex, "UpdateItem {Id}", id); return StatusCode(500, ex.Message); }
@@ -529,6 +572,39 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             return Ok(new { id = tid });
         }
         catch (Exception ex) { logger.LogError(ex, "CreateTransfer {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // ── Historial de cambios (#12) ────────────────────────────────────────────
+    [HttpGet("items/{id:guid}/changelog")]
+    public async Task<IActionResult> GetChangelog(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT Id, FieldName, OldValue, NewValue, ChangedBy, ChangedAt, Notes
+                FROM dbo.InventoryChangeLogs
+                WHERE InventoryItemId = @ItemId
+                ORDER BY ChangedAt DESC
+                """;
+            cmd.Parameters.AddWithValue("@ItemId", id);
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new {
+                    id        = r.GetGuid(0),
+                    fieldName = r.GetString(1),
+                    oldValue  = r.IsDBNull(2) ? null : r.GetString(2),
+                    newValue  = r.IsDBNull(3) ? null : r.GetString(3),
+                    changedBy = r.IsDBNull(4) ? null : r.GetString(4),
+                    changedAt = r.GetDateTime(5),
+                    notes     = r.IsDBNull(6) ? null : r.GetString(6),
+                });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetChangelog {Id}", id); return StatusCode(500, ex.Message); }
     }
 
     // ── Excel Export (simple CSV) ─────────────────────────────────────────────
