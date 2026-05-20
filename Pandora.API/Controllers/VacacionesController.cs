@@ -269,7 +269,8 @@ public class VacacionesController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT Id, StartDate, EndDate, TotalDays, Type, Status, Notes, ReviewNotes, CreatedAt,
-                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument
+                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument,
+                   ReviewedBy, ReviewedAt
             FROM dbo.VacationRequests
             WHERE Username = @Username AND IsDeleted = 0
             ORDER BY CreatedAt DESC
@@ -289,6 +290,8 @@ public class VacacionesController(
                 reviewNotes = r.IsDBNull(7) ? null : r.GetString(7),
                 createdAt   = r.GetDateTime(8),
                 hasDocument = r.GetInt32(9) == 1,
+                reviewedBy  = r.IsDBNull(10) ? null : r.GetString(10),
+                reviewedAt  = r.IsDBNull(11) ? (DateTime?)null : r.GetDateTime(11),
             });
         return Ok(items);
     }
