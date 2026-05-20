@@ -1,3 +1,4 @@
+using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
@@ -660,6 +661,156 @@ public class VacacionesController(
 
         var bytes = await System.IO.File.ReadAllBytesAsync(docPath, ct);
         return File(bytes, contentType, Path.GetFileName(docPath));
+    }
+
+    // ── GET /api/vacaciones/admin/export-excel ────────────────────────────────
+    [HttpGet("admin/export-excel")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ExportExcel([FromQuery] int? year = null, [FromQuery] string? status = null, CancellationToken ct = default)
+    {
+        int y = year ?? DateTime.UtcNow.Year;
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT r.Id, u.FullName, u.Username, u.Email,
+                   r.StartDate, r.EndDate, r.TotalDays, r.Status,
+                   r.Type, r.Notes,
+                   r.ReviewedBy, r.ReviewedAt, r.ReviewNotes,
+                   r.CreatedAt
+            FROM dbo.VacationRequests r
+            JOIN dbo.AppUsers u ON u.Username = r.Username
+            WHERE r.IsDeleted = 0
+              AND (YEAR(r.StartDate) = @Year OR YEAR(r.EndDate) = @Year)
+              {(string.IsNullOrWhiteSpace(status) ? "" : "AND r.Status = @Status")}
+            ORDER BY r.CreatedAt DESC
+            """;
+        cmd.Parameters.AddWithValue("@Year", y);
+        if (!string.IsNullOrWhiteSpace(status)) cmd.Parameters.AddWithValue("@Status", status);
+
+        var rows = new List<(int id, string name, string user, string email,
+            string start, string end, int days, string sts, string type, string? notes,
+            string? reviewedBy, string? reviewedAt, string? reviewNotes, string created)>();
+
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            rows.Add((
+                r.GetInt32(0),
+                r.IsDBNull(1) ? "" : r.GetString(1),
+                r.GetString(2),
+                r.IsDBNull(3) ? "" : r.GetString(3),
+                r.GetFieldValue<DateOnly>(4).ToString("dd/MM/yyyy"),
+                r.GetFieldValue<DateOnly>(5).ToString("dd/MM/yyyy"),
+                r.GetInt32(6),
+                r.GetString(7),
+                r.IsDBNull(8) ? "Vacaciones" : r.GetString(8),
+                r.IsDBNull(9)  ? null : r.GetString(9),
+                r.IsDBNull(10) ? null : r.GetString(10),
+                r.IsDBNull(11) ? null : ((DateTime)r.GetValue(11)).ToString("dd/MM/yyyy HH:mm"),
+                r.IsDBNull(12) ? null : r.GetString(12),
+                ((DateTime)r.GetValue(13)).ToString("dd/MM/yyyy")
+            ));
+        }
+
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Vacaciones");
+
+        // Encabezados
+        string[] headers = ["#", "Nombre", "Usuario", "Correo", "Inicio", "Fin", "Días", "Tipo", "Estado", "Notas", "Revisado por", "Fecha revisión", "Observaciones", "Solicitado"];
+        for (int c = 0; c < headers.Length; c++)
+        {
+            var cell = ws.Cell(1, c + 1);
+            cell.Value = headers[c];
+            cell.Style.Font.Bold = true;
+            cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#1a237e");
+            cell.Style.Font.FontColor = XLColor.White;
+        }
+
+        // Datos
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            var rn = i + 2;
+            ws.Cell(rn, 1).Value  = row.id;
+            ws.Cell(rn, 2).Value  = row.name;
+            ws.Cell(rn, 3).Value  = row.user;
+            ws.Cell(rn, 4).Value  = row.email;
+            ws.Cell(rn, 5).Value  = row.start;
+            ws.Cell(rn, 6).Value  = row.end;
+            ws.Cell(rn, 7).Value  = row.days;
+            ws.Cell(rn, 8).Value  = row.type;
+            ws.Cell(rn, 9).Value  = row.sts;
+            ws.Cell(rn, 10).Value = row.notes ?? "";
+            ws.Cell(rn, 11).Value = row.reviewedBy ?? "";
+            ws.Cell(rn, 12).Value = row.reviewedAt ?? "";
+            ws.Cell(rn, 13).Value = row.reviewNotes ?? "";
+            ws.Cell(rn, 14).Value = row.created;
+
+            var statusColor = row.sts switch
+            {
+                "Aprobada" => XLColor.FromHtml("#e8f5e9"),
+                "Rechazada" => XLColor.FromHtml("#ffebee"),
+                "Pendiente" => XLColor.FromHtml("#fff8e1"),
+                _ => XLColor.White
+            };
+            ws.Row(rn).Style.Fill.BackgroundColor = statusColor;
+        }
+
+        ws.Columns().AdjustToContents();
+        ws.SheetView.FreezeRows(1);
+
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        ms.Position = 0;
+
+        var fileName = $"Vacaciones_{y}_{DateTime.Now:yyyyMMddHHmmss}.xlsx";
+        return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+    }
+
+    // ── GET /api/vacaciones/admin/equipo/{year}/{month} ───────────────────────
+    [HttpGet("admin/equipo/{year:int}/{month:int}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> GetEquipoCalendario(int year, int month, CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT r.Id, u.FullName, u.Username,
+                   r.StartDate, r.EndDate, r.TotalDays, r.Status, r.Type
+            FROM dbo.VacationRequests r
+            JOIN dbo.AppUsers u ON u.Username = r.Username
+            WHERE r.IsDeleted = 0
+              AND r.Status = 'Aprobada'
+              AND (
+                  (YEAR(r.StartDate) = @Year AND MONTH(r.StartDate) = @Month)
+                  OR (YEAR(r.EndDate) = @Year AND MONTH(r.EndDate) = @Month)
+                  OR (r.StartDate <= DATEFROMPARTS(@Year, @Month, 1)
+                      AND r.EndDate >= EOMONTH(DATEFROMPARTS(@Year, @Month, 1)))
+              )
+            ORDER BY r.StartDate, u.FullName
+            """;
+        cmd.Parameters.AddWithValue("@Year",  year);
+        cmd.Parameters.AddWithValue("@Month", month);
+
+        var items = new List<object>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            items.Add(new
+            {
+                id        = r.GetInt32(0),
+                fullName  = r.IsDBNull(1) ? r.GetString(2) : r.GetString(1),
+                username  = r.GetString(2),
+                startDate = r.GetFieldValue<DateOnly>(3).ToString("yyyy-MM-dd"),
+                endDate   = r.GetFieldValue<DateOnly>(4).ToString("yyyy-MM-dd"),
+                totalDays = r.GetInt32(5),
+                status    = r.GetString(6),
+                type      = r.IsDBNull(7) ? "Vacaciones" : r.GetString(7),
+            });
+        }
+        return Ok(items);
     }
 
     // ── Enviar correo de notificación de vacación (#14) ───────────────────────

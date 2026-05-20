@@ -2,8 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
-using System.Net.Mail;
-using System.Net;
+using Pandora.API.Services;
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -854,42 +853,98 @@ public class TicketsController(
     //  EMAIL NOTIFICATIONS
     // ════════════════════════════════════════════════════════════════════════════
 
-    private (SmtpClient? client, MailMessage? msg) BuildEmail(string subject, string toEmail)
-    {
-        var smtp     = config.GetSection("SmtpSettings");
-        var host     = smtp["Host"]     ?? "";
-        var port     = int.TryParse(smtp["Port"], out var p) ? p : 587;
-        var user     = smtp["Username"] ?? "";
-        var pass     = smtp["Password"] ?? "";
-        var from     = smtp["FromEmail"] ?? "";
-        var fromName = smtp["FromName"]  ?? "Pandora";
-        var useSsl   = smtp["UseSsl"]?.ToLower() == "true";
-
-        if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(toEmail))
-            return (null, null);
-
-        var client = new SmtpClient(host, port)
-        {
-            Credentials = new NetworkCredential(user, pass),
-            EnableSsl   = useSsl,
-            Timeout     = 10_000,
-        };
-        var msg = new MailMessage { From = new MailAddress(from, fromName), Subject = subject, IsBodyHtml = true };
-        msg.To.Add(toEmail);
-        return (client, msg);
-    }
+    private Task<SmtpConfig> LoadSmtp() =>
+        SmtpHelper.LoadAsync(config.GetConnectionString("PandoraDb")!, config);
 
     private string NotifEmail => config.GetSection("SmtpSettings")["NotificationsEmail"]
                                ?? config.GetSection("SmtpSettings")["FromEmail"]
                                ?? "";
 
-    private string FrontendUrl => config.GetSection("SmtpSettings")["FrontendUrl"]
-                                ?? config["FrontendUrl"]
+    private string FrontendUrl => config["FrontendUrl"]
                                 ?? "https://pandora-frontend-web-production.up.railway.app";
 
     // ════════════════════════════════════════════════════════════════════════════
     //  AREA CONFIGS — correos de notificación por área
     // ════════════════════════════════════════════════════════════════════════════
+
+    // ── GET /api/tickets/stats ────────────────────────────────────────────────
+    [HttpGet("stats")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> GetStats([FromQuery] int? year = null, CancellationToken ct = default)
+    {
+        int y = year ?? DateTime.UtcNow.Year;
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Totales por estado
+            var byStatus = new Dictionary<string, int>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Status, COUNT(*) FROM dbo.Tickets WHERE YEAR(CreatedAt) = @Year GROUP BY Status";
+                cmd.Parameters.AddWithValue("@Year", y);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct)) byStatus[r.GetString(0)] = r.GetInt32(1);
+            }
+
+            // Por mes
+            var byMonth = new int[12];
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT MONTH(CreatedAt), COUNT(*) FROM dbo.Tickets WHERE YEAR(CreatedAt) = @Year GROUP BY MONTH(CreatedAt)";
+                cmd.Parameters.AddWithValue("@Year", y);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct)) byMonth[r.GetInt32(0) - 1] = r.GetInt32(1);
+            }
+
+            // Por área/puesto
+            var byArea = new List<object>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT ISNULL(Area,'Sin área') AS Area, COUNT(*) AS Total FROM dbo.Tickets WHERE YEAR(CreatedAt) = @Year GROUP BY Area ORDER BY Total DESC";
+                cmd.Parameters.AddWithValue("@Year", y);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct)) byArea.Add(new { area = r.GetString(0), total = r.GetInt32(1) });
+            }
+
+            // Tiempo promedio de resolución (días)
+            double avgResolutionDays = 0;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT AVG(CAST(DATEDIFF(hour, CreatedAt, UpdatedAt) AS FLOAT) / 24.0)
+                    FROM dbo.Tickets
+                    WHERE Status = 'Resuelto' AND YEAR(CreatedAt) = @Year AND UpdatedAt IS NOT NULL
+                    """;
+                cmd.Parameters.AddWithValue("@Year", y);
+                var result = await cmd.ExecuteScalarAsync(ct);
+                if (result != null && result != DBNull.Value) avgResolutionDays = Convert.ToDouble(result);
+            }
+
+            // Por prioridad
+            var byPriority = new Dictionary<string, int>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Priority, COUNT(*) FROM dbo.Tickets WHERE YEAR(CreatedAt) = @Year GROUP BY Priority";
+                cmd.Parameters.AddWithValue("@Year", y);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct)) byPriority[r.GetString(0)] = r.GetInt32(1);
+            }
+
+            return Ok(new
+            {
+                year              = y,
+                total             = byStatus.Values.Sum(),
+                byStatus,
+                byPriority,
+                byMonth,
+                byArea,
+                avgResolutionDays = Math.Round(avgResolutionDays, 1),
+            });
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetStats"); return StatusCode(500, ex.Message); }
+    }
 
     // ── GET /api/tickets/positions — lista pública de puestos (para el formulario) ──
     [HttpGet("positions")]
@@ -1042,9 +1097,8 @@ public class TicketsController(
             areaEmail = (string?)await cmd.ExecuteScalarAsync();
             if (string.IsNullOrWhiteSpace(areaEmail)) return;
 
-            var (client, msg) = BuildEmail($"[HelpDesk] Nuevo ticket {ticketNumber} — {area}", areaEmail);
-            if (client == null || msg == null) return;
-            msg.Body = $"""
+            var smtp = await LoadSmtp();
+            var body = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
                 <div style="max-width:600px;margin:0 auto">
                   <div style="background:#1a237e;padding:20px;border-radius:8px 8px 0 0">
@@ -1061,7 +1115,7 @@ public class TicketsController(
                   </div>
                 </div></body></html>
                 """;
-            await client.SendMailAsync(msg);
+            await SmtpHelper.SendAsync(smtp, areaEmail, area, $"[HelpDesk] Nuevo ticket {ticketNumber} — {area}", body);
         }
         catch (Exception ex) { logger.LogWarning("SendAreaNotification failed: {Msg}", ex.Message); }
     }
@@ -1070,91 +1124,31 @@ public class TicketsController(
     {
         try
         {
-            var (client, msg) = BuildEmail($"✅ Tu ticket {ticketNumber} fue registrado — Pandora HelpDesk", toEmail);
-            if (client == null || msg == null) return;
+            var smtp = await LoadSmtp();
             var ticketUrl = $"{FrontendUrl}/tickets/{ticketId}";
-            msg.Body = $"""
+            var body = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333;margin:0;padding:0">
                 <div style="max-width:600px;margin:32px auto;border-radius:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)">
-
-                  <!-- Header -->
                   <div style="background:linear-gradient(135deg,#1a237e 0%,#283593 100%);padding:28px 32px">
-                    <table width="100%" cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td>
-                          <div style="font-size:22px;font-weight:800;color:white;letter-spacing:2px">PANDORA</div>
-                          <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:2px">Sistema de Gestión iMET</div>
-                        </td>
-                        <td align="right">
-                          <span style="background:rgba(255,255,255,0.15);color:white;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600">HelpDesk</span>
-                        </td>
-                      </tr>
-                    </table>
+                    <div style="font-size:22px;font-weight:800;color:white;letter-spacing:2px">PANDORA — HelpDesk</div>
                   </div>
-
-                  <!-- Body -->
                   <div style="padding:32px;background:#ffffff">
                     <h2 style="margin:0 0 8px;color:#1a237e;font-size:20px">¡Tu solicitud fue registrada! 🎫</h2>
-                    <p style="margin:0 0 24px;color:#555;font-size:14px;line-height:1.6">
-                      Hemos recibido tu ticket de soporte. Nuestro equipo de TI lo revisará a la brevedad.
-                      Te notificaremos a este correo cuando haya actualizaciones.
-                    </p>
-
-                    <!-- Ticket card -->
+                    <p style="margin:0 0 24px;color:#555;font-size:14px;line-height:1.6">Hemos recibido tu ticket. Nuestro equipo lo revisará a la brevedad.</p>
                     <div style="background:#f8f9ff;border:1px solid #e3e8ff;border-radius:8px;padding:20px;margin-bottom:24px">
-                      <table width="100%" cellpadding="0" cellspacing="0">
-                        <tr>
-                          <td style="padding-bottom:12px">
-                            <span style="font-size:11px;font-weight:700;color:#8c9eff;text-transform:uppercase;letter-spacing:1px">Número de ticket</span><br>
-                            <span style="font-size:22px;font-weight:800;color:#1a237e;font-family:monospace">{ticketNumber}</span>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td style="border-top:1px solid #e3e8ff;padding-top:12px;padding-bottom:8px">
-                            <span style="font-size:11px;color:#888">Título</span><br>
-                            <span style="font-size:14px;font-weight:600;color:#222">{System.Net.WebUtility.HtmlEncode(title)}</span>
-                          </td>
-                        </tr>
-                        <tr>
-                          <td style="padding-top:8px">
-                            <span style="font-size:11px;color:#888">Área / Puesto</span><br>
-                            <span style="font-size:14px;color:#444">{System.Net.WebUtility.HtmlEncode(area)}</span>
-                          </td>
-                        </tr>
-                      </table>
+                      <div style="font-size:22px;font-weight:800;color:#1a237e;font-family:monospace">{ticketNumber}</div>
+                      <div style="font-size:14px;font-weight:600;color:#222;margin-top:8px">{System.Net.WebUtility.HtmlEncode(title)}</div>
+                      <div style="font-size:13px;color:#666;margin-top:4px">Área: {System.Net.WebUtility.HtmlEncode(area)}</div>
                     </div>
-
-                    <!-- Status indicator -->
-                    <div style="background:#e3f2fd;border-radius:8px;padding:12px 16px;margin-bottom:24px;display:flex;align-items:center">
-                      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#1565c0;margin-right:8px"></span>
-                      <span style="color:#1565c0;font-weight:600;font-size:13px">Estatus actual: Abierto</span>
-                    </div>
-
-                    <!-- CTA -->
                     <div style="text-align:center;margin-bottom:24px">
-                      <a href="{ticketUrl}"
-                        style="display:inline-block;background:#1a237e;color:white;padding:13px 32px;border-radius:8px;
-                               text-decoration:none;font-weight:700;font-size:14px;letter-spacing:0.3px">
-                        Ver mi ticket →
-                      </a>
+                      <a href="{ticketUrl}" style="display:inline-block;background:#1a237e;color:white;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">Ver mi ticket →</a>
                     </div>
-
-                    <p style="font-size:12px;color:#999;text-align:center;margin:0;line-height:1.6">
-                      Si tienes dudas, responde a este correo o contacta directamente al área de TI.<br>
-                      <strong>Pandora HelpDesk — iMET</strong>
-                    </p>
+                    <p style="font-size:12px;color:#999;text-align:center;margin:0">Pandora HelpDesk — iMET</p>
                   </div>
-
-                  <!-- Footer -->
-                  <div style="background:#f5f5f5;padding:14px 32px;text-align:center">
-                    <span style="font-size:11px;color:#aaa">Este es un mensaje automático. Por favor no respondas directamente a este correo.</span>
-                  </div>
-
-                </div>
-                </body></html>
+                </div></body></html>
                 """;
-            await client.SendMailAsync(msg);
-            logger.LogInformation("Confirmation email sent to {Email} for ticket {Num}", toEmail, ticketNumber);
+            var err = await SmtpHelper.SendAsync(smtp, toEmail, toEmail, $"✅ Tu ticket {ticketNumber} fue registrado — Pandora HelpDesk", body);
+            if (err == null) logger.LogInformation("Confirmation email sent to {Email} for ticket {Num}", toEmail, ticketNumber);
         }
         catch (Exception ex) { logger.LogWarning("SendSubmitterConfirmation failed: {Msg}", ex.Message); }
     }
@@ -1163,9 +1157,9 @@ public class TicketsController(
     {
         try
         {
-            var (client, msg) = BuildEmail($"[Pandora Tickets] Nuevo ticket — {ticketNumber}", NotifEmail);
-            if (client == null || msg == null) return;
-            msg.Body = $"""
+            if (string.IsNullOrWhiteSpace(NotifEmail)) return;
+            var smtp = await LoadSmtp();
+            var body = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
                 <div style="max-width:600px;margin:0 auto">
                   <div style="background:#1a237e;padding:20px;border-radius:8px 8px 0 0">
@@ -1185,7 +1179,7 @@ public class TicketsController(
                   </div>
                 </div></body></html>
                 """;
-            await client.SendMailAsync(msg);
+            await SmtpHelper.SendAsync(smtp, NotifEmail, "Pandora Admin", $"[Pandora Tickets] Nuevo ticket — {ticketNumber}", body);
         }
         catch (Exception ex) { logger.LogWarning("SendCreatedEmail failed: {Msg}", ex.Message); }
     }
@@ -1194,9 +1188,8 @@ public class TicketsController(
     {
         try
         {
-            var (client, msg) = BuildEmail($"[Pandora Tickets] Actualización — {ticketNumber}: en espera", toEmail);
-            if (client == null || msg == null) return;
-            msg.Body = $"""
+            var smtp = await LoadSmtp();
+            var body = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
                 <div style="max-width:600px;margin:0 auto">
                   <div style="background:#e65100;padding:20px;border-radius:8px 8px 0 0">
@@ -1212,7 +1205,7 @@ public class TicketsController(
                   </div>
                 </div></body></html>
                 """;
-            await client.SendMailAsync(msg);
+            await SmtpHelper.SendAsync(smtp, toEmail, toEmail, $"[Pandora Tickets] Actualización — {ticketNumber}: en espera", body);
         }
         catch (Exception ex) { logger.LogWarning("SendDelayEmail failed: {Msg}", ex.Message); }
     }
@@ -1221,9 +1214,8 @@ public class TicketsController(
     {
         try
         {
-            var (client, msg) = BuildEmail($"[Pandora Tickets] Resuelto — {ticketNumber}", toEmail);
-            if (client == null || msg == null) return;
-            msg.Body = $"""
+            var smtp = await LoadSmtp();
+            var body = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
                 <div style="max-width:600px;margin:0 auto">
                   <div style="background:#1b5e20;padding:20px;border-radius:8px 8px 0 0">
@@ -1239,7 +1231,7 @@ public class TicketsController(
                   </div>
                 </div></body></html>
                 """;
-            await client.SendMailAsync(msg);
+            await SmtpHelper.SendAsync(smtp, toEmail, toEmail, $"[Pandora Tickets] Resuelto — {ticketNumber}", body);
         }
         catch (Exception ex) { logger.LogWarning("SendResolvedEmail failed: {Msg}", ex.Message); }
     }

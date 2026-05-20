@@ -1,3 +1,4 @@
+using BCrypt.Net;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -342,6 +343,50 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         catch (Exception ex) { logger.LogError(ex, "UploadBanner"); return StatusCode(500, ex.Message); }
     }
 
+    // ── PUT /api/users/me/change-password ────────────────────────────────────
+    [HttpPut("me/change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto dto, CancellationToken ct)
+    {
+        var username = CurrentUsername;
+        if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
+        if (string.IsNullOrWhiteSpace(dto.CurrentPassword)) return BadRequest("Contraseña actual requerida.");
+        if (string.IsNullOrWhiteSpace(dto.NewPassword))     return BadRequest("Nueva contraseña requerida.");
+        if (dto.NewPassword.Length < 8) return BadRequest("La nueva contraseña debe tener al menos 8 caracteres.");
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Verificar contraseña actual
+            string? hash = null;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT PasswordHash FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User) AND IsActive = 1";
+                cmd.Parameters.AddWithValue("@User", username);
+                hash = (string?)await cmd.ExecuteScalarAsync(ct);
+            }
+
+            if (hash == null) return Unauthorized();
+            if (!BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, hash))
+                return BadRequest("La contraseña actual es incorrecta.");
+
+            // Actualizar contraseña
+            var newHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "UPDATE dbo.AppUsers SET PasswordHash = @Hash, UpdatedAt = GETUTCDATE() WHERE LOWER(Username) = LOWER(@User)";
+                cmd.Parameters.AddWithValue("@Hash", newHash);
+                cmd.Parameters.AddWithValue("@User", username);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            logger.LogInformation("Contraseña cambiada para {Username}", username);
+            return NoContent();
+        }
+        catch (Exception ex) { logger.LogError(ex, "ChangePassword"); return StatusCode(500, ex.Message); }
+    }
+
     // ── DELETE /api/users/me/banner ───────────────────────────────────────────
     [HttpDelete("me/banner")]
     public async Task<IActionResult> DeleteBanner(CancellationToken ct)
@@ -390,3 +435,4 @@ public record UserUpdateDto(
 );
 
 public record SmtpDto(string? SmtpEmail, string? SmtpPassword);
+public record ChangePasswordDto(string CurrentPassword, string NewPassword);
