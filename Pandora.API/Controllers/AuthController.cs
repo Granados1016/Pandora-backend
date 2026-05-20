@@ -3,14 +3,12 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using MailKit.Net.Smtp;
-using MailKit.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
 using Microsoft.IdentityModel.Tokens;
-using MimeKit;
+using Pandora.API.Services;
 using Pandora.Application.DTOs;
 using Pandora.Application.Interfaces;
 
@@ -324,20 +322,8 @@ public class AuthController(
     {
         try
         {
-            var smtp     = config.GetSection("SmtpSettings");
-            var host     = smtp["Host"] ?? "";
-            var port     = int.TryParse(smtp["Port"], out var p) ? p : 587;
-            var fromName = smtp["FromName"] ?? "Pandora";
-            var from     = smtp["FromEmail"] ?? smtp["Username"] ?? "";
-            var pass     = smtp["Password"]  ?? "";
-
-            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
-            {
-                logger.LogDebug("SMTP no configurado — omitiendo correo de reset");
-                return;
-            }
-
-            // En producción sería la URL del frontend
+            var connStr     = config.GetConnectionString("PandoraDb")!;
+            var smtpCfg     = await SmtpHelper.LoadAsync(connStr, config);
             var frontendUrl = config["FrontendUrl"] ?? "http://localhost:5173";
             var resetUrl    = $"{frontendUrl}/reset-password?token={Uri.EscapeDataString(token)}";
 
@@ -368,17 +354,11 @@ public class AuthController(
                 </body></html>
                 """;
 
-            using var smtpClient = new SmtpClient();
-            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-            await smtpClient.AuthenticateAsync(from, pass);
-            var msg = new MimeMessage();
-            msg.From.Add(new MailboxAddress(fromName, from));
-            msg.To.Add(new MailboxAddress(toName, toEmail));
-            msg.Subject = "🔑 Recupera tu contraseña en Pandora";
-            msg.Body    = new TextPart("html") { Text = body };
-            await smtpClient.SendAsync(msg);
-            await smtpClient.DisconnectAsync(true);
-            logger.LogInformation("Correo de recuperación enviado a {Email}", toEmail);
+            var err = await SmtpHelper.SendAsync(smtpCfg, toEmail, toName, "🔑 Recupera tu contraseña en Pandora", body);
+            if (err != null)
+                logger.LogWarning("No se pudo enviar correo de reset: {Error}", err);
+            else
+                logger.LogInformation("Correo de recuperación enviado a {Email}", toEmail);
         }
         catch (Exception ex)
         {

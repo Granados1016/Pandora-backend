@@ -1,12 +1,10 @@
-using MailKit.Net.Smtp;
-using MailKit.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
-using MimeKit;
 using Pandora.API.Hubs;
+using Pandora.API.Services;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -672,24 +670,10 @@ public class VacacionesController(
     {
         try
         {
-            var smtp     = config.GetSection("SmtpSettings");
-            var host     = smtp["Host"] ?? "";
-            var port     = int.TryParse(smtp["Port"], out var p) ? p : 587;
-            var fromName = smtp["FromName"] ?? "Pandora";
-            var from     = smtp["FromEmail"] ?? smtp["Username"] ?? "";
-            var pass     = smtp["Password"]  ?? "";
-
-            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
-            {
-                logger.LogDebug("SMTP no configurado — omitiendo correo de vacación");
-                return;
-            }
-
-            var icon    = status == "Aprobado" ? "✅" : "❌";
-            var color   = status == "Aprobado" ? "#2e7d32" : "#b71c1c";
-            var subject = $"{icon} Tu solicitud de vacaciones ha sido {status.ToLower()} — Pandora";
-
-            var body = $"""
+            var cfg   = await SmtpHelper.LoadAsync(config.GetConnectionString("PandoraDb")!, config);
+            var icon  = status == "Aprobado" ? "✅" : "❌";
+            var color = status == "Aprobado" ? "#2e7d32" : "#b71c1c";
+            var body  = $"""
                 <!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"></head>
                 <body style="font-family:Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px">
                   <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)">
@@ -706,7 +690,7 @@ public class VacacionesController(
                         <p style="margin:0"><strong>Total:</strong> {totalDays} día{(totalDays != 1 ? "s" : "")}</p>
                         {(reviewNotes != null ? $"<p style=\"margin:8px 0 0\"><strong>Nota:</strong> {reviewNotes}</p>" : "")}
                       </div>
-                      <p style="color:#888;font-size:12px">Puedes revisar el estado de tus solicitudes en el módulo de Vacaciones.</p>
+                      <p style="color:#888;font-size:12px">Puedes revisar el estado en el módulo de Vacaciones.</p>
                     </div>
                     <div style="background:#f9f9f9;border-top:1px solid #eee;padding:14px 28px;text-align:center">
                       <p style="color:#aaa;font-size:11px;margin:0">Pandora — Coordinación de TI | iMET</p>
@@ -715,23 +699,14 @@ public class VacacionesController(
                 </body></html>
                 """;
 
-            using var smtpClient = new SmtpClient();
-            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-            await smtpClient.AuthenticateAsync(from, pass);
+            var err = await SmtpHelper.SendAsync(cfg, toEmail, toName,
+                $"{icon} Tu solicitud de vacaciones ha sido {status.ToLower()} — Pandora", body);
 
-            var msg = new MimeMessage();
-            msg.From.Add(new MailboxAddress(fromName, from));
-            msg.To.Add(new MailboxAddress(toName, toEmail));
-            msg.Subject = subject;
-            msg.Body    = new TextPart("html") { Text = body };
-            await smtpClient.SendAsync(msg);
-            await smtpClient.DisconnectAsync(true);
-
-            logger.LogInformation("Correo de vacación enviado a {Email}", toEmail);
+            if (err != null) logger.LogWarning("Correo vacación no enviado a {Email}: {Err}", toEmail, err);
+            else logger.LogInformation("Correo de vacación enviado a {Email}", toEmail);
         }
         catch (Exception ex)
         {
-            // No-fatal: no bloquear la respuesta si el correo falla
             logger.LogWarning(ex, "No se pudo enviar correo de vacación a {Email}", toEmail);
         }
     }

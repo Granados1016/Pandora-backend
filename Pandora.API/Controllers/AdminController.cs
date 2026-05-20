@@ -1,7 +1,9 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
-using System.Text;
+using Pandora.API.Services;
 
 namespace Pandora.API.Controllers;
 
@@ -278,4 +280,224 @@ public class AdminController(
         logger.LogInformation("fix-encoding ejecutado por {User}", User.Identity?.Name);
         return Ok(new { message = "Corrección completada.", details = results });
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CONFIGURACIÓN SMTP (#formulario UI)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── GET /api/admin/settings/smtp ─────────────────────────────────────────
+    [HttpGet("settings/smtp")]
+    public async Task<IActionResult> GetSmtpSettings(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT SettingKey, SettingValue
+                FROM   dbo.SystemSettings
+                WHERE  SettingKey IN (
+                    'smtp_host','smtp_port','smtp_from_email',
+                    'smtp_from_name','smtp_use_ssl','smtp_notifications_email'
+                )
+                """;
+            var dict = new Dictionary<string, string?>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                dict[r.GetString(0)] = r.IsDBNull(1) ? null : r.GetString(1);
+
+            return Ok(new {
+                host              = dict.GetValueOrDefault("smtp_host",               "smtp.gmail.com"),
+                port              = int.TryParse(dict.GetValueOrDefault("smtp_port"),  out var p) ? p : 587,
+                fromEmail         = dict.GetValueOrDefault("smtp_from_email",          ""),
+                fromName          = dict.GetValueOrDefault("smtp_from_name",           "Pandora"),
+                useSsl            = dict.GetValueOrDefault("smtp_use_ssl",             "true") == "true",
+                notificationsEmail= dict.GetValueOrDefault("smtp_notifications_email", ""),
+                // Nunca devolver la contraseña — solo indicar si está guardada
+                hasPassword       = await HasSmtpPassword(conn, ct),
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GetSmtpSettings");
+            return StatusCode(500, "Error al leer configuración SMTP.");
+        }
+    }
+
+    // ── POST /api/admin/settings/smtp ────────────────────────────────────────
+    [HttpPost("settings/smtp")]
+    public async Task<IActionResult> SaveSmtpSettings([FromBody] SmtpSettingsDto dto, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Guardar campos no sensibles
+            var fields = new Dictionary<string, string>
+            {
+                ["smtp_host"]               = dto.Host?.Trim() ?? "",
+                ["smtp_port"]               = dto.Port.ToString(),
+                ["smtp_from_email"]         = dto.FromEmail?.Trim() ?? "",
+                ["smtp_from_name"]          = dto.FromName?.Trim() ?? "Pandora",
+                ["smtp_use_ssl"]            = dto.UseSsl ? "true" : "false",
+                ["smtp_notifications_email"]= dto.NotificationsEmail?.Trim() ?? "",
+            };
+
+            foreach (var (key, value) in fields)
+                await UpsertSetting(conn, key, value, ct);
+
+            // Contraseña: solo actualizar si viene en el request (no vacía)
+            if (!string.IsNullOrWhiteSpace(dto.Password))
+            {
+                var encrypted = EncryptSetting(dto.Password);
+                await UpsertSetting(conn, "smtp_password", encrypted, ct);
+            }
+
+            logger.LogInformation("Configuración SMTP actualizada por {User}", User.Identity?.Name);
+            return Ok(new { message = "Configuración SMTP guardada." });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "SaveSmtpSettings");
+            return StatusCode(500, "Error al guardar configuración SMTP.");
+        }
+    }
+
+    // ── POST /api/admin/settings/smtp/test ───────────────────────────────────
+    [HttpPost("settings/smtp/test")]
+    public async Task<IActionResult> TestSmtp([FromBody] SmtpTestDto dto, CancellationToken ct)
+    {
+        try
+        {
+            var connStr = config.GetConnectionString("PandoraDb")!;
+            var smtpCfg = await SmtpHelper.LoadAsync(connStr, config);
+
+            if (string.IsNullOrWhiteSpace(smtpCfg.Host) || string.IsNullOrWhiteSpace(smtpCfg.From) || string.IsNullOrWhiteSpace(smtpCfg.Password))
+                return BadRequest(new { error = "Configura y guarda primero el SMTP antes de probar." });
+
+            var toEmail = !string.IsNullOrWhiteSpace(dto.TestEmail) ? dto.TestEmail : smtpCfg.From;
+            var htmlBody = $"""
+                <div style="font-family:Arial,sans-serif;padding:24px">
+                  <h2 style="color:#1a237e">✅ Prueba de correo exitosa</h2>
+                  <p>El servidor SMTP está configurado correctamente en <strong>Pandora</strong>.</p>
+                  <p style="color:#888;font-size:12px">Enviado el {DateTime.Now:dd/MM/yyyy HH:mm}</p>
+                </div>
+                """;
+
+            var err = await SmtpHelper.SendAsync(smtpCfg, toEmail, toEmail, "✅ Prueba SMTP — Pandora", htmlBody);
+            if (err != null)
+            {
+                logger.LogWarning("TestSmtp falló: {Error}", err);
+                return BadRequest(new { error = err });
+            }
+
+            logger.LogInformation("Correo de prueba SMTP enviado a {Email} por {User}", toEmail, User.Identity?.Name);
+            return Ok(new { message = $"Correo de prueba enviado a {toEmail}" });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "TestSmtp falló");
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static readonly byte[] _encKey =
+        SHA256.HashData(Encoding.UTF8.GetBytes("Pandora_SMTP_Enc_Key_2024!"));
+
+    private static string EncryptSetting(string plain)
+    {
+        using var aes = Aes.Create();
+        aes.Key = _encKey;
+        aes.GenerateIV();
+        using var enc = aes.CreateEncryptor();
+        var data = Encoding.UTF8.GetBytes(plain);
+        var cipher = enc.TransformFinalBlock(data, 0, data.Length);
+        var result = new byte[aes.IV.Length + cipher.Length];
+        Buffer.BlockCopy(aes.IV, 0, result, 0, aes.IV.Length);
+        Buffer.BlockCopy(cipher, 0, result, aes.IV.Length, cipher.Length);
+        return Convert.ToBase64String(result);
+    }
+
+    private static string? DecryptSetting(string? encrypted)
+    {
+        if (string.IsNullOrWhiteSpace(encrypted)) return null;
+        try
+        {
+            var raw = Convert.FromBase64String(encrypted);
+            using var aes = Aes.Create();
+            aes.Key = _encKey;
+            var iv = new byte[16];
+            Buffer.BlockCopy(raw, 0, iv, 0, 16);
+            aes.IV = iv;
+            using var dec = aes.CreateDecryptor();
+            var cipher = new byte[raw.Length - 16];
+            Buffer.BlockCopy(raw, 16, cipher, 0, cipher.Length);
+            return Encoding.UTF8.GetString(dec.TransformFinalBlock(cipher, 0, cipher.Length));
+        }
+        catch { return null; }
+    }
+
+    private async Task UpsertSetting(SqlConnection conn, string key, string value, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            MERGE dbo.SystemSettings AS t
+            USING (SELECT @Key AS K, @Val AS V) AS s ON t.SettingKey = s.K
+            WHEN MATCHED THEN UPDATE SET t.SettingValue = s.V, t.UpdatedAt = GETUTCDATE()
+            WHEN NOT MATCHED THEN INSERT (SettingKey, SettingValue, UpdatedAt)
+                                  VALUES (s.K, s.V, GETUTCDATE());
+            """;
+        cmd.Parameters.AddWithValue("@Key", key);
+        cmd.Parameters.AddWithValue("@Val", value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private async Task<bool> HasSmtpPassword(SqlConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(1) FROM dbo.SystemSettings WHERE SettingKey='smtp_password' AND SettingValue IS NOT NULL AND SettingValue <> ''";
+        return (int)(await cmd.ExecuteScalarAsync(ct) ?? 0) > 0;
+    }
+
+    private async Task<(string host, int port, string from, string pass, string fromName)> LoadSmtpFromDb(CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT SettingKey, SettingValue FROM dbo.SystemSettings
+            WHERE SettingKey IN ('smtp_host','smtp_port','smtp_from_email','smtp_password','smtp_from_name')
+            """;
+        var d = new Dictionary<string, string?>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            d[r.GetString(0)] = r.IsDBNull(1) ? null : r.GetString(1);
+
+        // Fallback a appsettings si la BD no tiene configuración
+        var smtp     = config.GetSection("SmtpSettings");
+        var host     = d.GetValueOrDefault("smtp_host") ?? smtp["Host"] ?? "";
+        var port     = int.TryParse(d.GetValueOrDefault("smtp_port") ?? smtp["Port"], out var p) ? p : 587;
+        var from     = d.GetValueOrDefault("smtp_from_email") ?? smtp["FromEmail"] ?? smtp["Username"] ?? "";
+        var encPass  = d.GetValueOrDefault("smtp_password");
+        var pass     = (encPass != null ? DecryptSetting(encPass) : null) ?? smtp["Password"] ?? "";
+        var fromName = d.GetValueOrDefault("smtp_from_name") ?? smtp["FromName"] ?? "Pandora";
+        return (host, port, from, pass, fromName);
+    }
 }
+
+// ── DTOs SMTP ─────────────────────────────────────────────────────────────────
+public record SmtpSettingsDto(
+    string? Host,
+    int     Port,
+    string? FromEmail,
+    string? Password,
+    string? FromName,
+    bool    UseSsl,
+    string? NotificationsEmail
+);
+
+public record SmtpTestDto(string? TestEmail);

@@ -1092,6 +1092,25 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdDoc.ExecuteNonQueryAsync();
 }
 
+// ── Migración: tabla SystemSettings (configuración SMTP desde UI) ────────────
+{
+    await using var connSS = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connSS.OpenAsync();
+    await using var cmdSS = connSS.CreateCommand();
+    cmdSS.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='SystemSettings' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.SystemSettings (
+                SettingKey   NVARCHAR(100) NOT NULL PRIMARY KEY,
+                SettingValue NVARCHAR(MAX) NULL,
+                UpdatedAt    DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+        """;
+    await cmdSS.ExecuteNonQueryAsync();
+}
+
 // ── Migración: tabla PasswordResetTokens (#11) ───────────────────────────────
 {
     await using var connPrt = new Microsoft.Data.SqlClient.SqlConnection(
