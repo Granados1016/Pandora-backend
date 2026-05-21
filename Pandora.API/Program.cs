@@ -515,6 +515,26 @@ using (var scopeU = app.Services.CreateScope())
         IF NOT EXISTS (SELECT 1 FROM sys.columns
                        WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ModulesViewOnly')
             ALTER TABLE dbo.AppUsers ADD ModulesViewOnly INT NOT NULL DEFAULT 0;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ProfilePhotoData')
+            ALTER TABLE dbo.AppUsers ADD ProfilePhotoData VARBINARY(MAX) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ProfilePhotoMime')
+            ALTER TABLE dbo.AppUsers ADD ProfilePhotoMime NVARCHAR(50) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'BannerPhotoData')
+            ALTER TABLE dbo.AppUsers ADD BannerPhotoData VARBINARY(MAX) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'BannerPhotoMime')
+            ALTER TABLE dbo.AppUsers ADD BannerPhotoMime NVARCHAR(50) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'TwoFactorEnabled')
+            ALTER TABLE dbo.AppUsers ADD TwoFactorEnabled BIT NOT NULL DEFAULT 0;
         """;
     await cmdU.ExecuteNonQueryAsync();
 }

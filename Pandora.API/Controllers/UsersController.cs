@@ -30,22 +30,40 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         UserService.HashPassword(password);
 
     // Serialize user row from reader
-    private static object ReadUser(SqlDataReader r) => new
+    private static object ReadUser(SqlDataReader r)
     {
-        id               = r.GetGuid(r.GetOrdinal("Id")),
-        username         = r.GetString(r.GetOrdinal("Username")),
-        fullName         = r.IsDBNull(r.GetOrdinal("FullName"))        ? null : r.GetString(r.GetOrdinal("FullName")),
-        email            = r.IsDBNull(r.GetOrdinal("Email"))           ? null : r.GetString(r.GetOrdinal("Email")),
-        role             = r.IsDBNull(r.GetOrdinal("Role"))            ? "User" : r.GetString(r.GetOrdinal("Role")),
-        modules          = r.GetInt32(r.GetOrdinal("Modules")),
-        modulesViewOnly  = r.IsDBNull(r.GetOrdinal("ModulesViewOnly")) ? 0 : r.GetInt32(r.GetOrdinal("ModulesViewOnly")),
-        isActive         = r.GetBoolean(r.GetOrdinal("IsActive")),
-        position         = r.IsDBNull(r.GetOrdinal("Position"))        ? null : r.GetString(r.GetOrdinal("Position")),
-        smtpEmail        = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
-        profilePhotoUrl  = r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl")) ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
-        bannerPhotoUrl   = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))  ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
-        createdAt        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
-    };
+        // Helper: resolve photo URL — prefers binary (data URL) over legacy path URL
+        static string? ResolvePhoto(SqlDataReader rd, string dataCol, string mimeCol, string urlCol)
+        {
+            int dataOrd = rd.GetOrdinal(dataCol);
+            int mimeOrd = rd.GetOrdinal(mimeCol);
+            int urlOrd  = rd.GetOrdinal(urlCol);
+            if (!rd.IsDBNull(dataOrd))
+            {
+                var bytes = (byte[])rd.GetValue(dataOrd);
+                var mime  = rd.IsDBNull(mimeOrd) ? "image/jpeg" : rd.GetString(mimeOrd);
+                return $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
+            }
+            return rd.IsDBNull(urlOrd) ? null : rd.GetString(urlOrd);
+        }
+
+        return new
+        {
+            id               = r.GetGuid(r.GetOrdinal("Id")),
+            username         = r.GetString(r.GetOrdinal("Username")),
+            fullName         = r.IsDBNull(r.GetOrdinal("FullName"))        ? null : r.GetString(r.GetOrdinal("FullName")),
+            email            = r.IsDBNull(r.GetOrdinal("Email"))           ? null : r.GetString(r.GetOrdinal("Email")),
+            role             = r.IsDBNull(r.GetOrdinal("Role"))            ? "User" : r.GetString(r.GetOrdinal("Role")),
+            modules          = r.GetInt32(r.GetOrdinal("Modules")),
+            modulesViewOnly  = r.IsDBNull(r.GetOrdinal("ModulesViewOnly")) ? 0 : r.GetInt32(r.GetOrdinal("ModulesViewOnly")),
+            isActive         = r.GetBoolean(r.GetOrdinal("IsActive")),
+            position         = r.IsDBNull(r.GetOrdinal("Position"))        ? null : r.GetString(r.GetOrdinal("Position")),
+            smtpEmail        = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
+            profilePhotoUrl  = ResolvePhoto(r, "ProfilePhotoData", "ProfilePhotoMime", "ProfilePhotoUrl"),
+            bannerPhotoUrl   = ResolvePhoto(r, "BannerPhotoData",  "BannerPhotoMime",  "BannerPhotoUrl"),
+            createdAt        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+        };
+    }
 
     // ── GET /api/users  (Admin) ───────────────────────────────────────────────
     [HttpGet]
@@ -59,7 +77,8 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt,
+                       ProfilePhotoData, ProfilePhotoMime, BannerPhotoData, BannerPhotoMime
                 FROM dbo.AppUsers
                 ORDER BY CreatedAt DESC
                 """;
@@ -84,7 +103,8 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt,
+                       ProfilePhotoData, ProfilePhotoMime, BannerPhotoData, BannerPhotoMime
                 FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User)
                 """;
             cmd.Parameters.AddWithValue("@User", username);
@@ -244,41 +264,63 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     }
 
     // ── POST /api/users/me/photo ──────────────────────────────────────────────
+    /// <summary>
+    /// Guarda la foto de perfil como VARBINARY en BD y la devuelve como data URL.
+    /// Evita dependencia del filesystem efímero de Railway.
+    /// </summary>
     [HttpPost("me/photo")]
     public async Task<IActionResult> UploadPhoto(IFormFile file, CancellationToken ct)
     {
         var username = CurrentUsername;
         if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
         if (file == null || file.Length == 0) return BadRequest("Archivo requerido.");
+        if (file.Length > 5 * 1024 * 1024) return BadRequest("La imagen no puede superar 5 MB.");
+
+        var ext  = Path.GetExtension(file.FileName).ToLower();
+        var mimeMap = new Dictionary<string, string>
+        {
+            { ".jpg",  "image/jpeg" }, { ".jpeg", "image/jpeg" },
+            { ".png",  "image/png"  }, { ".webp", "image/webp" },
+            { ".gif",  "image/gif"  },
+        };
+        if (!mimeMap.TryGetValue(ext, out var mime)) return BadRequest("Formato no soportado (.jpg, .png, .webp, .gif).");
 
         try
         {
-            var ext  = Path.GetExtension(file.FileName).ToLower();
-            var safe = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            if (!safe.Contains(ext)) return BadRequest("Formato no soportado.");
+            // Leer bytes
+            using var ms = new MemoryStream();
+            await file.CopyToAsync(ms, ct);
+            var bytes = ms.ToArray();
 
-            var dir  = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", "profiles");
-            Directory.CreateDirectory(dir);
-            var name = $"{Guid.NewGuid()}{ext}";
-            var path = Path.Combine(dir, name);
-
-            await using (var stream = System.IO.File.Create(path))
-                await file.CopyToAsync(stream, ct);
-
-            var url  = $"/uploads/profiles/{name}";
-
+            // Asegura que existe la columna ProfilePhotoData en AppUsers
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await using (var alter = conn.CreateCommand())
+            {
+                alter.CommandText = """
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ProfilePhotoData')
+                        ALTER TABLE dbo.AppUsers ADD ProfilePhotoData VARBINARY(MAX) NULL;
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'ProfilePhotoMime')
+                        ALTER TABLE dbo.AppUsers ADD ProfilePhotoMime NVARCHAR(50) NULL;
+                    """;
+                await alter.ExecuteNonQueryAsync(ct);
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                UPDATE dbo.AppUsers SET ProfilePhotoUrl = @Url, UpdatedAt = GETUTCDATE()
+                UPDATE dbo.AppUsers
+                SET ProfilePhotoData = @Data, ProfilePhotoMime = @Mime,
+                    ProfilePhotoUrl  = NULL,   UpdatedAt = GETUTCDATE()
                 WHERE LOWER(Username) = LOWER(@User)
                 """;
-            cmd.Parameters.AddWithValue("@Url",  url);
+            cmd.Parameters.AddWithValue("@Data", bytes);
+            cmd.Parameters.AddWithValue("@Mime", mime);
             cmd.Parameters.AddWithValue("@User", username);
             await cmd.ExecuteNonQueryAsync(ct);
 
-            return Ok(new { url });
+            // Devolver data URL para que el frontend la use directamente
+            var dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
+            return Ok(new { url = dataUrl });
         }
         catch (Exception ex) { logger.LogError(ex, "UploadPhoto"); return StatusCode(500, ex.Message); }
     }
@@ -295,7 +337,9 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                UPDATE dbo.AppUsers SET ProfilePhotoUrl = NULL, UpdatedAt = GETUTCDATE()
+                UPDATE dbo.AppUsers
+                SET ProfilePhotoUrl = NULL, ProfilePhotoData = NULL, ProfilePhotoMime = NULL,
+                    UpdatedAt = GETUTCDATE()
                 WHERE LOWER(Username) = LOWER(@User)
                 """;
             cmd.Parameters.AddWithValue("@User", username);
@@ -306,39 +350,58 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     }
 
     // ── POST /api/users/me/banner ─────────────────────────────────────────────
+    /// <summary>
+    /// Guarda el banner como VARBINARY en BD y lo devuelve como data URL.
+    /// </summary>
     [HttpPost("me/banner")]
     public async Task<IActionResult> UploadBanner(IFormFile file, CancellationToken ct)
     {
         var username = CurrentUsername;
         if (string.IsNullOrWhiteSpace(username)) return Unauthorized();
         if (file == null || file.Length == 0) return BadRequest("Archivo requerido.");
+        if (file.Length > 8 * 1024 * 1024) return BadRequest("El banner no puede superar 8 MB.");
+
+        var ext  = Path.GetExtension(file.FileName).ToLower();
+        var mimeMap = new Dictionary<string, string>
+        {
+            { ".jpg",  "image/jpeg" }, { ".jpeg", "image/jpeg" },
+            { ".png",  "image/png"  }, { ".webp", "image/webp" },
+        };
+        if (!mimeMap.TryGetValue(ext, out var mime)) return BadRequest("Formato no soportado (.jpg, .png, .webp).");
+
         try
         {
-            var ext  = Path.GetExtension(file.FileName).ToLower();
-            var safe = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            if (!safe.Contains(ext)) return BadRequest("Formato no soportado.");
-
-            var dir  = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", "banners");
-            Directory.CreateDirectory(dir);
-            var name = $"{Guid.NewGuid()}{ext}";
-            var path = Path.Combine(dir, name);
-
-            await using (var stream = System.IO.File.Create(path))
-                await file.CopyToAsync(stream, ct);
-
-            var url  = $"/uploads/banners/{name}";
+            using var ms = new MemoryStream();
+            await file.CopyToAsync(ms, ct);
+            var bytes = ms.ToArray();
 
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await using (var alter = conn.CreateCommand())
+            {
+                alter.CommandText = """
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'BannerPhotoData')
+                        ALTER TABLE dbo.AppUsers ADD BannerPhotoData VARBINARY(MAX) NULL;
+                    IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'BannerPhotoMime')
+                        ALTER TABLE dbo.AppUsers ADD BannerPhotoMime NVARCHAR(50) NULL;
+                    """;
+                await alter.ExecuteNonQueryAsync(ct);
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                UPDATE dbo.AppUsers SET BannerPhotoUrl = @Url, UpdatedAt = GETUTCDATE()
+                UPDATE dbo.AppUsers
+                SET BannerPhotoData = @Data, BannerPhotoMime = @Mime,
+                    BannerPhotoUrl  = NULL,   UpdatedAt = GETUTCDATE()
                 WHERE LOWER(Username) = LOWER(@User)
                 """;
-            cmd.Parameters.AddWithValue("@Url",  url);
+            cmd.Parameters.AddWithValue("@Data", bytes);
+            cmd.Parameters.AddWithValue("@Mime", mime);
             cmd.Parameters.AddWithValue("@User", username);
             await cmd.ExecuteNonQueryAsync(ct);
-            return Ok(new { url });
+
+            var dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
+            return Ok(new { url = dataUrl });
         }
         catch (Exception ex) { logger.LogError(ex, "UploadBanner"); return StatusCode(500, ex.Message); }
     }
@@ -399,7 +462,9 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                UPDATE dbo.AppUsers SET BannerPhotoUrl = NULL, UpdatedAt = GETUTCDATE()
+                UPDATE dbo.AppUsers
+                SET BannerPhotoUrl = NULL, BannerPhotoData = NULL, BannerPhotoMime = NULL,
+                    UpdatedAt = GETUTCDATE()
                 WHERE LOWER(Username) = LOWER(@User)
                 """;
             cmd.Parameters.AddWithValue("@User", username);
