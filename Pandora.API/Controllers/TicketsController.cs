@@ -458,20 +458,27 @@ public class TicketsController(
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
+            {
+                var tickStatus = r.GetString(r.GetOrdinal("Status"));
+                var tickCreated = r.GetDateTime(r.GetOrdinal("CreatedAt"));
+                bool isOverdue = tickStatus is not ("Cerrado" or "Resuelto")
+                                 && (DateTime.UtcNow - tickCreated).TotalDays > 3;
                 list.Add(new
                 {
                     id           = r.GetGuid(r.GetOrdinal("Id")),
                     ticketNumber = r.GetString(r.GetOrdinal("TicketNumber")),
                     title        = r.GetString(r.GetOrdinal("Title")),
-                    status       = r.GetString(r.GetOrdinal("Status")),
+                    status       = tickStatus,
                     priority     = r.GetString(r.GetOrdinal("Priority")),
                     area         = Ns(r, "Area"),
                     department   = Ns(r, "Department"),
                     assignedTo   = Ns(r, "AssignedTo"),
                     submittedBy  = r.GetString(r.GetOrdinal("SubmittedBy")),
-                    createdAt    = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt    = tickCreated,
                     updatedAt    = N(r, "UpdatedAt"),
+                    isOverdue,
                 });
+            }
             return Ok(list);
         }
         catch (Exception ex) { logger.LogError(ex, "GetTickets failed"); return StatusCode(500, ex.Message); }

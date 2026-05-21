@@ -161,11 +161,29 @@ public class VacacionesController(
             usedDays = (int)(await used.ExecuteScalarAsync(ct) ?? 0);
         }
 
+        // Días en solicitudes pendientes
+        int pendingDays = 0;
+        await using (var pend = conn.CreateCommand())
+        {
+            pend.CommandText = """
+                SELECT ISNULL(SUM(TotalDays), 0)
+                FROM dbo.VacationRequests
+                WHERE Username = @Username
+                  AND YEAR(StartDate) = @Year
+                  AND Status = 'Pendiente'
+                  AND IsDeleted = 0
+                """;
+            pend.Parameters.AddWithValue("@Username", username);
+            pend.Parameters.AddWithValue("@Year", year);
+            pendingDays = (int)(await pend.ExecuteScalarAsync(ct) ?? 0);
+        }
+
         return Ok(new
         {
             year,
             totalDays,
             usedDays,
+            pendingDays,
             availableDays = totalDays - usedDays
         });
     }

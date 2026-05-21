@@ -598,6 +598,70 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex) { logger.LogError(ex, "DeleteReservation {Id}", id); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/calendar/export-ical ─────────────────────────────────────────
+    /// <summary>Exporta las reservaciones del usuario como archivo .ics (iCalendar).</summary>
+    [HttpGet("export-ical")]
+    public async Task<IActionResult> ExportICal(CancellationToken ct)
+    {
+        try
+        {
+            var username = User.Identity?.Name ?? "";
+            var isAdminRole = User.IsInRole("Admin");
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = isAdminRole
+                ? """
+                    SELECT r.Id, r.Title, r.StartTime, r.EndTime, r.Description, rm.Name AS RoomName
+                    FROM dbo.Reservations r
+                    LEFT JOIN dbo.Rooms rm ON rm.Id = r.RoomId
+                    WHERE r.Status != 'Rechazada'
+                    ORDER BY r.StartTime
+                  """
+                : """
+                    SELECT r.Id, r.Title, r.StartTime, r.EndTime, r.Description, rm.Name AS RoomName
+                    FROM dbo.Reservations r
+                    LEFT JOIN dbo.Rooms rm ON rm.Id = r.RoomId
+                    WHERE r.Status != 'Rechazada'
+                      AND LOWER(r.CreatedBy) = LOWER(@User)
+                    ORDER BY r.StartTime
+                  """;
+            if (!isAdminRole) cmd.Parameters.AddWithValue("@User", username);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("BEGIN:VCALENDAR");
+            sb.AppendLine("VERSION:2.0");
+            sb.AppendLine("PRODID:-//Pandora//Pandora Calendar//ES");
+            sb.AppendLine("CALSCALE:GREGORIAN");
+            sb.AppendLine("METHOD:PUBLISH");
+
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+            {
+                var id    = r.GetGuid(0);
+                var title = r.IsDBNull(1) ? "Sin título" : r.GetString(1);
+                var start = r.GetDateTime(2);
+                var end   = r.GetDateTime(3);
+                var desc  = r.IsDBNull(4) ? "" : r.GetString(4);
+                var room  = r.IsDBNull(5) ? "" : r.GetString(5);
+                sb.AppendLine("BEGIN:VEVENT");
+                sb.AppendLine($"UID:{id}@pandora");
+                sb.AppendLine($"DTSTAMP:{DateTime.UtcNow:yyyyMMddTHHmmssZ}");
+                sb.AppendLine($"DTSTART:{start:yyyyMMddTHHmmssZ}");
+                sb.AppendLine($"DTEND:{end:yyyyMMddTHHmmssZ}");
+                sb.AppendLine($"SUMMARY:{title}");
+                if (!string.IsNullOrWhiteSpace(room))  sb.AppendLine($"LOCATION:{room}");
+                if (!string.IsNullOrWhiteSpace(desc))  sb.AppendLine($"DESCRIPTION:{desc.Replace("\n", "\\n")}");
+                sb.AppendLine("END:VEVENT");
+            }
+            sb.AppendLine("END:VCALENDAR");
+
+            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+            return File(bytes, "text/calendar; charset=utf-8", "pandora-calendar.ics");
+        }
+        catch (Exception ex) { logger.LogError(ex, "ExportICal"); return StatusCode(500, ex.Message); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static object ReadReservation(SqlDataReader r)

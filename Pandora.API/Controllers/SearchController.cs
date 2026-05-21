@@ -80,6 +80,23 @@ public class SearchController(IConfiguration config) : ControllerBase
             ORDER BY CreatedAt DESC
             """, term, "/tickets");
 
+        // ── Vacaciones ────────────────────────────────────────────────────────
+        var currentUser = User.Identity?.Name ?? "";
+        var isAdmin     = User.IsInRole("Admin");
+        await TrySearch(conn, ct, results, $"""
+            SELECT TOP 6 'vacacion' AS Type, CAST(Id AS NVARCHAR(36)),
+                   FullName + ' (' + Status + ')' AS Label,
+                   CONVERT(VARCHAR(10), StartDate, 23) + ' → ' + CONVERT(VARCHAR(10), EndDate, 23) AS Subtitle,
+                   Type AS Tag, CreatedAt AS Date
+            FROM dbo.VacationRequests
+            WHERE IsDeleted = 0
+              AND ({(isAdmin ? "1=1" : $"Username = '{currentUser.Replace("'", "''")}'")})
+              AND (FullName LIKE '%' + @Q + '%'
+                OR Username LIKE '%' + @Q + '%'
+                OR CONVERT(VARCHAR(10), StartDate, 23) LIKE '%' + @Q + '%')
+            ORDER BY CreatedAt DESC
+            """, term, "/vacaciones");
+
         // ── Usuarios (solo admin) ─────────────────────────────────────────────
         if (User.IsInRole("Admin"))
         {

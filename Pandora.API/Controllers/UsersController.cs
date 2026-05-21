@@ -408,6 +408,48 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         }
         catch (Exception ex) { logger.LogError(ex, "DeleteBanner"); return StatusCode(500, ex.Message); }
     }
+
+    // ── POST /api/users/import-csv ───────────────────────────────────────────
+    [HttpPost("import-csv")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ImportCsv([FromBody] List<UserImportDto> users, CancellationToken ct)
+    {
+        if (users == null || users.Count == 0) return BadRequest("Lista vacía.");
+        var created = 0; var skipped = 0; var errors = new List<string>();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            foreach (var u in users)
+            {
+                if (string.IsNullOrWhiteSpace(u.Username) || string.IsNullOrWhiteSpace(u.Password))
+                { skipped++; continue; }
+                try
+                {
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = """
+                        IF NOT EXISTS (SELECT 1 FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@User))
+                        BEGIN
+                          INSERT INTO dbo.AppUsers (Id, Username, FullName, Email, Position, PasswordHash, Role, Modules, IsActive, CreatedAt)
+                          VALUES (NEWID(), @User, @FullName, @Email, @Position, @Hash, @Role, @Modules, 1, GETUTCDATE())
+                        END
+                        """;
+                    cmd.Parameters.AddWithValue("@User",     u.Username.Trim().ToLower());
+                    cmd.Parameters.AddWithValue("@FullName", string.IsNullOrWhiteSpace(u.FullName)   ? DBNull.Value : (object)u.FullName.Trim());
+                    cmd.Parameters.AddWithValue("@Email",    string.IsNullOrWhiteSpace(u.Email)      ? DBNull.Value : (object)u.Email.Trim());
+                    cmd.Parameters.AddWithValue("@Position", string.IsNullOrWhiteSpace(u.Position)   ? DBNull.Value : (object)u.Position.Trim());
+                    cmd.Parameters.AddWithValue("@Hash",     HashPassword(u.Password));
+                    cmd.Parameters.AddWithValue("@Role",     string.IsNullOrWhiteSpace(u.Role) ? "User" : u.Role.Trim());
+                    cmd.Parameters.AddWithValue("@Modules",  u.Modules ?? 0);
+                    int rows = await cmd.ExecuteNonQueryAsync(ct);
+                    if (rows > 0) created++; else skipped++;
+                }
+                catch (Exception ex) { errors.Add($"{u.Username}: {ex.Message}"); }
+            }
+            return Ok(new { created, skipped, errors });
+        }
+        catch (Exception ex) { logger.LogError(ex, "ImportCsv"); return StatusCode(500, ex.Message); }
+    }
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -436,3 +478,4 @@ public record UserUpdateDto(
 
 public record SmtpDto(string? SmtpEmail, string? SmtpPassword);
 public record ChangePasswordDto(string CurrentPassword, string NewPassword);
+public record UserImportDto(string Username, string? FullName, string? Email, string? Position, string Password, string? Role, int? Modules);
