@@ -19,6 +19,9 @@ public class ActivosFijosController(
     private bool IsAdmin => User.IsInRole("Admin");
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name) ?? "Desconocido";
 
+    // Tables are created at startup in Program.cs; this flag skips the check after the first request
+    private static volatile bool _tablesEnsured;
+
     private static async Task EnsureTablesAsync(SqlConnection conn, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
@@ -84,7 +87,7 @@ public class ActivosFijosController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await EnsureTablesAsync(conn, ct);
+            if (!_tablesEnsured) { await EnsureTablesAsync(conn, ct); _tablesEnsured = true; }
 
             var where = new List<string> { "IsDeleted = 0" };
             if (!string.IsNullOrWhiteSpace(status))     where.Add("Status = @Status");
@@ -169,7 +172,7 @@ public class ActivosFijosController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await EnsureTablesAsync(conn, ct);
+            if (!_tablesEnsured) { await EnsureTablesAsync(conn, ct); _tablesEnsured = true; }
             var newId = Guid.NewGuid();
 
             // Auto-generate AssetNumber if not provided
@@ -309,10 +312,12 @@ public class ActivosFijosController(
             cmd.Parameters.AddWithValue("@To",     Nv(dto.ToDept));
             cmd.Parameters.AddWithValue("@By",     CurrentUser);
 
-            // Transferencia: actualiza departamento
+            // Always insert the movement record first
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            // Then apply type-specific side-effect on the asset
             if (dto.Type == "Transferencia" && !string.IsNullOrWhiteSpace(dto.ToDept))
             {
-                await cmd.ExecuteNonQueryAsync(ct);
                 await using var upd = conn.CreateCommand();
                 upd.CommandText = "UPDATE dbo.ActivosFijos SET Department=@Dept, UpdatedAt=GETUTCDATE() WHERE Id=@Id";
                 upd.Parameters.AddWithValue("@Dept", dto.ToDept);
@@ -321,7 +326,6 @@ public class ActivosFijosController(
             }
             else if (dto.Type == "Depreciacion" && dto.Amount.HasValue)
             {
-                await cmd.ExecuteNonQueryAsync(ct);
                 await using var upd = conn.CreateCommand();
                 upd.CommandText = "UPDATE dbo.ActivosFijos SET AccumulatedDeprec=AccumulatedDeprec+@Amt, UpdatedAt=GETUTCDATE() WHERE Id=@Id";
                 upd.Parameters.AddWithValue("@Amt", dto.Amount.Value);
@@ -330,15 +334,10 @@ public class ActivosFijosController(
             }
             else if (dto.Type == "Baja")
             {
-                await cmd.ExecuteNonQueryAsync(ct);
                 await using var upd = conn.CreateCommand();
                 upd.CommandText = "UPDATE dbo.ActivosFijos SET Status='Dado de Baja', UpdatedAt=GETUTCDATE() WHERE Id=@Id";
                 upd.Parameters.AddWithValue("@Id", id);
                 await upd.ExecuteNonQueryAsync(ct);
-            }
-            else
-            {
-                await cmd.ExecuteNonQueryAsync(ct);
             }
             return Ok(new { added = true });
         }
@@ -354,7 +353,7 @@ public class ActivosFijosController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await EnsureTablesAsync(conn, ct);
+            if (!_tablesEnsured) { await EnsureTablesAsync(conn, ct); _tablesEnsured = true; }
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT
@@ -387,28 +386,28 @@ public class ActivosFijosController(
 
     private static object MapActivo(SqlDataReader r) => new
     {
-        id                 = r.GetGuid(0),
-        assetNumber        = r.GetString(1),
-        name               = r.GetString(2),
-        description        = r.IsDBNull(3)  ? null : r.GetString(3),
-        category           = r.IsDBNull(4)  ? null : r.GetString(4),
-        brand              = r.IsDBNull(5)  ? null : r.GetString(5),
-        model              = r.IsDBNull(6)  ? null : r.GetString(6),
-        serialNumber       = r.IsDBNull(7)  ? null : r.GetString(7),
-        department         = r.IsDBNull(8)  ? null : r.GetString(8),
-        responsibleUser    = r.IsDBNull(9)  ? null : r.GetString(9),
-        location           = r.IsDBNull(10) ? null : r.GetString(10),
-        status             = r.GetString(11),
-        purchaseDate       = r.IsDBNull(12) ? (DateTime?)null : r.GetDateTime(12),
-        purchaseCost       = r.IsDBNull(13) ? (decimal?)null : r.GetDecimal(13),
-        usefulLifeYears    = r.IsDBNull(14) ? (int?)null : r.GetInt32(14),
-        depreciationMethod = r.IsDBNull(15) ? null : r.GetString(15),
-        residualValue      = r.IsDBNull(16) ? (decimal?)null : r.GetDecimal(16),
-        accumulatedDeprec  = r.GetDecimal(17),
-        currentValue       = r.IsDBNull(18) ? (decimal?)null : r.GetDecimal(18),
-        notes              = r.IsDBNull(19) ? null : r.GetString(19),
-        createdBy          = r.GetString(20),
-        createdAt          = r.GetDateTime(21),
+        id                 = r.GetGuid(r.GetOrdinal("Id")),
+        assetNumber        = r.GetString(r.GetOrdinal("AssetNumber")),
+        name               = r.GetString(r.GetOrdinal("Name")),
+        description        = r.IsDBNull(r.GetOrdinal("Description"))        ? null : r.GetString(r.GetOrdinal("Description")),
+        category           = r.IsDBNull(r.GetOrdinal("Category"))           ? null : r.GetString(r.GetOrdinal("Category")),
+        brand              = r.IsDBNull(r.GetOrdinal("Brand"))              ? null : r.GetString(r.GetOrdinal("Brand")),
+        model              = r.IsDBNull(r.GetOrdinal("Model"))              ? null : r.GetString(r.GetOrdinal("Model")),
+        serialNumber       = r.IsDBNull(r.GetOrdinal("SerialNumber"))       ? null : r.GetString(r.GetOrdinal("SerialNumber")),
+        department         = r.IsDBNull(r.GetOrdinal("Department"))         ? null : r.GetString(r.GetOrdinal("Department")),
+        responsibleUser    = r.IsDBNull(r.GetOrdinal("ResponsibleUser"))    ? null : r.GetString(r.GetOrdinal("ResponsibleUser")),
+        location           = r.IsDBNull(r.GetOrdinal("Location"))           ? null : r.GetString(r.GetOrdinal("Location")),
+        status             = r.GetString(r.GetOrdinal("Status")),
+        purchaseDate       = r.IsDBNull(r.GetOrdinal("PurchaseDate"))       ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("PurchaseDate")),
+        purchaseCost       = r.IsDBNull(r.GetOrdinal("PurchaseCost"))       ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("PurchaseCost")),
+        usefulLifeYears    = r.IsDBNull(r.GetOrdinal("UsefulLifeYears"))    ? (int?)null      : r.GetInt32(r.GetOrdinal("UsefulLifeYears")),
+        depreciationMethod = r.IsDBNull(r.GetOrdinal("DepreciationMethod")) ? null : r.GetString(r.GetOrdinal("DepreciationMethod")),
+        residualValue      = r.IsDBNull(r.GetOrdinal("ResidualValue"))      ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("ResidualValue")),
+        accumulatedDeprec  = r.GetDecimal(r.GetOrdinal("AccumulatedDeprec")),
+        currentValue       = r.IsDBNull(r.GetOrdinal("CurrentValue"))       ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("CurrentValue")),
+        notes              = r.IsDBNull(r.GetOrdinal("Notes"))              ? null : r.GetString(r.GetOrdinal("Notes")),
+        createdBy          = r.GetString(r.GetOrdinal("CreatedBy")),
+        createdAt          = r.GetDateTime(r.GetOrdinal("CreatedAt")),
     };
 }
 

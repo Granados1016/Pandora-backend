@@ -27,6 +27,35 @@ public class AuthController(
     private static string NewRefreshToken() =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
 
+    /// <summary>
+    /// Construye un JWT firmado con la clave y configuración del proyecto.
+    /// Centraliza la lógica compartida entre /refresh y /verify-otp.
+    /// </summary>
+    private string BuildJwt(string username, string role, string fullName, int modules, Guid userId)
+    {
+        string jwtKey   = config["JwtSettings:Key"]!;
+        string issuer   = config["JwtSettings:Issuer"]!;
+        string audience = config["JwtSettings:Audience"]!;
+        int    expMin   = int.TryParse(config["JwtSettings:ExpiresInMinutes"], out var m) ? m : 30;
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name,             username),
+            new Claim(ClaimTypes.Role,             role),
+            new Claim("fullName",                  fullName),
+            new Claim("modules",                   modules.ToString()),
+            new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+        };
+
+        var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var jwtObj = new JwtSecurityToken(issuer, audience, claims,
+            expires:            DateTime.UtcNow.AddMinutes(expMin),
+            signingCredentials: creds);
+        return new JwtSecurityTokenHandler().WriteToken(jwtObj);
+    }
+
     // ── POST /api/auth/login ──────────────────────────────────────────────────
     /// <summary>
     /// Login — devuelve JWT + refresh token de 7 días.
@@ -41,31 +70,19 @@ public class AuthController(
         if (response is null)
             return Unauthorized("Credenciales incorrectas.");
 
-        // ── Verificar si el usuario tiene 2FA habilitado ──────────────────────
+        // ── Verificar 2FA (columna garantizada por startup) ───────────────────
         try
         {
             await using var conn2fa = Conn();
             await conn2fa.OpenAsync(ct);
             await using var cmd2fa = conn2fa.CreateCommand();
-            cmd2fa.CommandText = """
-                SELECT
-                  CASE WHEN EXISTS (
-                    SELECT 1 FROM sys.columns
-                    WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'TwoFactorEnabled'
-                  )
-                  THEN (SELECT ISNULL(TwoFactorEnabled, 0) FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U))
-                  ELSE 0 END
-                """;
+            cmd2fa.CommandText = "SELECT ISNULL(TwoFactorEnabled, 0) FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
             cmd2fa.Parameters.AddWithValue("@U", req.Username.Trim());
             var twoFaResult = await cmd2fa.ExecuteScalarAsync(ct);
-            bool requires2FA = twoFaResult != null && twoFaResult != DBNull.Value && Convert.ToInt32(twoFaResult) == 1;
-            if (requires2FA)
-            {
-                // Credenciales válidas pero 2FA requerido — devolver 202 sin JWT
+            if (twoFaResult != null && twoFaResult != DBNull.Value && Convert.ToInt32(twoFaResult) == 1)
                 return StatusCode(202, new { requires2FA = true, message = "Credenciales válidas. Se requiere verificación de dos factores." });
-            }
         }
-        catch { /* TwoFactorEnabled column might not exist yet — continue without 2FA */ }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo verificar 2FA para {User}", req.Username); }
 
         // Generar refresh token y persistirlo
         string refreshToken = NewRefreshToken();
@@ -156,31 +173,7 @@ public class AuthController(
             }
 
             // ── Generar nuevo JWT ─────────────────────────────────────────────
-            string jwtKey   = config["JwtSettings:Key"]!;
-            string issuer   = config["JwtSettings:Issuer"]!;
-            string audience = config["JwtSettings:Audience"]!;
-            int    expMin   = int.TryParse(config["JwtSettings:ExpiresInMinutes"], out var m) ? m : 30;
-
-            var claims = new[]
-            {
-                new Claim(ClaimTypes.Name,                   username),
-                new Claim(ClaimTypes.Role,                   role),
-                new Claim("fullName",                        fullName),
-                new Claim("modules",                         modules.ToString()),
-                new Claim(JwtRegisteredClaimNames.Sub,       userId.ToString()),
-                new Claim(JwtRegisteredClaimNames.Jti,       Guid.NewGuid().ToString()),
-            };
-
-            var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-            var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-            var jwtObj = new JwtSecurityToken(
-                issuer:             issuer,
-                audience:           audience,
-                claims:             claims,
-                expires:            DateTime.UtcNow.AddMinutes(expMin),
-                signingCredentials: creds);
-
-            string newJwt = new JwtSecurityTokenHandler().WriteToken(jwtObj);
+            string newJwt = BuildJwt(username, role, fullName, modules, userId);
 
             // ── Rotar refresh token (invalida el viejo, emite uno nuevo) ──────
             string newRefresh = NewRefreshToken();
@@ -371,8 +364,6 @@ public class AuthController(
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
-                    IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='OtpCodes')
-                    BEGIN CREATE TABLE dbo.OtpCodes (Username NVARCHAR(100) NOT NULL, Code NVARCHAR(10) NOT NULL, ExpiresAt DATETIME2 NOT NULL, Used BIT NOT NULL DEFAULT 0) END;
                     DELETE FROM dbo.OtpCodes WHERE LOWER(Username) = LOWER(@Username);
                     INSERT INTO dbo.OtpCodes (Username, Code, ExpiresAt, Used) VALUES (@Username, @Code, @Exp, 0);
                     """;
@@ -402,24 +393,20 @@ public class AuthController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            bool valid = false;
+
+            // Atomic: validate + consume in one UPDATE — prevents OTP replay on concurrent requests
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
-                    SELECT COUNT(1) FROM dbo.OtpCodes
+                    UPDATE dbo.OtpCodes SET Used=1
                     WHERE LOWER(Username)=LOWER(@Username) AND Code=@Code AND Used=0 AND ExpiresAt>GETUTCDATE()
                     """;
                 cmd.Parameters.AddWithValue("@Username", req.Username.Trim());
                 cmd.Parameters.AddWithValue("@Code",     req.Code.Trim());
-                valid = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0) > 0;
+                int affected = await cmd.ExecuteNonQueryAsync(ct);
+                if (affected == 0) return Unauthorized("Código inválido o expirado.");
             }
-            if (!valid) return Unauthorized("Código inválido o expirado.");
-            await using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "UPDATE dbo.OtpCodes SET Used=1 WHERE LOWER(Username)=LOWER(@Username)";
-                cmd.Parameters.AddWithValue("@Username", req.Username.Trim());
-                await cmd.ExecuteNonQueryAsync(ct);
-            }
+
             // Emitir JWT
             string? role = null; int modules = 0; Guid userId = Guid.Empty; string? fn = null;
             await using (var cmd = conn.CreateCommand())
@@ -430,25 +417,8 @@ public class AuthController(
                 if (await r.ReadAsync(ct)) { userId = r.GetGuid(0); role = r.GetString(1); modules = r.GetInt32(2); fn = r.IsDBNull(3) ? null : r.GetString(3); }
             }
             if (role is null) return Unauthorized("Usuario no encontrado.");
-            // Build JWT the same way the /refresh endpoint does
-            string jwtKey2   = config["JwtSettings:Key"]!;
-            string issuer2   = config["JwtSettings:Issuer"]!;
-            string audience2 = config["JwtSettings:Audience"]!;
-            int    expMin2   = int.TryParse(config["JwtSettings:ExpiresInMinutes"], out var mm) ? mm : 30;
-            string uname2    = req.Username.Trim().ToLower();
-            var claims2 = new[]
-            {
-                new Claim(ClaimTypes.Name,             uname2),
-                new Claim(ClaimTypes.Role,             role),
-                new Claim("fullName",                  fn ?? uname2),
-                new Claim("modules",                   modules.ToString()),
-                new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
-                new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            };
-            var key2    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey2));
-            var creds2  = new SigningCredentials(key2, SecurityAlgorithms.HmacSha256);
-            var jwtObj2 = new JwtSecurityToken(issuer2, audience2, claims2, expires: DateTime.UtcNow.AddMinutes(expMin2), signingCredentials: creds2);
-            var token   = new JwtSecurityTokenHandler().WriteToken(jwtObj2);
+            string uname2 = req.Username.Trim().ToLower();
+            var token     = BuildJwt(uname2, role, fn ?? uname2, modules, userId);
             string refreshToken = NewRefreshToken();
             await using (var cmd = conn.CreateCommand())
             {
@@ -476,11 +446,7 @@ public class AuthController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.AppUsers') AND name='TwoFactorEnabled')
-                BEGIN ALTER TABLE dbo.AppUsers ADD TwoFactorEnabled BIT NOT NULL DEFAULT 0 END;
-                UPDATE dbo.AppUsers SET TwoFactorEnabled=@Enable WHERE LOWER(Username)=LOWER(@Username)
-                """;
+            cmd.CommandText = "UPDATE dbo.AppUsers SET TwoFactorEnabled=@Enable WHERE LOWER(Username)=LOWER(@Username)";
             cmd.Parameters.AddWithValue("@Enable",   dto.Enable ? 1 : 0);
             cmd.Parameters.AddWithValue("@Username", username);
             await cmd.ExecuteNonQueryAsync(ct);

@@ -1131,6 +1131,27 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdSS.ExecuteNonQueryAsync();
 }
 
+// ── Tabla OtpCodes (2FA — códigos de verificación de un solo uso) ────────────
+{
+    await using var connOtp = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connOtp.OpenAsync();
+    await using var cmdOtp = connOtp.CreateCommand();
+    cmdOtp.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='OtpCodes' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.OtpCodes (
+                Username  NVARCHAR(100) NOT NULL,
+                Code      NVARCHAR(10)  NOT NULL,
+                ExpiresAt DATETIME2     NOT NULL,
+                Used      BIT           NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IX_OtpCodes_Username ON dbo.OtpCodes (Username);
+        END
+        """;
+    await cmdOtp.ExecuteNonQueryAsync();
+}
+
 // ── Migración: tabla PasswordResetTokens (#11) ───────────────────────────────
 {
     await using var connPrt = new Microsoft.Data.SqlClient.SqlConnection(

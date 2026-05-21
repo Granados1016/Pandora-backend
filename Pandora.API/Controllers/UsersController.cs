@@ -29,7 +29,25 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     private static string HashPassword(string password) =>
         UserService.HashPassword(password);
 
-    // Serialize user row from reader
+    // List-view reader — does NOT include binary photo data (avoids loading MB per user in admin list)
+    private static object ReadUserSummary(SqlDataReader r) => new
+    {
+        id              = r.GetGuid(r.GetOrdinal("Id")),
+        username        = r.GetString(r.GetOrdinal("Username")),
+        fullName        = r.IsDBNull(r.GetOrdinal("FullName"))        ? null : r.GetString(r.GetOrdinal("FullName")),
+        email           = r.IsDBNull(r.GetOrdinal("Email"))           ? null : r.GetString(r.GetOrdinal("Email")),
+        role            = r.IsDBNull(r.GetOrdinal("Role"))            ? "User" : r.GetString(r.GetOrdinal("Role")),
+        modules         = r.GetInt32(r.GetOrdinal("Modules")),
+        modulesViewOnly = r.IsDBNull(r.GetOrdinal("ModulesViewOnly")) ? 0 : r.GetInt32(r.GetOrdinal("ModulesViewOnly")),
+        isActive        = r.GetBoolean(r.GetOrdinal("IsActive")),
+        position        = r.IsDBNull(r.GetOrdinal("Position"))        ? null : r.GetString(r.GetOrdinal("Position")),
+        smtpEmail       = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
+        profilePhotoUrl = r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl")) ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
+        bannerPhotoUrl  = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))  ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
+        createdAt       = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+    };
+
+    // Full reader — resolves binary photo data to data URL (used only for single-user endpoints)
     private static object ReadUser(SqlDataReader r)
     {
         // Helper: resolve photo URL — prefers binary (data URL) over legacy path URL
@@ -77,14 +95,13 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt,
-                       ProfilePhotoData, ProfilePhotoMime, BannerPhotoData, BannerPhotoMime
+                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
                 FROM dbo.AppUsers
                 ORDER BY CreatedAt DESC
                 """;
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
-            while (await r.ReadAsync(ct)) list.Add(ReadUser(r));
+            while (await r.ReadAsync(ct)) list.Add(ReadUserSummary(r));
             return Ok(list);
         }
         catch (Exception ex) { logger.LogError(ex, "GetAll Users"); return StatusCode(500, ex.Message); }
