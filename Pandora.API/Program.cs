@@ -42,6 +42,7 @@ if (resolvedConnStr != rawConnStr)
     builder.Configuration["ConnectionStrings:PandoraDb"] = resolvedConnStr;
 
 // ── MVC + FluentValidation ───────────────────────────────────────────────────
+builder.Services.AddMemoryCache();
 builder.Services.AddControllers()
     .AddJsonOptions(opts =>
     {
