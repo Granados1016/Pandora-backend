@@ -280,16 +280,16 @@ public class BitacoraController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT
-                    COUNT(*)                                                  AS Total,
-                    SUM(CASE WHEN Estado='Abierta'    THEN 1 ELSE 0 END)     AS Abiertas,
-                    SUM(CASE WHEN Estado='En Proceso' THEN 1 ELSE 0 END)     AS EnProceso,
-                    SUM(CASE WHEN Estado='Resuelta'   THEN 1 ELSE 0 END)     AS Resueltas,
-                    SUM(CASE WHEN Estado='Cerrada'    THEN 1 ELSE 0 END)     AS Cerradas,
-                    SUM(CASE WHEN Prioridad='Alta'    THEN 1 ELSE 0 END)     AS PrioAlta,
-                    ISNULL(AVG(CAST(TiempoResolucion AS FLOAT)), 0)          AS TiempoPromedioMin,
-                    SUM(CASE WHEN MONTH(FechaIncidencia)=MONTH(GETUTCDATE())
-                              AND YEAR(FechaIncidencia)=YEAR(GETUTCDATE())
-                             THEN 1 ELSE 0 END)                              AS EsteMes
+                    COUNT(*)                                                             AS Total,
+                    ISNULL(SUM(CASE WHEN Estado='Abierta'    THEN 1 ELSE 0 END), 0)    AS Abiertas,
+                    ISNULL(SUM(CASE WHEN Estado='En Proceso' THEN 1 ELSE 0 END), 0)    AS EnProceso,
+                    ISNULL(SUM(CASE WHEN Estado='Resuelta'   THEN 1 ELSE 0 END), 0)    AS Resueltas,
+                    ISNULL(SUM(CASE WHEN Estado='Cerrada'    THEN 1 ELSE 0 END), 0)    AS Cerradas,
+                    ISNULL(SUM(CASE WHEN Prioridad='Alta'    THEN 1 ELSE 0 END), 0)    AS PrioAlta,
+                    ISNULL(AVG(CAST(TiempoResolucion AS FLOAT)), 0)                    AS TiempoPromedioMin,
+                    ISNULL(SUM(CASE WHEN MONTH(FechaIncidencia)=MONTH(GETUTCDATE())
+                                     AND YEAR(FechaIncidencia)=YEAR(GETUTCDATE())
+                                    THEN 1 ELSE 0 END), 0)                             AS EsteMes
                 FROM dbo.Bitacora WHERE IsDeleted=0;
 
                 SELECT TOP 5 Categoria, COUNT(*) AS Total
@@ -301,14 +301,14 @@ public class BitacoraController(
             object summary = new {};
             if (await r.ReadAsync(ct))
                 summary = new {
-                    total            = r.GetInt32(0),
-                    abiertas         = r.GetInt32(1),
-                    enProceso        = r.GetInt32(2),
-                    resueltas        = r.GetInt32(3),
-                    cerradas         = r.GetInt32(4),
-                    prioAlta         = r.GetInt32(5),
-                    tiempoPromedioMin= (int)r.GetDouble(6),
-                    esteMes          = r.GetInt32(7),
+                    total             = r.GetInt32(0),
+                    abiertas          = r.GetInt32(1),
+                    enProceso         = r.GetInt32(2),
+                    resueltas         = r.GetInt32(3),
+                    cerradas          = r.GetInt32(4),
+                    prioAlta          = r.GetInt32(5),
+                    tiempoPromedioMin = r.IsDBNull(6) ? 0 : (int)r.GetDouble(6),
+                    esteMes           = r.GetInt32(7),
                 };
 
             var porCategoria = new List<object>();
