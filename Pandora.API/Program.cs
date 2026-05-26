@@ -1131,6 +1131,59 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdSS.ExecuteNonQueryAsync();
 }
 
+// ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
+{
+    await using var connBit = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connBit.OpenAsync();
+    await using var cmdBit = connBit.CreateCommand();
+    cmdBit.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Bitacora' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Bitacora (
+                Id              UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Folio           NVARCHAR(20)     NOT NULL,
+                Titulo          NVARCHAR(200)    NOT NULL,
+                Descripcion     NVARCHAR(MAX)    NOT NULL,
+                Categoria       NVARCHAR(50)     NOT NULL,
+                Prioridad       NVARCHAR(20)     NOT NULL DEFAULT 'Media',
+                Estado          NVARCHAR(30)     NOT NULL DEFAULT 'Abierta',
+                Impacto         NVARCHAR(30)     NULL,
+                SistemaAfectado NVARCHAR(150)    NULL,
+                UsuarioAfectado NVARCHAR(150)    NULL,
+                ReportadoPor    NVARCHAR(100)    NOT NULL,
+                AsignadoA       NVARCHAR(100)    NULL,
+                FechaIncidencia DATETIME2        NOT NULL,
+                FechaResolucion DATETIME2        NULL,
+                TiempoResolucion AS (
+                    CASE WHEN FechaResolucion IS NOT NULL
+                    THEN DATEDIFF(MINUTE, FechaIncidencia, FechaResolucion)
+                    ELSE NULL END),
+                Resolucion      NVARCHAR(MAX)    NULL,
+                CreadoEn        DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                ActualizadoEn   DATETIME2        NULL,
+                IsDeleted       BIT              NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IX_Bitacora_Estado    ON dbo.Bitacora (Estado);
+            CREATE INDEX IX_Bitacora_Categoria ON dbo.Bitacora (Categoria);
+            CREATE INDEX IX_Bitacora_Fecha     ON dbo.Bitacora (FechaIncidencia DESC);
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='BitacoraSeguimientos' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.BitacoraSeguimientos (
+                Id          UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                BitacoraId  UNIQUEIDENTIFIER NOT NULL,
+                Nota        NVARCHAR(MAX)    NOT NULL,
+                Tipo        NVARCHAR(30)     NOT NULL DEFAULT 'Seguimiento',
+                CreadoPor   NVARCHAR(100)    NOT NULL,
+                CreadoEn    DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_BitSeg_BitacoraId ON dbo.BitacoraSeguimientos (BitacoraId);
+        END
+        """;
+    await cmdBit.ExecuteNonQueryAsync();
+}
+
 // ── Tabla OtpCodes (2FA — códigos de verificación de un solo uso) ────────────
 {
     await using var connOtp = new Microsoft.Data.SqlClient.SqlConnection(
