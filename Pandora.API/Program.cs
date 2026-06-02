@@ -1424,6 +1424,50 @@ using (var scopeEnc = app.Services.CreateScope())
     await cmdMnt.ExecuteNonQueryAsync();
 }
 
+// ── Tablas Checador ──────────────────────────────────────────────────────────
+{
+    await using var connChk = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connChk.OpenAsync();
+    await using var cmdChk = connChk.CreateCommand();
+    cmdChk.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='CheckadorSitios' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.CheckadorSitios (
+                Id          UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Nombre      NVARCHAR(150)    NOT NULL,
+                Descripcion NVARCHAR(300)    NULL,
+                Lat         FLOAT            NOT NULL,
+                Lng         FLOAT            NOT NULL,
+                RadioMetros INT              NOT NULL DEFAULT 100,
+                Activo      BIT              NOT NULL DEFAULT 1,
+                CreadoEn    DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='CheckadorRegistros' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.CheckadorRegistros (
+                Id              UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                UserId          NVARCHAR(100)    NOT NULL,
+                UserName        NVARCHAR(150)    NOT NULL,
+                Tipo            NVARCHAR(10)     NOT NULL,  -- Entrada | Salida
+                Lat             FLOAT            NULL,
+                Lng             FLOAT            NULL,
+                Precision       FLOAT            NULL,
+                SitioId         UNIQUEIDENTIFIER NULL,
+                EsDentroDeZona  BIT              NULL,
+                FotoData        VARBINARY(MAX)   NULL,
+                FotoMime        NVARCHAR(50)     NULL,
+                Notas           NVARCHAR(300)    NULL,
+                Timestamp       DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_Chk_UserId    ON dbo.CheckadorRegistros (UserId);
+            CREATE INDEX IX_Chk_Timestamp ON dbo.CheckadorRegistros (Timestamp DESC);
+        END
+        """;
+    await cmdChk.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
