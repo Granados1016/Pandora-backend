@@ -178,10 +178,9 @@ public class CalendarReminderService(
         cmd.CommandText = """
             SELECT r.Id, r.Title, r.StartTime, r.EndTime, r.OrganizerEmail, r.OrganizerName,
                    r.MeetLink, rm.Name AS RoomName
-            FROM dbo.CalendarReservations r
-            INNER JOIN dbo.CalendarRooms rm ON r.RoomId = rm.Id
+            FROM dbo.Reservations r
+            INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
             WHERE r.StartTime BETWEEN @Start AND @End
-              AND r.Status NOT IN ('Cancelada','Rechazada')
               AND NOT EXISTS (
                 SELECT 1 FROM dbo.CalendarReminders cr
                 WHERE cr.ReservationId = r.Id AND cr.ReminderType = @Type
