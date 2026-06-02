@@ -1357,6 +1357,73 @@ using (var scopeEnc = app.Services.CreateScope())
     catch (Exception ex) { Console.WriteLine("[Encoding] WARN: " + ex.Message); }
 }
 
+// ── Tablas Mantenimiento ─────────────────────────────────────────────────────
+{
+    await using var connMnt = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connMnt.OpenAsync();
+    await using var cmdMnt = connMnt.CreateCommand();
+    cmdMnt.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Mantenimientos' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Mantenimientos (
+                Id                UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Folio             NVARCHAR(20)     NOT NULL,
+                Titulo            NVARCHAR(200)    NOT NULL,
+                Descripcion       NVARCHAR(MAX)    NULL,
+                TipoMantenimiento NVARCHAR(50)     NOT NULL DEFAULT 'Preventivo',
+                Estado            NVARCHAR(30)     NOT NULL DEFAULT 'Programado',
+                Prioridad         NVARCHAR(20)     NOT NULL DEFAULT 'Media',
+                EquipoId          UNIQUEIDENTIFIER NULL,
+                NombreEquipo      NVARCHAR(200)    NULL,
+                Ubicacion         NVARCHAR(200)    NULL,
+                TecnicoAsignado   NVARCHAR(100)    NULL,
+                EmailTecnico      NVARCHAR(150)    NULL,
+                FechaProgramada   DATETIME2        NOT NULL,
+                FechaRealizada    DATETIME2        NULL,
+                DuracionMinutos   INT              NULL,
+                ChecklistJson     NVARCHAR(MAX)    NULL,
+                Notas             NVARCHAR(MAX)    NULL,
+                CostoEstimado     DECIMAL(10,2)    NULL,
+                CostoReal         DECIMAL(10,2)    NULL,
+                CreadoPor         NVARCHAR(100)    NOT NULL,
+                CreadoEn          DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                ActualizadoEn     DATETIME2        NULL,
+                IsDeleted         BIT              NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IX_Mnt_Estado   ON dbo.Mantenimientos (Estado);
+            CREATE INDEX IX_Mnt_Fecha    ON dbo.Mantenimientos (FechaProgramada);
+            CREATE INDEX IX_Mnt_Tecnico  ON dbo.Mantenimientos (TecnicoAsignado);
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='MantenimientoSeguimientos' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.MantenimientoSeguimientos (
+                Id               UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                MantenimientoId  UNIQUEIDENTIFIER NOT NULL,
+                Nota             NVARCHAR(MAX)    NOT NULL,
+                Tipo             NVARCHAR(30)     NOT NULL DEFAULT 'Seguimiento',
+                CreadoPor        NVARCHAR(100)    NOT NULL,
+                CreadoEn         DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_MntSeg_MntId ON dbo.MantenimientoSeguimientos (MantenimientoId);
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='MantenimientoEvidencias' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.MantenimientoEvidencias (
+                Id               UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                MantenimientoId  UNIQUEIDENTIFIER NOT NULL,
+                NombreArchivo    NVARCHAR(200)    NOT NULL,
+                Mime             NVARCHAR(100)    NOT NULL,
+                Datos            VARBINARY(MAX)   NOT NULL,
+                SubidoPor        NVARCHAR(100)    NOT NULL,
+                SubidoEn         DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+            CREATE INDEX IX_MntEv_MntId ON dbo.MantenimientoEvidencias (MantenimientoId);
+        END
+        """;
+    await cmdMnt.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
