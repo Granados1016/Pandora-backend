@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
 using System.Security.Claims;
 using System.Text;
@@ -17,21 +18,32 @@ public class CheckadorController(
     private string CurrentUser   => User.FindFirstValue(ClaimTypes.Name) ?? "sistema";
     private string CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier)
                                  ?? User.FindFirstValue("sub") ?? CurrentUser;
+    private bool   IsAdmin       => User.IsInRole("Admin");
+
+    // Coordenadas válidas para México (bounding box generoso)
+    private static bool CoordsValidas(double? lat, double? lng) =>
+        lat is null || lng is null ||
+        (lat >= 14.5 && lat <= 32.7 && lng >= -118.5 && lng <= -86.7);
 
     // ── POST /api/checador/marcar ─────────────────────────────────────────────
     /// <summary>Registra entrada o salida del usuario autenticado.</summary>
     [HttpPost("marcar")]
+    [EnableRateLimiting("checador-policy")]
     public async Task<IActionResult> Marcar([FromBody] MarcarDto dto, CancellationToken ct)
     {
         try
         {
-            await using var conn = Conn();
-            await conn.OpenAsync(ct);
-
             // Validar tipo
             var tipo = dto.Tipo?.Trim();
             if (tipo != "Entrada" && tipo != "Salida")
                 return BadRequest("Tipo debe ser 'Entrada' o 'Salida'.");
+
+            // Validar coordenadas — rechazo si vienen coords fuera de México
+            if (!CoordsValidas(dto.Lat, dto.Lng))
+                return BadRequest("Coordenadas GPS fuera del rango válido.");
+
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
 
             // Verificar que no haya ya un registro del mismo tipo hoy
             await using var cmdDup = conn.CreateCommand();
@@ -201,6 +213,7 @@ public class CheckadorController(
     // ── GET /api/checador/registros ───────────────────────────────────────────
     /// <summary>Admin — lista de registros con filtros.</summary>
     [HttpGet("registros")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> GetRegistros(
         [FromQuery] string?   userId = null,
         [FromQuery] string?   tipo   = null,
@@ -256,8 +269,12 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND FotoData IS NOT NULL";
+            // Admin ve cualquier foto; usuario normal solo la suya
+            cmd.CommandText = IsAdmin
+                ? "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND FotoData IS NOT NULL"
+                : "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND UserId=@UserId AND FotoData IS NOT NULL";
             cmd.Parameters.AddWithValue("@Id", id);
+            if (!IsAdmin) cmd.Parameters.AddWithValue("@UserId", CurrentUserId);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             return File((byte[])r.GetValue(0), r.GetString(1));
@@ -267,6 +284,7 @@ public class CheckadorController(
 
     // ── GET /api/checador/stats ───────────────────────────────────────────────
     [HttpGet("stats")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> GetStats(CancellationToken ct)
     {
         try
@@ -298,6 +316,7 @@ public class CheckadorController(
 
     // ── GET /api/checador/export ──────────────────────────────────────────────
     [HttpGet("export")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> Export(
         [FromQuery] DateTime? desde = null,
         [FromQuery] DateTime? hasta = null,
@@ -332,6 +351,7 @@ public class CheckadorController(
 
     // ── CRUD Sitios (Propuesta B) ─────────────────────────────────────────────
     [HttpGet("sitios")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> GetSitios(CancellationToken ct)
     {
         try
@@ -356,6 +376,7 @@ public class CheckadorController(
     }
 
     [HttpPost("sitios")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> CreateSitio([FromBody] SitioDto dto, CancellationToken ct)
     {
         try
@@ -378,6 +399,7 @@ public class CheckadorController(
     }
 
     [HttpPut("sitios/{id:guid}")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> UpdateSitio(Guid id, [FromBody] SitioDto dto, CancellationToken ct)
     {
         try
@@ -400,6 +422,7 @@ public class CheckadorController(
     }
 
     [HttpDelete("sitios/{id:guid}")]
+    [Authorize(Roles = "Admin")]
     public async Task<IActionResult> DeleteSitio(Guid id, CancellationToken ct)
     {
         try

@@ -171,6 +171,14 @@ builder.Services.AddRateLimiter(options =>
         config.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
         config.QueueLimit           = 0;
     });
+    // Checador: máx 10 marcaciones por usuario por hora (anti-replay/script)
+    options.AddFixedWindowLimiter("checador-policy", config =>
+    {
+        config.PermitLimit          = 10;
+        config.Window               = TimeSpan.FromHours(1);
+        config.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        config.QueueLimit           = 0;
+    });
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.OnRejected = async (context, token) =>
     {
