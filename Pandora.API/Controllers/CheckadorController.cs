@@ -50,7 +50,8 @@ public class CheckadorController(
             cmdDup.CommandText = """
                 SELECT COUNT(1) FROM dbo.CheckadorRegistros
                 WHERE UserId = @UserId AND Tipo = @Tipo
-                  AND CAST(Timestamp AS DATE) = CAST(GETUTCDATE() AS DATE)
+                  AND CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)
+                  = CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE)
                 """;
             cmdDup.Parameters.AddWithValue("@UserId", CurrentUserId);
             cmdDup.Parameters.AddWithValue("@Tipo",   tipo);
@@ -128,7 +129,7 @@ public class CheckadorController(
             await using var cmdDup = conn.CreateCommand();
             cmdDup.CommandText = """
                 SELECT COUNT(1) FROM dbo.CheckadorRegistros
-                WHERE UserId=@UserId AND Tipo=@Tipo AND CAST(Timestamp AS DATE)=CAST(GETUTCDATE() AS DATE)
+                WHERE UserId=@UserId AND Tipo=@Tipo AND CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)=CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE)
                 """;
             cmdDup.Parameters.AddWithValue("@UserId", CurrentUserId);
             cmdDup.Parameters.AddWithValue("@Tipo",   tipo);
@@ -197,7 +198,8 @@ public class CheckadorController(
             cmd.CommandText = """
                 SELECT Id, Tipo, Lat, Lng, Precision, EsDentroDeZona, Notas, Timestamp
                 FROM dbo.CheckadorRegistros
-                WHERE UserId = @UserId AND CAST(Timestamp AS DATE) = CAST(GETUTCDATE() AS DATE)
+                WHERE UserId = @UserId AND CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)
+                  = CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE)
                 ORDER BY Timestamp ASC
                 """;
             cmd.Parameters.AddWithValue("@UserId", CurrentUserId);
@@ -294,8 +296,8 @@ public class CheckadorController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT
-                    ISNULL(SUM(CASE WHEN CAST(Timestamp AS DATE)=CAST(GETUTCDATE() AS DATE) AND Tipo='Entrada' THEN 1 ELSE 0 END),0) AS EntradasHoy,
-                    ISNULL(SUM(CASE WHEN CAST(Timestamp AS DATE)=CAST(GETUTCDATE() AS DATE) AND Tipo='Salida'  THEN 1 ELSE 0 END),0) AS SalidasHoy,
+                    ISNULL(SUM(CASE WHEN CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)=CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE) AND Tipo='Entrada' THEN 1 ELSE 0 END),0) AS EntradasHoy,
+                    ISNULL(SUM(CASE WHEN CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)=CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE) AND Tipo='Salida'  THEN 1 ELSE 0 END),0) AS SalidasHoy,
                     ISNULL(SUM(CASE WHEN MONTH(Timestamp)=MONTH(GETUTCDATE()) AND YEAR(Timestamp)=YEAR(GETUTCDATE()) THEN 1 ELSE 0 END),0) AS EsteMes,
                     ISNULL(SUM(CASE WHEN EsDentroDeZona=0 THEN 1 ELSE 0 END),0) AS FueraDeZona,
                     COUNT(DISTINCT UserId) AS UsuariosRegistrados
