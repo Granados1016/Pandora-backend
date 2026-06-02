@@ -14,7 +14,8 @@ namespace Pandora.API.Controllers;
 public class TicketsController(
     IConfiguration config,
     IWebHostEnvironment env,
-    ILogger<TicketsController> logger) : ControllerBase
+    ILogger<TicketsController> logger,
+    Pandora.API.Services.PushService push) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
@@ -694,6 +695,11 @@ public class TicketsController(
             }
 
             logger.LogInformation("Ticket created: {Num} — {Title} by {User}", ticketNumber, dto.Title, CurrentUser);
+            // Push notification a todos los admins
+            _ = Task.Run(() => push.SendToAllAsync(
+                $"🎫 Nuevo ticket {ticketNumber}",
+                $"{dto.Title} — {dto.Area ?? dto.Department ?? "Sin área"}",
+                $"/tickets/{id}"), CancellationToken.None);
             // Notificación a correo general del sistema
             _ = Task.Run(() => SendCreatedEmailAsync(ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", CurrentUser), CancellationToken.None);
             // Notificación al correo configurado del área

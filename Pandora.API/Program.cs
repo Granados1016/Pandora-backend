@@ -146,6 +146,9 @@ builder.Services.AddScoped<IProgressNotifier, SignalRProgressNotifier>();
 builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
 builder.Services.AddHostedService<Pandora.API.Services.CalendarReminderService>();
 
+// ── Push Notifications ────────────────────────────────────────────────────────
+builder.Services.AddSingleton<Pandora.API.Services.PushService>();
+
 // ── Infraestructura (EF Core, repositorios, servicios) ───────────────────────
 builder.Services.AddInfrastructure(builder.Configuration);
 
@@ -1474,6 +1477,31 @@ using (var scopeEnc = app.Services.CreateScope())
         END
         """;
     await cmdChk.ExecuteNonQueryAsync();
+}
+
+// ── Tabla PushSubscriptions ──────────────────────────────────────────────────
+{
+    await using var connPush = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connPush.OpenAsync();
+    await using var cmdPush = connPush.CreateCommand();
+    cmdPush.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='PushSubscriptions' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.PushSubscriptions (
+                Id        UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                UserId    NVARCHAR(100)    NOT NULL,
+                UserName  NVARCHAR(150)    NOT NULL,
+                Endpoint  NVARCHAR(MAX)    NOT NULL,
+                P256dh    NVARCHAR(MAX)    NOT NULL,
+                Auth      NVARCHAR(MAX)    NOT NULL,
+                CreatedAt DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                CONSTRAINT UQ_Push_UserId_Endpoint UNIQUE (UserId, Endpoint)
+            );
+            CREATE INDEX IX_Push_UserId ON dbo.PushSubscriptions (UserId);
+        END
+        """;
+    await cmdPush.ExecuteNonQueryAsync();
 }
 
 await app.RunAsync();

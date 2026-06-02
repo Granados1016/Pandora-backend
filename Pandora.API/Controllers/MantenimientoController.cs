@@ -11,7 +11,8 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class MantenimientoController(
     IConfiguration config,
-    ILogger<MantenimientoController> logger) : ControllerBase
+    ILogger<MantenimientoController> logger,
+    Pandora.API.Services.PushService push) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name)
@@ -196,6 +197,11 @@ public class MantenimientoController(
             // Enviar email al técnico si tiene email
             if (!string.IsNullOrWhiteSpace(dto.EmailTecnico))
                 _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio, isNew: true), CancellationToken.None);
+            // Push a todos los admins
+            _ = Task.Run(() => push.SendToAllAsync(
+                $"🔧 Nuevo mantenimiento {folio}",
+                $"{dto.Titulo} — {dto.NombreEquipo ?? "Sin equipo"}",
+                $"/mantenimiento/{id}"), CancellationToken.None);
 
             return StatusCode(201, new { id, folio });
         }
