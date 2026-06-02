@@ -303,9 +303,10 @@ public class AdminController(
                 )
                 """;
             var dict = new Dictionary<string, string?>();
-            await using var r = await cmd.ExecuteReaderAsync(ct);
-            while (await r.ReadAsync(ct))
-                dict[r.GetString(0)] = r.IsDBNull(1) ? null : r.GetString(1);
+            // Cerrar el reader ANTES de reusar la conexión en HasSmtpPassword
+            await using (var r = await cmd.ExecuteReaderAsync(ct))
+                while (await r.ReadAsync(ct))
+                    dict[r.GetString(0)] = r.IsDBNull(1) ? null : r.GetString(1);
 
             return Ok(new {
                 host              = dict.GetValueOrDefault("smtp_host",               "smtp.gmail.com"),
@@ -314,7 +315,6 @@ public class AdminController(
                 fromName          = dict.GetValueOrDefault("smtp_from_name",           "Pandora"),
                 useSsl            = dict.GetValueOrDefault("smtp_use_ssl",             "true") == "true",
                 notificationsEmail= dict.GetValueOrDefault("smtp_notifications_email", ""),
-                // Nunca devolver la contraseña — solo indicar si está guardada
                 hasPassword       = await HasSmtpPassword(conn, ct),
             });
         }

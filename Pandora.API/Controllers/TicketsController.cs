@@ -1101,7 +1101,8 @@ public class TicketsController(
             await using var cmd = conn2.CreateCommand();
             cmd.CommandText = "SELECT NotificationEmail FROM dbo.TicketAreaConfigs WHERE Area = @Area";
             cmd.Parameters.AddWithValue("@Area", area);
-            areaEmail = (string?)await cmd.ExecuteScalarAsync();
+            var scalar = await cmd.ExecuteScalarAsync();
+            areaEmail = scalar == null || scalar == DBNull.Value ? null : scalar.ToString();
             if (string.IsNullOrWhiteSpace(areaEmail)) return;
 
             var smtp = await LoadSmtp();
