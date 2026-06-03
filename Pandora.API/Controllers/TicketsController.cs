@@ -1104,11 +1104,14 @@ public class TicketsController(
             string? areaEmail = null;
             await using var conn2 = Conn();
             await conn2.OpenAsync();
-            await using var cmd = conn2.CreateCommand();
-            cmd.CommandText = "SELECT NotificationEmail FROM dbo.TicketAreaConfigs WHERE Area = @Area";
-            cmd.Parameters.AddWithValue("@Area", area);
-            var scalar = await cmd.ExecuteScalarAsync();
-            areaEmail = scalar == null || scalar == DBNull.Value ? null : scalar.ToString();
+            await using (var cmd = conn2.CreateCommand())
+            {
+                cmd.CommandText = "SELECT NotificationEmail FROM dbo.TicketAreaConfigs WHERE Area = @Area";
+                cmd.Parameters.AddWithValue("@Area", area);
+                var scalar = await cmd.ExecuteScalarAsync();
+                // Usar patrón 'is DBNull' en lugar de comparación == para mayor robustez
+                areaEmail = scalar is null or DBNull ? null : scalar.ToString();
+            }
             if (string.IsNullOrWhiteSpace(areaEmail)) return;
 
             var smtp = await LoadSmtp();

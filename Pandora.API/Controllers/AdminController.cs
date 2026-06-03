@@ -293,20 +293,26 @@ public class AdminController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT SettingKey, SettingValue
-                FROM   dbo.SystemSettings
-                WHERE  SettingKey IN (
-                    'smtp_host','smtp_port','smtp_from_email',
-                    'smtp_from_name','smtp_use_ssl','smtp_notifications_email'
-                )
-                """;
+
+            // Leer configuración en bloque explícito para garantizar que cmd y reader
+            // queden completamente dispuestos antes de reutilizar la conexión.
             var dict = new Dictionary<string, string?>();
-            // Cerrar el reader ANTES de reusar la conexión en HasSmtpPassword
-            await using (var r = await cmd.ExecuteReaderAsync(ct))
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT SettingKey, SettingValue
+                    FROM   dbo.SystemSettings
+                    WHERE  SettingKey IN (
+                        'smtp_host','smtp_port','smtp_from_email',
+                        'smtp_from_name','smtp_use_ssl','smtp_notifications_email'
+                    )
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     dict[r.GetString(0)] = r.IsDBNull(1) ? null : r.GetString(1);
+            } // cmd y reader dispuestos aquí
+
+            var hasPassword = await HasSmtpPassword(conn, ct);
 
             return Ok(new {
                 host              = dict.GetValueOrDefault("smtp_host",               "smtp.gmail.com"),
@@ -315,7 +321,7 @@ public class AdminController(
                 fromName          = dict.GetValueOrDefault("smtp_from_name",           "Pandora"),
                 useSsl            = dict.GetValueOrDefault("smtp_use_ssl",             "true") == "true",
                 notificationsEmail= dict.GetValueOrDefault("smtp_notifications_email", ""),
-                hasPassword       = await HasSmtpPassword(conn, ct),
+                hasPassword,
             });
         }
         catch (Exception ex)
