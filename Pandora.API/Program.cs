@@ -1504,6 +1504,27 @@ using (var scopeEnc = app.Services.CreateScope())
     await cmdPush.ExecuteNonQueryAsync();
 }
 
+// ── Tabla CalendarNotificationEmails ────────────────────────────────────────
+{
+    await using var connCalNotif = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connCalNotif.OpenAsync();
+    await using var cmdCalNotif = connCalNotif.CreateCommand();
+    cmdCalNotif.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='CalendarNotificationEmails' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.CalendarNotificationEmails (
+                Id          UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Email       NVARCHAR(200)    NOT NULL,
+                Descripcion NVARCHAR(300)    NULL,
+                Activo      BIT              NOT NULL DEFAULT 1,
+                CreadoEn    DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+        """;
+    await cmdCalNotif.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────

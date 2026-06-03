@@ -742,8 +742,26 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 foreach (var a in dto.Attendees.Where(a => !string.IsNullOrWhiteSpace(a.Email)))
                     recipients.Add((a.Name, a.Email));
 
-            // Copia siempre a Asistente de Administración (nueva reserva o actualización)
-            recipients.Add(("Asistente de Administración", "asistenteadministracion@imet.edu.mx"));
+            // Correos de notificación configurados en el panel Admin
+            try
+            {
+                await using var notifConn = Conn();
+                await notifConn.OpenAsync();
+                await using var notifCmd = notifConn.CreateCommand();
+                notifCmd.CommandText = """
+                    SELECT Email, Descripcion FROM dbo.CalendarNotificationEmails
+                    WHERE Activo = 1
+                    """;
+                await using var notifReader = await notifCmd.ExecuteReaderAsync();
+                while (await notifReader.ReadAsync())
+                {
+                    var notifEmail = notifReader.GetString(0);
+                    var notifDesc  = notifReader.IsDBNull(1) ? notifEmail : notifReader.GetString(1);
+                    if (!string.IsNullOrWhiteSpace(notifEmail))
+                        recipients.Add((notifDesc, notifEmail));
+                }
+            }
+            catch (Exception ex) { logger.LogWarning("No se pudieron cargar correos de notificación de calendario: {Msg}", ex.Message); }
 
             if (recipients.Count == 0) return;
 
@@ -862,7 +880,105 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     }
 }
 
+    // ════════════════════════════════════════════════════════════════════════════
+    //  CORREOS DE NOTIFICACIÓN DE CALENDARIO (Admin)
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // GET /api/calendar/notification-emails
+    [HttpGet("notification-emails")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> GetNotificationEmails(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Id, Email, Descripcion, Activo, CreadoEn FROM dbo.CalendarNotificationEmails ORDER BY CreadoEn";
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new {
+                    id          = r.GetGuid(0),
+                    email       = r.GetString(1),
+                    descripcion = r.IsDBNull(2) ? null : r.GetString(2),
+                    activo      = r.GetBoolean(3),
+                    creadoEn    = r.GetDateTime(4),
+                });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetNotificationEmails"); return StatusCode(500, ex.Message); }
+    }
+
+    // POST /api/calendar/notification-emails
+    [HttpPost("notification-emails")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> AddNotificationEmail([FromBody] CalendarNotifEmailDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Email)) return BadRequest("El correo es requerido.");
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            var id = Guid.NewGuid();
+            cmd.CommandText = """
+                INSERT INTO dbo.CalendarNotificationEmails (Id, Email, Descripcion, Activo)
+                VALUES (@Id, @Email, @Desc, 1)
+                """;
+            cmd.Parameters.AddWithValue("@Id",    id);
+            cmd.Parameters.AddWithValue("@Email", dto.Email.Trim().ToLower());
+            cmd.Parameters.AddWithValue("@Desc",  string.IsNullOrWhiteSpace(dto.Descripcion) ? DBNull.Value : dto.Descripcion.Trim());
+            await cmd.ExecuteNonQueryAsync(ct);
+            logger.LogInformation("Correo notificación calendario agregado: {Email} por {User}", dto.Email, CurrentUsername);
+            return Ok(new { id });
+        }
+        catch (Exception ex) { logger.LogError(ex, "AddNotificationEmail"); return StatusCode(500, ex.Message); }
+    }
+
+    // PATCH /api/calendar/notification-emails/{id}/toggle
+    [HttpPatch("notification-emails/{id:guid}/toggle")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ToggleNotificationEmail(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE dbo.CalendarNotificationEmails SET Activo = ~Activo WHERE Id = @Id";
+            cmd.Parameters.AddWithValue("@Id", id);
+            int rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound();
+            return Ok();
+        }
+        catch (Exception ex) { logger.LogError(ex, "ToggleNotificationEmail {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // DELETE /api/calendar/notification-emails/{id}
+    [HttpDelete("notification-emails/{id:guid}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> DeleteNotificationEmail(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM dbo.CalendarNotificationEmails WHERE Id = @Id";
+            cmd.Parameters.AddWithValue("@Id", id);
+            int rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound();
+            logger.LogInformation("Correo notificación calendario eliminado Id={Id} por {User}", id, CurrentUsername);
+            return NoContent();
+        }
+        catch (Exception ex) { logger.LogError(ex, "DeleteNotificationEmail {Id}", id); return StatusCode(500, ex.Message); }
+    }
+}
+
 // ── DTOs ──────────────────────────────────────────────────────────────────────
+
+public record CalendarNotifEmailDto(string Email, string? Descripcion);
 
 public record RoomDto(
     string  Name,
