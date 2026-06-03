@@ -734,13 +734,16 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
                 return;
 
-            // Lista de destinatarios: organizador + asistentes
+            // Lista de destinatarios: organizador + asistentes + copia fija a administración
             var recipients = new List<(string Name, string Email)>();
             if (!string.IsNullOrWhiteSpace(dto.OrganizerEmail))
                 recipients.Add((dto.OrganizerName ?? "Organizador", dto.OrganizerEmail!));
             if (dto.Attendees != null)
                 foreach (var a in dto.Attendees.Where(a => !string.IsNullOrWhiteSpace(a.Email)))
                     recipients.Add((a.Name, a.Email));
+
+            // Copia siempre a Asistente de Administración (nueva reserva o actualización)
+            recipients.Add(("Asistente de Administración", "asistenteadministracion@imet.edu.mx"));
 
             if (recipients.Count == 0) return;
 
