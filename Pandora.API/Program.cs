@@ -141,6 +141,9 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
 // ── SignalR ──────────────────────────────────────────────────────────────────
 builder.Services.AddSignalR();
 builder.Services.AddScoped<IProgressNotifier, SignalRProgressNotifier>();
+builder.Services.AddScoped<Pandora.API.Services.TenantService>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddHostedService<Pandora.API.Services.TenantLicenseAlertService>();
 
 // ── Servicios en segundo plano ────────────────────────────────────────────────
 builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
@@ -1502,6 +1505,134 @@ using (var scopeEnc = app.Services.CreateScope())
         END
         """;
     await cmdPush.ExecuteNonQueryAsync();
+}
+
+// ── Tabla Tenants (multi-tenant) ─────────────────────────────────────────────
+{
+    await using var connT = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connT.OpenAsync();
+
+    // Paso 1: Crear tabla Tenants + agregar columna TenantId (DDL)
+    // Deben estar en comandos separados porque SQL Server no permite referenciar
+    // una columna recién agregada en el mismo batch que la añade.
+    await using (var cmd1 = connT.CreateCommand())
+    {
+        cmd1.CommandText = """
+            IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Tenants' AND schema_id=SCHEMA_ID('dbo'))
+            BEGIN
+                CREATE TABLE dbo.Tenants (
+                    Id             UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                    Slug           NVARCHAR(50)     NOT NULL,
+                    Name           NVARCHAR(200)    NOT NULL,
+                    DisplayName    NVARCHAR(100)    NOT NULL,
+                    LogoData       VARBINARY(MAX)   NULL,
+                    LogoMime       NVARCHAR(50)     NULL,
+                    PrimaryColor   NVARCHAR(7)      NOT NULL DEFAULT '#1A237E',
+                    SecondaryColor NVARCHAR(7)      NOT NULL DEFAULT '#283593',
+                    LicensedModules BIGINT          NOT NULL DEFAULT -1,
+                    MaxUsers       INT              NOT NULL DEFAULT 50,
+                    ExpiresAt      DATETIME2        NULL,
+                    IsActive       BIT              NOT NULL DEFAULT 1,
+                    ContactEmail   NVARCHAR(200)    NULL,
+                    Notes          NVARCHAR(500)    NULL,
+                    CreadoEn       DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                    CONSTRAINT UQ_Tenants_Slug UNIQUE (Slug)
+                );
+            END;
+
+            IF NOT EXISTS (SELECT 1 FROM sys.columns
+                           WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'TenantId')
+                ALTER TABLE dbo.AppUsers ADD TenantId UNIQUEIDENTIFIER NULL;
+            """;
+        await cmd1.ExecuteNonQueryAsync();
+    }
+
+    // Paso 2: Semilla de tenant por defecto + asignación de usuarios (DML)
+    // Separado del DDL para que SQL Server ya reconozca la columna TenantId.
+    await using (var cmd2 = connT.CreateCommand())
+    {
+        cmd2.CommandText = """
+            IF NOT EXISTS (SELECT 1 FROM dbo.Tenants)
+            BEGIN
+                DECLARE @DefaultTenantId UNIQUEIDENTIFIER = NEWID();
+                INSERT INTO dbo.Tenants (Id, Slug, Name, DisplayName, PrimaryColor, SecondaryColor, LicensedModules, MaxUsers, IsActive)
+                VALUES (@DefaultTenantId, 'default', 'Cliente por defecto', 'Pandora', '#1A237E', '#283593', -1, 200, 1);
+                UPDATE dbo.AppUsers SET TenantId = @DefaultTenantId WHERE TenantId IS NULL;
+            END
+            ELSE
+            BEGIN
+                DECLARE @FirstTenantId UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
+                IF @FirstTenantId IS NOT NULL
+                    UPDATE dbo.AppUsers SET TenantId = @FirstTenantId WHERE TenantId IS NULL;
+            END
+            """;
+        await cmd2.ExecuteNonQueryAsync();
+    }
+
+    Console.WriteLine("[Tenants] Tabla Tenants y columna TenantId en AppUsers verificadas.");
+}
+
+// ── TenantId en tablas principales (aislamiento de datos) ────────────────────
+{
+    await using var connIso = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connIso.OpenAsync();
+    await using var cmdIso = connIso.CreateCommand();
+    cmdIso.CommandText = """
+        -- Agregar TenantId a tablas que necesitan aislamiento por cliente
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Tickets') AND name='TenantId')
+            ALTER TABLE dbo.Tickets ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.TicketAreaConfigs') AND name='TenantId')
+            ALTER TABLE dbo.TicketAreaConfigs ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Mantenimientos') AND name='TenantId')
+            ALTER TABLE dbo.Mantenimientos ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorRegistros') AND name='TenantId')
+            ALTER TABLE dbo.CheckadorRegistros ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Rooms') AND name='TenantId')
+            ALTER TABLE dbo.Rooms ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Reservations') AND name='TenantId')
+            ALTER TABLE dbo.Reservations ADD TenantId UNIQUEIDENTIFIER NULL;
+        """;
+    await cmdIso.ExecuteNonQueryAsync();
+
+    // Segundo paso: poblar TenantId en registros existentes usando el tenant del usuario creador
+    await using var cmdIso2 = connIso.CreateCommand();
+    cmdIso2.CommandText = """
+        -- Poblar TenantId en Tickets usando el TenantId del usuario que lo creó
+        UPDATE t SET t.TenantId = u.TenantId
+        FROM dbo.Tickets t
+        JOIN dbo.AppUsers u ON LOWER(t.SubmittedBy) = LOWER(u.Username)
+        WHERE t.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Poblar TenantId en Mantenimientos
+        UPDATE m SET m.TenantId = u.TenantId
+        FROM dbo.Mantenimientos m
+        JOIN dbo.AppUsers u ON LOWER(m.CreadoPor) = LOWER(u.Username)
+        WHERE m.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Poblar TenantId en CheckadorRegistros
+        UPDATE cr SET cr.TenantId = u.TenantId
+        FROM dbo.CheckadorRegistros cr
+        JOIN dbo.AppUsers u ON cr.UserId = CAST(u.Id AS NVARCHAR(100))
+        WHERE cr.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Poblar Rooms y Reservations con el primer tenant activo (son recursos globales del sistema)
+        DECLARE @DefaultTid UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
+        IF @DefaultTid IS NOT NULL
+        BEGIN
+            UPDATE dbo.Rooms        SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            UPDATE dbo.Reservations SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            UPDATE dbo.TicketAreaConfigs SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+        END
+        """;
+    await cmdIso2.ExecuteNonQueryAsync();
+    Console.WriteLine("[TenantIso] Columnas TenantId agregadas a tablas principales.");
 }
 
 // ── Tabla CalendarNotificationEmails ────────────────────────────────────────

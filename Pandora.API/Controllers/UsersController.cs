@@ -26,6 +26,9 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
                                c.Type.EndsWith("roles", StringComparison.OrdinalIgnoreCase)) &&
                               c.Value.Equals("Admin", StringComparison.OrdinalIgnoreCase));
 
+    private Guid? TenantId =>
+        Guid.TryParse(User.FindFirstValue("tenantId"), out var tid) ? tid : null;
+
     private static string HashPassword(string password) =>
         UserService.HashPassword(password);
 
@@ -93,12 +96,27 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                       Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
-                FROM dbo.AppUsers
-                ORDER BY CreatedAt DESC
-                """;
+            // Filtrar por tenant: cada admin solo ve usuarios de su propio cliente
+            if (TenantId.HasValue)
+            {
+                cmd.CommandText = """
+                    SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
+                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                    FROM dbo.AppUsers
+                    WHERE TenantId = @TenantId
+                    ORDER BY CreatedAt DESC
+                    """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantId.Value);
+            }
+            else
+            {
+                cmd.CommandText = """
+                    SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
+                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                    FROM dbo.AppUsers
+                    ORDER BY CreatedAt DESC
+                    """;
+            }
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) list.Add(ReadUserSummary(r));
@@ -150,10 +168,10 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             cmd.CommandText = """
                 INSERT INTO dbo.AppUsers
                     (Id, Username, FullName, Email, PasswordHash, Role, Modules, ModulesViewOnly,
-                     IsActive, Position, CreatedAt)
+                     IsActive, Position, TenantId, CreatedAt)
                 VALUES
                     (@Id, @Username, @FullName, @Email, @Hash, @Role, @Modules, @ModulesViewOnly,
-                     @IsActive, @Position, GETUTCDATE())
+                     @IsActive, @Position, @TenantId, GETUTCDATE())
                 """;
             cmd.Parameters.AddWithValue("@Id",              id);
             cmd.Parameters.AddWithValue("@Username",        dto.Username.Trim().ToLower());
@@ -164,6 +182,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             cmd.Parameters.AddWithValue("@Modules",         dto.Modules);
             cmd.Parameters.AddWithValue("@ModulesViewOnly", dto.ModulesViewOnly);
             cmd.Parameters.AddWithValue("@IsActive",        dto.IsActive);
+            cmd.Parameters.AddWithValue("@TenantId",        TenantId.HasValue ? (object)TenantId.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@Position",        (object?)dto.Position ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
             return Ok(new { id });

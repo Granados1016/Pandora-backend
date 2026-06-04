@@ -34,6 +34,10 @@ public class TicketsController(
         User.IsInRole("Admin") ||
         User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin");
 
+    // TenantId del usuario autenticado — para aislamiento de datos
+    private Guid? TenantId =>
+        Guid.TryParse(User.FindFirstValue("tenantId"), out var tid) ? tid : null;
+
     // Bit 2048 = HD_GLOBAL: puede ver todos los tickets, no solo los propios
     private const int HD_GLOBAL_BIT  = 2048;
     // Bit 8192 = HD_REQUEST: puede solicitar/crear nuevos tickets
@@ -435,6 +439,8 @@ public class TicketsController(
             await EnsureTablesAsync(conn, ct);
 
             var where = new List<string>();
+            // Aislamiento por tenant: solo ver tickets del mismo cliente
+            if (TenantId.HasValue) where.Add("(TenantId = @TenantId OR TenantId IS NULL)");
             if (!CanSeeAllTickets)                     where.Add("SubmittedBy = @User");
             if (!string.IsNullOrWhiteSpace(status))   where.Add("Status = @Status");
             if (!string.IsNullOrWhiteSpace(priority)) where.Add("Priority = @Priority");
@@ -450,6 +456,7 @@ public class TicketsController(
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = sql;
+            if (TenantId.HasValue)                     cmd.Parameters.AddWithValue("@TenantId", TenantId.Value);
             if (!CanSeeAllTickets)                     cmd.Parameters.AddWithValue("@User",     CurrentUser);
             if (!string.IsNullOrWhiteSpace(status))   cmd.Parameters.AddWithValue("@Status",   status);
             if (!string.IsNullOrWhiteSpace(priority)) cmd.Parameters.AddWithValue("@Priority", priority);
@@ -628,10 +635,10 @@ public class TicketsController(
             cmd.CommandText = """
                 INSERT INTO dbo.Tickets
                     (Id, TicketNumber, Title, TemplateId, Status, Priority, Area, Department,
-                     AssignedTo, SubmittedBy, SubmittedByEmail, CreatedAt)
+                     AssignedTo, SubmittedBy, SubmittedByEmail, TenantId, CreatedAt)
                 VALUES
                     (@Id, @Num, @Title, @TplId, 'Abierto', @Priority, @Area, @Dept,
-                     @Assigned, @User, @Email, GETUTCDATE())
+                     @Assigned, @User, @Email, @TenantId, GETUTCDATE())
                 """;
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Num",      ticketNumber);
@@ -643,6 +650,7 @@ public class TicketsController(
             cmd.Parameters.AddWithValue("@Assigned", string.IsNullOrWhiteSpace(dto.AssignedTo)     ? DBNull.Value : (object)dto.AssignedTo.Trim());
             cmd.Parameters.AddWithValue("@User",     CurrentUser);
             cmd.Parameters.AddWithValue("@Email",    string.IsNullOrWhiteSpace(dto.SubmittedByEmail) ? DBNull.Value : (object)dto.SubmittedByEmail.Trim());
+            cmd.Parameters.AddWithValue("@TenantId", TenantId.HasValue ? (object)TenantId.Value : DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
             // Field values

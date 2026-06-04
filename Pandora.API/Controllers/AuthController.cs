@@ -31,22 +31,26 @@ public class AuthController(
     /// Construye un JWT firmado con la clave y configuración del proyecto.
     /// Centraliza la lógica compartida entre /refresh y /verify-otp.
     /// </summary>
-    private string BuildJwt(string username, string role, string fullName, int modules, Guid userId)
+    private string BuildJwt(string username, string role, string fullName, int modules, Guid userId,
+                            Guid? tenantId = null)
     {
         string jwtKey   = config["JwtSettings:Key"]!;
         string issuer   = config["JwtSettings:Issuer"]!;
         string audience = config["JwtSettings:Audience"]!;
         int    expMin   = int.TryParse(config["JwtSettings:ExpiresInMinutes"], out var m) ? m : 30;
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
-            new Claim(ClaimTypes.Name,             username),
-            new Claim(ClaimTypes.Role,             role),
-            new Claim("fullName",                  fullName),
-            new Claim("modules",                   modules.ToString()),
-            new Claim(JwtRegisteredClaimNames.Sub, userId.ToString()),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(ClaimTypes.Name,             username),
+            new(ClaimTypes.Role,             role),
+            new("fullName",                  fullName),
+            new("modules",                   modules.ToString()),
+            new(JwtRegisteredClaimNames.Sub, userId.ToString()),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
         };
+
+        if (tenantId.HasValue)
+            claims.Add(new Claim("tenantId", tenantId.Value.ToString()));
 
         var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
         var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -54,6 +58,24 @@ public class AuthController(
             expires:            DateTime.UtcNow.AddMinutes(expMin),
             signingCredentials: creds);
         return new JwtSecurityTokenHandler().WriteToken(jwtObj);
+    }
+
+    /// <summary>
+    /// Lee TenantId del usuario desde la BD para incluirlo en el JWT.
+    /// </summary>
+    private async Task<Guid?> GetUserTenantIdAsync(string username, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT TenantId FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+            cmd.Parameters.AddWithValue("@U", username.Trim());
+            var scalar = await cmd.ExecuteScalarAsync(ct);
+            return scalar is Guid g ? g : null;
+        }
+        catch { return null; }
     }
 
     // ── POST /api/auth/login ──────────────────────────────────────────────────
@@ -69,6 +91,33 @@ public class AuthController(
         var response = await jwtService.LoginAsync(req, ct);
         if (response is null)
             return Unauthorized("Credenciales incorrectas.");
+
+        // ── Verificar licencia del tenant ─────────────────────────────────────
+        try
+        {
+            await using var connLic = Conn();
+            await connLic.OpenAsync(ct);
+            await using var cmdLic = connLic.CreateCommand();
+            cmdLic.CommandText = """
+                SELECT t.IsActive, t.ExpiresAt, t.Name
+                FROM dbo.AppUsers u
+                JOIN dbo.Tenants t ON u.TenantId = t.Id
+                WHERE LOWER(u.Username) = LOWER(@U)
+                """;
+            cmdLic.Parameters.AddWithValue("@U", req.Username.Trim());
+            await using var rLic = await cmdLic.ExecuteReaderAsync(ct);
+            if (await rLic.ReadAsync(ct))
+            {
+                var isActive  = rLic.GetBoolean(0);
+                var expiresAt = rLic.IsDBNull(1) ? (DateTime?)null : rLic.GetDateTime(1);
+                var tenantName = rLic.GetString(2);
+                if (!isActive)
+                    return StatusCode(403, new { error = "license_suspended", message = "El acceso de su organización ha sido suspendido. Contacte al proveedor." });
+                if (expiresAt.HasValue && expiresAt.Value < DateTime.UtcNow)
+                    return StatusCode(403, new { error = "license_expired", message = $"La licencia de {tenantName} venció el {expiresAt.Value:dd/MM/yyyy}. Contacte al proveedor para renovar." });
+            }
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo verificar licencia para {User}", req.Username); }
 
         // ── Verificar 2FA (columna garantizada por startup) ───────────────────
         try
@@ -108,10 +157,36 @@ public class AuthController(
             logger.LogWarning(ex, "No se pudo guardar refresh token para {User}", req.Username);
         }
 
-        // Añadir refreshToken a la respuesta del servicio
+        // Regenerar JWT con tenantId incluido
+        var tenantId = await GetUserTenantIdAsync(req.Username, ct);
+        string? newToken = null;
+        try
+        {
+            // Extraer datos del JWT generado por jwtService para regenerarlo con tenantId
+            var json0 = JsonSerializer.Serialize(response);
+            var dict0 = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
+            if (dict0.TryGetValue("token", out var tokenElem))
+            {
+                var handler   = new JwtSecurityTokenHandler();
+                var parsed    = handler.ReadJwtToken(tokenElem.GetString());
+                var username2 = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Name || c.Type == "unique_name")?.Value ?? req.Username;
+                var role2     = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Role || c.Type == "role")?.Value ?? "User";
+                var fullName2 = parsed.Claims.FirstOrDefault(c => c.Type == "fullName")?.Value ?? username2;
+                var modules2  = int.TryParse(parsed.Claims.FirstOrDefault(c => c.Type == "modules")?.Value, out var mod) ? mod : 0;
+                var userId2   = Guid.TryParse(parsed.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Sub)?.Value, out var uid) ? uid : Guid.Empty;
+                newToken = BuildJwt(username2, role2, fullName2, modules2, userId2, tenantId);
+            }
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo regenerar JWT con tenantId"); }
+
+        // Añadir refreshToken y token enriquecido a la respuesta
         var json = JsonSerializer.Serialize(response);
         var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!;
         dict["refreshToken"] = JsonSerializer.SerializeToElement(refreshToken);
+        if (newToken != null)
+            dict["token"] = JsonSerializer.SerializeToElement(newToken);
+        if (tenantId.HasValue)
+            dict["tenantId"] = JsonSerializer.SerializeToElement(tenantId.Value.ToString());
         return Ok(dict);
     }
 
@@ -154,10 +229,11 @@ public class AuthController(
             string role     = "User";
             int    modules  = 0;
 
+            Guid? tenantIdRefresh = null;
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
-                    SELECT Id, FullName, Role, Modules
+                    SELECT Id, FullName, Role, Modules, TenantId
                     FROM dbo.AppUsers
                     WHERE LOWER(Username) = LOWER(@Username) AND IsActive = 1
                     """;
@@ -166,14 +242,15 @@ public class AuthController(
                 if (!await r.ReadAsync(ct))
                     return Unauthorized("Usuario desactivado o no encontrado.");
 
-                userId   = r.GetGuid(0);
-                fullName = r.IsDBNull(1) ? username : r.GetString(1);
-                role     = r.IsDBNull(2) ? "User"   : r.GetString(2);
-                modules  = r.GetInt32(3);
+                userId           = r.GetGuid(0);
+                fullName         = r.IsDBNull(1) ? username : r.GetString(1);
+                role             = r.IsDBNull(2) ? "User"   : r.GetString(2);
+                modules          = r.GetInt32(3);
+                tenantIdRefresh  = r.IsDBNull(4) ? null : r.GetGuid(4);
             }
 
-            // ── Generar nuevo JWT ─────────────────────────────────────────────
-            string newJwt = BuildJwt(username, role, fullName, modules, userId);
+            // ── Generar nuevo JWT con tenantId ────────────────────────────────
+            string newJwt = BuildJwt(username, role, fullName, modules, userId, tenantIdRefresh);
 
             // ── Rotar refresh token (invalida el viejo, emite uno nuevo) ──────
             string newRefresh = NewRefreshToken();
