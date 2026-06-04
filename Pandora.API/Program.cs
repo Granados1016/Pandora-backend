@@ -1495,8 +1495,8 @@ using (var scopeEnc = app.Services.CreateScope())
                 Endpoint  NVARCHAR(MAX)    NOT NULL,
                 P256dh    NVARCHAR(MAX)    NOT NULL,
                 Auth      NVARCHAR(MAX)    NOT NULL,
-                CreatedAt DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
-                CONSTRAINT UQ_Push_UserId_Endpoint UNIQUE (UserId, Endpoint)
+                CreatedAt DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+                -- UNIQUE (UserId, Endpoint) eliminado: NVARCHAR(MAX) no puede usarse en índices SQL Server
             );
             CREATE INDEX IX_Push_UserId ON dbo.PushSubscriptions (UserId);
         END
