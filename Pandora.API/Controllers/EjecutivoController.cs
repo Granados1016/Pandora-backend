@@ -35,39 +35,57 @@ public class EjecutivoController(
                     ISNULL(SUM(CASE WHEN Status='Resuelto' OR Status='Cerrado' THEN 1 ELSE 0 END), 0) AS TktResueltos,
                     ISNULL(SUM(CASE WHEN Priority='Crítica'   THEN 1 ELSE 0 END), 0)                  AS TktCriticos,
                     ISNULL(SUM(CASE WHEN MONTH(CreatedAt)=MONTH(GETUTCDATE()) AND YEAR(CreatedAt)=YEAR(GETUTCDATE()) THEN 1 ELSE 0 END), 0) AS TktEsteMes
-                FROM dbo.Tickets WHERE IsDeleted=0;
+                FROM dbo.Tickets;
 
                 -- ── Inventario ────────────────────────────────────────────────────────
-                SELECT
-                    COUNT(*)                                                                           AS InvTotal,
-                    ISNULL(SUM(CASE WHEN Status='Activo'      THEN 1 ELSE 0 END), 0)                  AS InvActivos,
-                    ISNULL(SUM(CASE WHEN Status='En Reparación' THEN 1 ELSE 0 END), 0)                AS InvReparacion,
-                    ISNULL(SUM(CASE WHEN Status='Dado de Baja' THEN 1 ELSE 0 END), 0)                 AS InvBaja
-                FROM dbo.InventoryItems WHERE IsDecommissioned=0;
+                IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
+                    SELECT
+                        COUNT(*)                                                                       AS InvTotal,
+                        ISNULL(SUM(CASE WHEN Status='Activo'        THEN 1 ELSE 0 END), 0)            AS InvActivos,
+                        ISNULL(SUM(CASE WHEN Status='En Reparación' THEN 1 ELSE 0 END), 0)            AS InvReparacion,
+                        ISNULL(SUM(CASE WHEN Status='Dado de Baja'  THEN 1 ELSE 0 END), 0)            AS InvBaja
+                    FROM dbo.InventoryItems;
+                ELSE
+                    SELECT 0 AS InvTotal, 0 AS InvActivos, 0 AS InvReparacion, 0 AS InvBaja;
 
                 -- ── Bitácora ──────────────────────────────────────────────────────────
-                SELECT
-                    COUNT(*)                                                                           AS BitTotal,
-                    ISNULL(SUM(CASE WHEN Estado='Abierta'     THEN 1 ELSE 0 END), 0)                  AS BitAbiertas,
-                    ISNULL(SUM(CASE WHEN Estado='En Proceso'  THEN 1 ELSE 0 END), 0)                  AS BitEnProceso,
-                    ISNULL(SUM(CASE WHEN Prioridad='Alta'      THEN 1 ELSE 0 END), 0)                 AS BitPrioAlta
-                FROM dbo.Bitacora WHERE IsDeleted=0;
+                IF OBJECT_ID('dbo.BitacoraRegistros') IS NOT NULL
+                    SELECT
+                        COUNT(*)                                                                       AS BitTotal,
+                        ISNULL(SUM(CASE WHEN Estado='Abierta'    THEN 1 ELSE 0 END), 0)               AS BitAbiertas,
+                        ISNULL(SUM(CASE WHEN Estado='En Proceso' THEN 1 ELSE 0 END), 0)               AS BitEnProceso,
+                        ISNULL(SUM(CASE WHEN Prioridad='Alta'    THEN 1 ELSE 0 END), 0)               AS BitPrioAlta
+                    FROM dbo.BitacoraRegistros;
+                ELSE IF OBJECT_ID('dbo.Bitacora') IS NOT NULL
+                    SELECT
+                        COUNT(*)                                                                       AS BitTotal,
+                        ISNULL(SUM(CASE WHEN Estado='Abierta'    THEN 1 ELSE 0 END), 0)               AS BitAbiertas,
+                        ISNULL(SUM(CASE WHEN Estado='En Proceso' THEN 1 ELSE 0 END), 0)               AS BitEnProceso,
+                        ISNULL(SUM(CASE WHEN Prioridad='Alta'    THEN 1 ELSE 0 END), 0)               AS BitPrioAlta
+                    FROM dbo.Bitacora;
+                ELSE
+                    SELECT 0 AS BitTotal, 0 AS BitAbiertas, 0 AS BitEnProceso, 0 AS BitPrioAlta;
 
                 -- ── Mantenimiento ─────────────────────────────────────────────────────
-                SELECT
-                    COUNT(*)                                                                           AS MntTotal,
-                    ISNULL(SUM(CASE WHEN Estado='Programado'  THEN 1 ELSE 0 END), 0)                  AS MntProgramados,
-                    ISNULL(SUM(CASE WHEN Estado='En Proceso'  THEN 1 ELSE 0 END), 0)                  AS MntEnProceso,
-                    ISNULL(SUM(CASE WHEN FechaProgramada < GETUTCDATE() AND Estado NOT IN ('Completado','Cancelado') THEN 1 ELSE 0 END), 0) AS MntVencidos
-                FROM dbo.Mantenimientos WHERE IsDeleted=0;
+                IF OBJECT_ID('dbo.Mantenimientos') IS NOT NULL
+                    SELECT
+                        COUNT(*)                                                                       AS MntTotal,
+                        ISNULL(SUM(CASE WHEN Estado='Programado' THEN 1 ELSE 0 END), 0)               AS MntProgramados,
+                        ISNULL(SUM(CASE WHEN Estado='En Proceso' THEN 1 ELSE 0 END), 0)               AS MntEnProceso,
+                        ISNULL(SUM(CASE WHEN FechaProgramada < GETUTCDATE() AND Estado NOT IN ('Completado','Cancelado') THEN 1 ELSE 0 END), 0) AS MntVencidos
+                    FROM dbo.Mantenimientos;
+                ELSE
+                    SELECT 0 AS MntTotal, 0 AS MntProgramados, 0 AS MntEnProceso, 0 AS MntVencidos;
 
-                -- ── Checador (hoy) ────────────────────────────────────────────────────
-                DECLARE @HoyMx DATE = CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE);
-                SELECT
-                    ISNULL(SUM(CASE WHEN CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)=@HoyMx AND Tipo='Entrada' THEN 1 ELSE 0 END),0) AS ChkEntradasHoy,
-                    ISNULL(SUM(CASE WHEN CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)=@HoyMx AND Tipo='Salida'  THEN 1 ELSE 0 END),0) AS ChkSalidasHoy,
-                    COUNT(DISTINCT UserId)                                                                                                                                                   AS ChkUsuarios
-                FROM dbo.CheckadorRegistros;
+                -- ── Checador (hoy — sin AT TIME ZONE para compatibilidad con LocalDB) ─
+                IF OBJECT_ID('dbo.CheckadorRegistros') IS NOT NULL
+                    SELECT
+                        ISNULL(SUM(CASE WHEN CAST(Timestamp AS DATE)=CAST(GETUTCDATE() AS DATE) AND Tipo='Entrada' THEN 1 ELSE 0 END),0) AS ChkEntradasHoy,
+                        ISNULL(SUM(CASE WHEN CAST(Timestamp AS DATE)=CAST(GETUTCDATE() AS DATE) AND Tipo='Salida'  THEN 1 ELSE 0 END),0) AS ChkSalidasHoy,
+                        COUNT(DISTINCT UserId)                                                                                           AS ChkUsuarios
+                    FROM dbo.CheckadorRegistros;
+                ELSE
+                    SELECT 0 AS ChkEntradasHoy, 0 AS ChkSalidasHoy, 0 AS ChkUsuarios;
 
                 -- ── Usuarios activos ──────────────────────────────────────────────────
                 SELECT
@@ -76,17 +94,23 @@ public class EjecutivoController(
                 FROM dbo.AppUsers;
 
                 -- ── Licencias próximas a vencer (30 días) ─────────────────────────────
-                SELECT
-                    COUNT(*)                                                                           AS LicTotal,
-                    ISNULL(SUM(CASE WHEN FechaVencimiento BETWEEN GETUTCDATE() AND DATEADD(DAY,30,GETUTCDATE()) THEN 1 ELSE 0 END),0) AS LicPorVencer,
-                    ISNULL(SUM(CASE WHEN FechaVencimiento < GETUTCDATE() THEN 1 ELSE 0 END),0)        AS LicVencidas
-                FROM dbo.Licencias WHERE Activa=1;
+                IF OBJECT_ID('dbo.Licencias') IS NOT NULL
+                    SELECT
+                        COUNT(*)                                                                       AS LicTotal,
+                        ISNULL(SUM(CASE WHEN FechaVencimiento BETWEEN GETUTCDATE() AND DATEADD(DAY,30,GETUTCDATE()) THEN 1 ELSE 0 END),0) AS LicPorVencer,
+                        ISNULL(SUM(CASE WHEN FechaVencimiento < GETUTCDATE() THEN 1 ELSE 0 END),0)    AS LicVencidas
+                    FROM dbo.Licencias WHERE Activa=1;
+                ELSE
+                    SELECT 0 AS LicTotal, 0 AS LicPorVencer, 0 AS LicVencidas;
 
                 -- ── Vacaciones pendientes de aprobar ──────────────────────────────────
-                SELECT
-                    ISNULL(SUM(CASE WHEN Estado='Pendiente' THEN 1 ELSE 0 END),0) AS VacPendientes,
-                    ISNULL(SUM(CASE WHEN Estado='Aprobada'  THEN 1 ELSE 0 END),0) AS VacAprobadas
-                FROM dbo.VacacionesSolicitudes;
+                IF OBJECT_ID('dbo.VacacionesSolicitudes') IS NOT NULL
+                    SELECT
+                        ISNULL(SUM(CASE WHEN Estado='Pendiente' THEN 1 ELSE 0 END),0) AS VacPendientes,
+                        ISNULL(SUM(CASE WHEN Estado='Aprobada'  THEN 1 ELSE 0 END),0) AS VacAprobadas
+                    FROM dbo.VacacionesSolicitudes;
+                ELSE
+                    SELECT 0 AS VacPendientes, 0 AS VacAprobadas;
                 """;
 
             await using var r = await cmd.ExecuteReaderAsync(ct);

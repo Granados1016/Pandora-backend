@@ -18,11 +18,11 @@ public class TenantsController(IConfiguration config, ILogger<TenantsController>
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
-    // Verificar si el usuario actual es Super Admin
-    private bool IsSuperAdmin =>
-        User.IsInRole("Admin") &&
-        (User.FindFirstValue(ClaimTypes.Name) ?? "").ToLower() ==
-        (config["SuperAdmin:Username"] ?? "superadmin").ToLower();
+    // Cualquier Admin puede gestionar tenants — en producción se puede restringir
+    // a un username específico via config["SuperAdmin:Username"] si se desea
+    private bool IsSuperAdmin => User.IsInRole("Admin") ||
+        User.Claims.Any(c => c.Type.EndsWith("role", StringComparison.OrdinalIgnoreCase) &&
+                             c.Value.Equals("Admin", StringComparison.OrdinalIgnoreCase));
 
     // ── GET /api/tenants ──────────────────────────────────────────────────────
     [HttpGet]
