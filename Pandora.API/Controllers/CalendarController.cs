@@ -878,7 +878,6 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             </body></html>
             """;
     }
-}
 
     // ════════════════════════════════════════════════════════════════════════════
     //  CORREOS DE NOTIFICACIÓN DE CALENDARIO (Admin)
