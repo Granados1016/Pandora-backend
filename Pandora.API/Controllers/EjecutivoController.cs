@@ -97,18 +97,18 @@ public class EjecutivoController(
                 IF OBJECT_ID('dbo.Licencias') IS NOT NULL
                     SELECT
                         COUNT(*)                                                                       AS LicTotal,
-                        ISNULL(SUM(CASE WHEN FechaVencimiento BETWEEN GETUTCDATE() AND DATEADD(DAY,30,GETUTCDATE()) THEN 1 ELSE 0 END),0) AS LicPorVencer,
-                        ISNULL(SUM(CASE WHEN FechaVencimiento < GETUTCDATE() THEN 1 ELSE 0 END),0)    AS LicVencidas
-                    FROM dbo.Licencias WHERE Activa=1;
+                        ISNULL(SUM(CASE WHEN ProximoPago BETWEEN CAST(GETUTCDATE() AS DATE) AND CAST(DATEADD(DAY,30,GETUTCDATE()) AS DATE) THEN 1 ELSE 0 END),0) AS LicPorVencer,
+                        ISNULL(SUM(CASE WHEN ProximoPago < CAST(GETUTCDATE() AS DATE) THEN 1 ELSE 0 END),0) AS LicVencidas
+                    FROM dbo.Licencias WHERE Estado='Activa';
                 ELSE
                     SELECT 0 AS LicTotal, 0 AS LicPorVencer, 0 AS LicVencidas;
 
                 -- ── Vacaciones pendientes de aprobar ──────────────────────────────────
-                IF OBJECT_ID('dbo.VacacionesSolicitudes') IS NOT NULL
+                IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
                     SELECT
-                        ISNULL(SUM(CASE WHEN Estado='Pendiente' THEN 1 ELSE 0 END),0) AS VacPendientes,
-                        ISNULL(SUM(CASE WHEN Estado='Aprobada'  THEN 1 ELSE 0 END),0) AS VacAprobadas
-                    FROM dbo.VacacionesSolicitudes;
+                        ISNULL(SUM(CASE WHEN Status='Pendiente' THEN 1 ELSE 0 END),0) AS VacPendientes,
+                        ISNULL(SUM(CASE WHEN Status='Aprobado'  THEN 1 ELSE 0 END),0) AS VacAprobadas
+                    FROM dbo.VacationRequests;
                 ELSE
                     SELECT 0 AS VacPendientes, 0 AS VacAprobadas;
                 """;
