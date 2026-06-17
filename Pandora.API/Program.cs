@@ -1127,6 +1127,32 @@ using (var scopeExtra = app.Services.CreateScope())
     await cmdDoc.ExecuteNonQueryAsync();
 }
 
+// ── Migración: columna ApprovalStage en VacationRequests (flujo multi-nivel) ─
+{
+    await using var connAs = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connAs.OpenAsync();
+    await using var cmdAs = connAs.CreateCommand();
+    cmdAs.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.VacationRequests') AND name = 'ApprovalStage')
+            ALTER TABLE dbo.VacationRequests ADD ApprovalStage NVARCHAR(30) NOT NULL DEFAULT 'PendienteJefe';
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.VacationRequests') AND name = 'JefeReviewedBy')
+            ALTER TABLE dbo.VacationRequests ADD JefeReviewedBy NVARCHAR(100) NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.VacationRequests') AND name = 'JefeReviewedAt')
+            ALTER TABLE dbo.VacationRequests ADD JefeReviewedAt DATETIME NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.VacationRequests') AND name = 'JefeNotes')
+            ALTER TABLE dbo.VacationRequests ADD JefeNotes NVARCHAR(500) NULL;
+        """;
+    await cmdAs.ExecuteNonQueryAsync();
+}
+
 // ── Migración: tabla SystemSettings (configuración SMTP desde UI) ────────────
 {
     await using var connSS = new Microsoft.Data.SqlClient.SqlConnection(

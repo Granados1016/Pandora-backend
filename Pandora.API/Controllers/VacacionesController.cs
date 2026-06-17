@@ -329,7 +329,9 @@ public class VacacionesController(
         cmd.CommandText = """
             SELECT Id, Username, FullName, StartDate, EndDate, TotalDays,
                    Type, Status, Notes, ReviewedBy, ReviewedAt, ReviewNotes, CreatedAt,
-                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument
+                   CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument,
+                   ISNULL(ApprovalStage,'PendienteJefe') AS ApprovalStage,
+                   JefeReviewedBy, JefeReviewedAt, JefeNotes
             FROM dbo.VacationRequests
             WHERE IsDeleted = 0
               AND (@Status IS NULL OR Status = @Status)
@@ -340,25 +342,109 @@ public class VacacionesController(
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
             items.Add(new {
-                id          = r.GetInt32(0),
-                username    = r.GetString(1),
-                fullName    = r.IsDBNull(2) ? r.GetString(1) : r.GetString(2),
-                startDate   = r.GetDateTime(3).ToString("yyyy-MM-dd"),
-                endDate     = r.GetDateTime(4).ToString("yyyy-MM-dd"),
-                totalDays   = r.GetInt32(5),
-                type        = r.GetString(6),
-                status      = r.GetString(7),
-                notes       = r.IsDBNull(8)  ? null : r.GetString(8),
-                reviewedBy  = r.IsDBNull(9)  ? null : r.GetString(9),
-                reviewedAt  = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10),
-                reviewNotes = r.IsDBNull(11) ? null : r.GetString(11),
-                createdAt   = r.GetDateTime(12),
-                hasDocument = r.GetInt32(13) == 1,
+                id              = r.GetInt32(0),
+                username        = r.GetString(1),
+                fullName        = r.IsDBNull(2) ? r.GetString(1) : r.GetString(2),
+                startDate       = r.GetDateTime(3).ToString("yyyy-MM-dd"),
+                endDate         = r.GetDateTime(4).ToString("yyyy-MM-dd"),
+                totalDays       = r.GetInt32(5),
+                type            = r.GetString(6),
+                status          = r.GetString(7),
+                notes           = r.IsDBNull(8)  ? null : r.GetString(8),
+                reviewedBy      = r.IsDBNull(9)  ? null : r.GetString(9),
+                reviewedAt      = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10),
+                reviewNotes     = r.IsDBNull(11) ? null : r.GetString(11),
+                createdAt       = r.GetDateTime(12),
+                hasDocument     = r.GetInt32(13) == 1,
+                approvalStage   = r.GetString(14),
+                jefeReviewedBy  = r.IsDBNull(15) ? null : r.GetString(15),
+                jefeReviewedAt  = r.IsDBNull(16) ? (DateTime?)null : r.GetDateTime(16),
+                jefeNotes       = r.IsDBNull(17) ? null : r.GetString(17),
             });
         return Ok(items);
     }
 
-    // ── PUT /api/vacaciones/admin/{id}/revisar ────────────────────────────────
+    // ── PUT /api/vacaciones/jefe/{id}/revisar  (primera aprobación) ──────────
+    [HttpPut("jefe/{id:int}/revisar")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> RevisarJefe(int id, [FromBody] RevisionDto dto, CancellationToken ct)
+    {
+        if (dto.Status is not ("AprobadoJefe" or "Rechazado"))
+            return BadRequest("Status debe ser AprobadoJefe o Rechazado.");
+
+        var reviewer = CurrentUser;
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        string reqUsername = "", reqFullName = "", reqEmail = "", reqStart = "", reqEnd = "";
+        int reqDays = 0;
+        await using (var sel = conn.CreateCommand())
+        {
+            sel.CommandText = """
+                SELECT vr.Username, vr.FullName, ISNULL(au.Email,''),
+                       vr.StartDate, vr.EndDate, vr.TotalDays
+                FROM dbo.VacationRequests vr
+                LEFT JOIN dbo.AppUsers au ON LOWER(au.Username)=LOWER(vr.Username)
+                WHERE vr.Id=@Id AND vr.IsDeleted=0
+                """;
+            sel.Parameters.AddWithValue("@Id", id);
+            await using var r = await sel.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return NotFound();
+            reqUsername = r.GetString(0);
+            reqFullName = r.IsDBNull(1) ? r.GetString(0) : r.GetString(1);
+            reqEmail    = r.IsDBNull(2) ? "" : r.GetString(2);
+            reqStart    = r.GetDateTime(3).ToString("dd/MM/yyyy");
+            reqEnd      = r.GetDateTime(4).ToString("dd/MM/yyyy");
+            reqDays     = r.GetInt32(5);
+        }
+
+        // Si rechaza el jefe, el status final es Rechazado
+        var finalStatus = dto.Status == "Rechazado" ? "Rechazado" : "Pendiente";
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE dbo.VacationRequests
+            SET ApprovalStage   = @Stage,
+                Status          = @Status,
+                JefeReviewedBy  = @JefeBy,
+                JefeReviewedAt  = GETUTCDATE(),
+                JefeNotes       = @JefeNotes
+            WHERE Id=@Id AND ApprovalStage='PendienteJefe' AND IsDeleted=0
+            """;
+        cmd.Parameters.AddWithValue("@Id",       id);
+        cmd.Parameters.AddWithValue("@Stage",    dto.Status == "Rechazado" ? "Rechazado" : "PendienteRRHH");
+        cmd.Parameters.AddWithValue("@Status",   finalStatus);
+        cmd.Parameters.AddWithValue("@JefeBy",   reviewer);
+        cmd.Parameters.AddWithValue("@JefeNotes",(object?)dto.Notes ?? DBNull.Value);
+        int rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows == 0) return NotFound();
+
+        var icon = dto.Status == "AprobadoJefe" ? "✅" : "❌";
+        var msg  = dto.Status == "AprobadoJefe"
+            ? "Tu solicitud fue aprobada por tu jefe directo y está en revisión de RRHH."
+            : $"Tu solicitud fue rechazada por tu jefe directo. {dto.Notes}";
+
+        await hub.Clients.Group($"user-{reqUsername}").SendAsync("NewNotification", new
+        {
+            id=0, title=$"{icon} Revisión de jefe directo",
+            message=msg, type="vacacion", isRead=false, path="/vacaciones",
+        }, ct);
+
+        // Notificar a admins si fue aprobada por jefe (para segunda revisión)
+        if (dto.Status == "AprobadoJefe")
+            await hub.Clients.Group("broadcast").SendAsync("NewNotification", new
+            {
+                id=0, title="📋 Solicitud pendiente de revisión RRHH",
+                message=$"{reqFullName} — {reqStart} al {reqEnd} ({reqDays} días). Aprobada por jefe directo.",
+                type="vacacion", isRead=false, path="/vacaciones/admin",
+            }, ct);
+
+        if (!string.IsNullOrWhiteSpace(reqEmail) && dto.Status == "Rechazado")
+            _ = SendVacacionEmailAsync(reqEmail, reqFullName, "Rechazado", dto.Notes, reqStart, reqEnd, reqDays);
+
+        return NoContent();
+    }
+
+    // ── PUT /api/vacaciones/admin/{id}/revisar  (segunda aprobación — RRHH) ──
     [HttpPut("admin/{id:int}/revisar")]
     [Authorize(Roles = "Admin")]
     public async Task<IActionResult> Revisar(int id, [FromBody] RevisionDto dto, CancellationToken ct)
@@ -371,13 +457,8 @@ public class VacacionesController(
         await using var conn = Conn();
         await conn.OpenAsync(ct);
 
-        // Leer solicitud para notificar
-        string reqUsername = "";
-        string reqFullName = "";
-        string reqEmail    = "";
-        string reqStart    = "";
-        string reqEnd      = "";
-        int    reqDays     = 0;
+        string reqUsername = "", reqFullName = "", reqEmail = "", reqStart = "", reqEnd = "";
+        int reqDays = 0;
         await using (var sel = conn.CreateCommand())
         {
             sel.CommandText = """
@@ -401,25 +482,24 @@ public class VacacionesController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             UPDATE dbo.VacationRequests
-            SET Status = @Status, ReviewedBy = @ReviewedBy,
-                ReviewedAt = GETUTCDATE(), ReviewNotes = @ReviewNotes
-            WHERE Id = @Id AND Status = 'Pendiente' AND IsDeleted = 0
+            SET Status = @Status, ApprovalStage = @Stage,
+                ReviewedBy = @ReviewedBy, ReviewedAt = GETUTCDATE(), ReviewNotes = @ReviewNotes
+            WHERE Id = @Id AND ApprovalStage = 'PendienteRRHH' AND IsDeleted = 0
             """;
         cmd.Parameters.AddWithValue("@Id",          id);
         cmd.Parameters.AddWithValue("@Status",      dto.Status);
+        cmd.Parameters.AddWithValue("@Stage",       dto.Status);
         cmd.Parameters.AddWithValue("@ReviewedBy",  reviewer);
         cmd.Parameters.AddWithValue("@ReviewNotes", (object?)dto.Notes ?? DBNull.Value);
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) return NotFound();
 
-        // Notificar al usuario por SignalR
         var icon  = dto.Status == "Aprobado" ? "✅" : "❌";
-        var group = $"user-{reqUsername}";
-        await hub.Clients.Group(group).SendAsync("NewNotification", new
+        await hub.Clients.Group($"user-{reqUsername}").SendAsync("NewNotification", new
         {
             id      = 0,
             title   = $"{icon} Tu solicitud fue {dto.Status.ToLower()}",
-            message = dto.Notes ?? $"Tu solicitud de vacaciones ha sido {dto.Status.ToLower()}.",
+            message = dto.Notes ?? $"Tu solicitud de vacaciones ha sido {dto.Status.ToLower()} por RRHH.",
             type    = "vacacion",
             isRead  = false,
             path    = "/vacaciones",
@@ -427,7 +507,6 @@ public class VacacionesController(
 
         logger.LogInformation("Solicitud #{Id} {Status} por {Reviewer}", id, dto.Status, reviewer);
 
-        // Enviar correo al empleado si tiene email configurado (#14)
         if (!string.IsNullOrWhiteSpace(reqEmail))
             _ = SendVacacionEmailAsync(reqEmail, reqFullName, dto.Status, dto.Notes, reqStart, reqEnd, reqDays);
 
@@ -829,6 +908,73 @@ public class VacacionesController(
             });
         }
         return Ok(items);
+    }
+
+    // ── GET /api/vacaciones/admin/calendario-area/{year}/{month} ─────────────
+    [HttpGet("admin/calendario-area/{year:int}/{month:int}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> GetCalendarioArea(int year, int month, CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+
+        // Festivos del mes
+        var holidays = await LoadHolidaysAsync(year, conn, ct);
+
+        // Ausencias aprobadas que tocan este mes
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT r.Id, u.FullName, u.Username,
+                   ISNULL(d.Name,'Sin área') AS Department,
+                   r.StartDate, r.EndDate, r.TotalDays, r.Type
+            FROM dbo.VacationRequests r
+            JOIN dbo.AppUsers u ON u.Username = r.Username
+            LEFT JOIN dbo.Employees e ON LOWER(e.Email)=LOWER(u.Email)
+            LEFT JOIN dbo.Departments d ON d.Id = e.DepartmentId
+            WHERE r.IsDeleted=0
+              AND r.Status='Aprobado'
+              AND (
+                (YEAR(r.StartDate)=@Year AND MONTH(r.StartDate)=@Month)
+                OR (YEAR(r.EndDate)=@Year AND MONTH(r.EndDate)=@Month)
+                OR (r.StartDate <= DATEFROMPARTS(@Year,@Month,1)
+                    AND r.EndDate >= EOMONTH(DATEFROMPARTS(@Year,@Month,1)))
+              )
+            ORDER BY d.Name, u.FullName
+            """;
+        cmd.Parameters.AddWithValue("@Year",  year);
+        cmd.Parameters.AddWithValue("@Month", month);
+
+        var daysInMonth = DateTime.DaysInMonth(year, month);
+        var items = new List<object>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            var start = DateOnly.FromDateTime(r.GetDateTime(4));
+            var end   = DateOnly.FromDateTime(r.GetDateTime(5));
+            // Días ausentes dentro del mes (solo hábiles)
+            var days = new List<int>();
+            for (int d = 1; d <= daysInMonth; d++)
+            {
+                var date = new DateOnly(year, month, d);
+                if (date < start || date > end) continue;
+                if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+                if (holidays.Contains(date)) continue;
+                days.Add(d);
+            }
+            items.Add(new {
+                id         = r.GetInt32(0),
+                fullName   = r.IsDBNull(1) ? r.GetString(2) : r.GetString(1),
+                username   = r.GetString(2),
+                department = r.GetString(3),
+                startDate  = start.ToString("yyyy-MM-dd"),
+                endDate    = end.ToString("yyyy-MM-dd"),
+                totalDays  = r.GetInt32(6),
+                type       = r.IsDBNull(7) ? "Vacaciones" : r.GetString(7),
+                daysInMonth = days,
+            });
+        }
+
+        return Ok(new { year, month, daysInMonth, holidays = holidays.Where(h => h.Year == year && h.Month == month).Select(h => h.Day).ToList(), items });
     }
 
     // ── Enviar correo de notificación de vacación (#14) ───────────────────────
