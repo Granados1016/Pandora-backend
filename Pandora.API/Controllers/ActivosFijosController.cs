@@ -381,6 +381,71 @@ public class ActivosFijosController(
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/activos-fijos/export-excel ───────────────────────────────────
+    [HttpGet("export-excel")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ExportExcel(
+        [FromQuery] string? status     = null,
+        [FromQuery] string? category   = null,
+        [FromQuery] string? department = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            var where = new List<string> { "IsDeleted=0" };
+            if (!string.IsNullOrWhiteSpace(status))     { where.Add("Status=@Status");         cmd.Parameters.AddWithValue("@Status",     status); }
+            if (!string.IsNullOrWhiteSpace(category))   { where.Add("Category=@Category");     cmd.Parameters.AddWithValue("@Category",   category); }
+            if (!string.IsNullOrWhiteSpace(department)) { where.Add("Department=@Department"); cmd.Parameters.AddWithValue("@Department", department); }
+            cmd.CommandText = $"""
+                SELECT AssetNumber, Name, Description, Category, Brand, Model, SerialNumber,
+                       Department, ResponsibleUser, Location, Status,
+                       PurchaseDate, PurchaseCost, UsefulLifeYears, DepreciationMethod,
+                       ResidualValue, AccumulatedDeprec, CurrentValue, Notes, CreatedBy, CreatedAt
+                FROM dbo.ActivosFijos
+                WHERE {string.Join(" AND ", where)}
+                ORDER BY CreatedAt DESC
+                """;
+
+            using var wb = new ClosedXML.Excel.XLWorkbook();
+            var ws = wb.Worksheets.Add("Activos Fijos");
+
+            string[] headers = [
+                "No. Activo","Nombre","Descripción","Categoría","Marca","Modelo","No. Serie",
+                "Departamento","Responsable","Ubicación","Estado",
+                "Fecha Compra","Costo Compra","Vida Útil (años)","Método Depreciación",
+                "Valor Residual","Depreciación Acumulada","Valor Actual","Notas","Creado Por","Fecha Alta"
+            ];
+            for (int i = 0; i < headers.Length; i++)
+            {
+                var cell = ws.Cell(1, i + 1);
+                cell.Value = headers[i];
+                cell.Style.Font.Bold = true;
+                cell.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#0d2137");
+                cell.Style.Font.FontColor       = ClosedXML.Excel.XLColor.White;
+            }
+
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            int row = 2;
+            while (await r.ReadAsync(ct))
+            {
+                static string S(SqlDataReader rd, int i) => rd.IsDBNull(i) ? "" : rd.GetValue(i).ToString()!;
+                for (int col = 0; col < 21; col++)
+                    ws.Cell(row, col + 1).Value = S(r, col);
+                row++;
+            }
+
+            ws.Columns().AdjustToContents();
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                $"activos_fijos_{DateTime.Now:yyyyMMdd}.xlsx");
+        }
+        catch (Exception ex) { logger.LogError(ex, "ActivosFijos.ExportExcel"); return StatusCode(500, ex.Message); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     private static object Nv(string? s) => string.IsNullOrWhiteSpace(s) ? DBNull.Value : (object)s;
 

@@ -337,16 +337,42 @@ public class CheckadorController(
                 FROM dbo.CheckadorRegistros WHERE {string.Join(" AND ", where)}
                 ORDER BY Timestamp DESC
                 """;
-            var sb = new StringBuilder();
-            sb.AppendLine("Usuario,Tipo,Latitud,Longitud,Precision(m),DentroDeZona,Notas,Timestamp");
+
+            using var wb  = new ClosedXML.Excel.XLWorkbook();
+            var ws = wb.Worksheets.Add("Asistencia");
+
+            // Header
+            string[] headers = ["Usuario","Tipo","Latitud","Longitud","Precisión (m)","Dentro de Zona","Notas","Fecha y Hora"];
+            for (int i = 0; i < headers.Length; i++)
+            {
+                var cell = ws.Cell(1, i + 1);
+                cell.Value = headers[i];
+                cell.Style.Font.Bold = true;
+                cell.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#0d2137");
+                cell.Style.Font.FontColor       = ClosedXML.Excel.XLColor.White;
+            }
+
             await using var r = await cmd.ExecuteReaderAsync(ct);
+            int row = 2;
             while (await r.ReadAsync(ct))
             {
-                static string C(object? v) => v is null || v == DBNull.Value ? "" : $"\"{v}\"";
-                sb.AppendLine(string.Join(",", new[] { C(r[0]),C(r[1]),C(r[2]),C(r[3]),C(r[4]),C(r[5]),C(r[6]),C(r[7]) }));
+                static string S(SqlDataReader rd, int i) => rd.IsDBNull(i) ? "" : rd.GetValue(i).ToString()!;
+                ws.Cell(row, 1).Value = S(r, 0);
+                ws.Cell(row, 2).Value = S(r, 1);
+                ws.Cell(row, 3).Value = S(r, 2);
+                ws.Cell(row, 4).Value = S(r, 3);
+                ws.Cell(row, 5).Value = S(r, 4);
+                ws.Cell(row, 6).Value = r.IsDBNull(5) ? "" : (r.GetValue(5).ToString() == "True" ? "Sí" : "No");
+                ws.Cell(row, 7).Value = S(r, 6);
+                ws.Cell(row, 8).Value = r.IsDBNull(7) ? "" : r.GetDateTime(7).ToString("yyyy-MM-dd HH:mm:ss");
+                row++;
             }
-            var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(sb.ToString())).ToArray();
-            return File(bytes, "text/csv", $"asistencia_{DateTime.Now:yyyyMMdd}.csv");
+
+            ws.Columns().AdjustToContents();
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                $"asistencia_{DateTime.Now:yyyyMMdd}.xlsx");
         }
         catch (Exception ex) { logger.LogError(ex, "Checador.Export"); return StatusCode(500, ex.Message); }
     }
