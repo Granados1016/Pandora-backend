@@ -13,7 +13,7 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/calendar")]
 [Authorize]
-public class CalendarController(IConfiguration config, ILogger<CalendarController> logger) : ControllerBase
+public class CalendarController(IConfiguration config, ILogger<CalendarController> logger, Pandora.API.Services.PushService push) : ControllerBase
 {
     private static readonly TimeZoneInfo MxTz = TimeZoneInfo.FindSystemTimeZoneById(
         OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
@@ -344,6 +344,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await cmd.ExecuteNonQueryAsync(ct);
 
             _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername), CancellationToken.None);
+            _ = Task.Run(() => push.SendToAllAsync(
+                $"📅 Nueva reserva de sala: {roomName}",
+                $"{dto.Title} — {dto.StartTime:dd/MM HH:mm} a {dto.EndTime:HH:mm}",
+                $"/calendar"), CancellationToken.None);
 
             return Ok(new { id });
         }

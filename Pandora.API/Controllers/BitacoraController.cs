@@ -10,7 +10,8 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class BitacoraController(
     IConfiguration config,
-    ILogger<BitacoraController> logger) : ControllerBase
+    ILogger<BitacoraController> logger,
+    Pandora.API.Services.PushService push) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private bool IsAdmin => User.IsInRole("Admin");
@@ -169,6 +170,13 @@ public class BitacoraController(
             cmd.Parameters.AddWithValue("@Resolucion",   Nv(dto.Resolucion));
             await cmd.ExecuteNonQueryAsync(ct);
 
+            if (!string.IsNullOrWhiteSpace(dto.AsignadoA))
+                _ = Task.Run(() => push.SendToUsernameAsync(
+                    dto.AsignadoA,
+                    $"📋 Bitácora asignada: {folio}",
+                    dto.Titulo.Trim(),
+                    $"/bitacora/{newId}"), CancellationToken.None);
+
             return CreatedAtAction(nameof(GetById), new { id = newId }, new { id = newId, folio });
         }
         catch (Exception ex) { logger.LogError(ex, "Bitacora.Create"); return StatusCode(500, ex.Message); }
@@ -216,6 +224,14 @@ public class BitacoraController(
             cmd.Parameters.AddWithValue("@Resolucion",Nv(dto.Resolucion));
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
+
+            if (!string.IsNullOrWhiteSpace(dto.AsignadoA))
+                _ = Task.Run(() => push.SendToUsernameAsync(
+                    dto.AsignadoA,
+                    $"📋 Bitácora actualizada",
+                    dto.Titulo.Trim(),
+                    $"/bitacora/{id}"), CancellationToken.None);
+
             return NoContent();
         }
         catch (Exception ex) { logger.LogError(ex, "Bitacora.Update {Id}", id); return StatusCode(500, ex.Message); }

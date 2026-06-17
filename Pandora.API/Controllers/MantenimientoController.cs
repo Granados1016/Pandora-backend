@@ -446,6 +446,50 @@ public class MantenimientoController(
         catch (Exception ex) { logger.LogError(ex, "Mantenimiento.Export"); return StatusCode(500, ex.Message); }
     }
 
+    // ── POST /api/mantenimiento/alertas-vencimiento  (Admin o job cron) ─────────
+    [HttpPost("alertas-vencimiento")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> AlertasVencimiento(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT Folio, Titulo, NombreEquipo, TecnicoAsignado, FechaProgramada, Id
+                FROM dbo.Mantenimientos
+                WHERE IsDeleted = 0
+                  AND Estado NOT IN ('Completado','Cancelado')
+                  AND FechaProgramada BETWEEN GETUTCDATE() AND DATEADD(DAY, 2, GETUTCDATE())
+                """;
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            int count = 0;
+            while (await r.ReadAsync(ct))
+            {
+                var folio    = r.GetString(0);
+                var titulo   = r.GetString(1);
+                var equipo   = r.IsDBNull(2) ? "" : r.GetString(2);
+                var tecnico  = r.IsDBNull(3) ? null : r.GetString(3);
+                var fecha    = r.GetDateTime(4);
+                var id       = r.GetGuid(5);
+                var body     = $"{titulo} — {equipo} · Programado: {fecha:dd/MM HH:mm}";
+
+                _ = Task.Run(() => push.SendToAllAsync(
+                    $"⚠️ Mantenimiento próximo a vencer: {folio}", body,
+                    $"/mantenimiento/{id}"), CancellationToken.None);
+
+                if (!string.IsNullOrWhiteSpace(tecnico))
+                    _ = Task.Run(() => push.SendToUsernameAsync(
+                        tecnico, $"⚠️ Tu mantenimiento vence pronto: {folio}", body,
+                        $"/mantenimiento/{id}"), CancellationToken.None);
+                count++;
+            }
+            return Ok(new { alertasEnviadas = count });
+        }
+        catch (Exception ex) { logger.LogError(ex, "Mantenimiento.AlertasVencimiento"); return StatusCode(500, ex.Message); }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
     private static object MapRow(SqlDataReader r) => new {
         id               = r.GetGuid(r.GetOrdinal("Id")),

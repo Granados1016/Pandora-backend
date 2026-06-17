@@ -59,6 +59,27 @@ public class PushService(IConfiguration config, ILogger<PushService> logger)
             await SendAsync(sub, title, body, url, icon);
     }
 
+    // ── Enviar notificación por username (para módulos que guardan nombre, no ID) ─
+    public async Task SendToUsernameAsync(string username, string title, string body, string? url = null)
+    {
+        if (string.IsNullOrWhiteSpace(VapidPublic) || string.IsNullOrWhiteSpace(VapidPrivate)) return;
+        try
+        {
+            await using var conn = new SqlConnection(ConnStr);
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Endpoint, P256dh, Auth FROM dbo.PushSubscriptions WHERE UserName = @UserName";
+            cmd.Parameters.AddWithValue("@UserName", username);
+            await using var r = await cmd.ExecuteReaderAsync();
+            var subs = new List<PushSubscriptionRecord>();
+            while (await r.ReadAsync())
+                subs.Add(new PushSubscriptionRecord(r.GetString(0), r.GetString(1), r.GetString(2)));
+            foreach (var sub in subs)
+                await SendAsync(sub, title, body, url);
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "PushService.SendToUsername"); }
+    }
+
     // ── Enviar notificación a todos ───────────────────────────────────────────
     public async Task SendToAllAsync(string title, string body, string? url = null)
     {
