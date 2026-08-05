@@ -967,6 +967,190 @@ public class TicketsController(
         catch (Exception ex) { logger.LogError(ex, "GetStats"); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/tickets/export-excel — histórico completo a .xlsx ──────────────
+    [HttpGet("export-excel")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ExportExcel(
+        [FromQuery] string?   status   = null,
+        [FromQuery] string?   priority = null,
+        [FromQuery] string?   area     = null,
+        [FromQuery] string?   search   = null,
+        [FromQuery] DateTime? desde    = null,
+        [FromQuery] DateTime? hasta    = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureTablesAsync(conn, ct);
+
+            var where = new List<string>();
+            if (TenantId.HasValue)                    where.Add("(TenantId = @TenantId OR TenantId IS NULL)");
+            if (!string.IsNullOrWhiteSpace(status))   where.Add("Status = @Status");
+            if (!string.IsNullOrWhiteSpace(priority)) where.Add("Priority = @Priority");
+            if (!string.IsNullOrWhiteSpace(area))     where.Add("(Area = @Area OR Department = @Area)");
+            if (!string.IsNullOrWhiteSpace(search))   where.Add("(Title LIKE @Search OR TicketNumber LIKE @Search OR Department LIKE @Search OR Area LIKE @Search)");
+            if (desde.HasValue)                       where.Add("CreatedAt >= @Desde");
+            if (hasta.HasValue)                       where.Add("CreatedAt < @Hasta");
+
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                SELECT Id, TicketNumber, Title, Status, Priority, Area, Department, AssignedTo,
+                       SubmittedBy, SubmittedByEmail, DelayNote, CloseNote, CreatedAt, UpdatedAt
+                FROM dbo.Tickets
+                {(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "")}
+                ORDER BY CreatedAt DESC
+                """;
+            if (TenantId.HasValue)                    cmd.Parameters.AddWithValue("@TenantId", TenantId.Value);
+            if (!string.IsNullOrWhiteSpace(status))   cmd.Parameters.AddWithValue("@Status",   status);
+            if (!string.IsNullOrWhiteSpace(priority)) cmd.Parameters.AddWithValue("@Priority", priority);
+            if (!string.IsNullOrWhiteSpace(area))     cmd.Parameters.AddWithValue("@Area",     area);
+            if (!string.IsNullOrWhiteSpace(search))   cmd.Parameters.AddWithValue("@Search",   $"%{search}%");
+            if (desde.HasValue)                       cmd.Parameters.AddWithValue("@Desde",    desde.Value.Date);
+            if (hasta.HasValue)                       cmd.Parameters.AddWithValue("@Hasta",    hasta.Value.Date.AddDays(1));
+
+            var rows = new List<Dictionary<string, object?>>();
+            var ids  = new List<Guid>();
+            await using (var r = await cmd.ExecuteReaderAsync(ct))
+            {
+                while (await r.ReadAsync(ct))
+                {
+                    var id = r.GetGuid(r.GetOrdinal("Id"));
+                    ids.Add(id);
+                    rows.Add(new Dictionary<string, object?>
+                    {
+                        ["Id"]               = id,
+                        ["TicketNumber"]     = r.GetString(r.GetOrdinal("TicketNumber")),
+                        ["Title"]            = r.GetString(r.GetOrdinal("Title")),
+                        ["Status"]           = r.GetString(r.GetOrdinal("Status")),
+                        ["Priority"]         = r.GetString(r.GetOrdinal("Priority")),
+                        ["Area"]             = Ns(r, "Area"),
+                        ["Department"]       = Ns(r, "Department"),
+                        ["AssignedTo"]       = Ns(r, "AssignedTo"),
+                        ["SubmittedBy"]      = r.GetString(r.GetOrdinal("SubmittedBy")),
+                        ["SubmittedByEmail"] = Ns(r, "SubmittedByEmail"),
+                        ["DelayNote"]        = Ns(r, "DelayNote"),
+                        ["CloseNote"]        = Ns(r, "CloseNote"),
+                        ["CreatedAt"]        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                        ["UpdatedAt"]        = N(r, "UpdatedAt"),
+                    });
+                }
+            }
+
+            // Detalle adicional (campos dinámicos, adjuntos, comentarios) — en lotes
+            // para no exceder el límite de parámetros de SQL Server con IN (...).
+            var fieldValuesByTicket  = new Dictionary<Guid, List<string>>();
+            var attachCountByTicket  = new Dictionary<Guid, int>();
+            var commentCountByTicket = new Dictionary<Guid, int>();
+            const int batchSize = 1900;
+
+            for (int offset = 0; offset < ids.Count; offset += batchSize)
+            {
+                var batch = ids.Skip(offset).Take(batchSize).ToList();
+                var names = batch.Select((_, i) => $"@id{i}").ToList();
+
+                await using (var cmdFv = conn.CreateCommand())
+                {
+                    for (int i = 0; i < batch.Count; i++) cmdFv.Parameters.AddWithValue($"@id{i}", batch[i]);
+                    cmdFv.CommandText = $"""
+                        SELECT fv.TicketId, tf.Label, fv.Value
+                        FROM dbo.TicketFieldValues fv
+                        JOIN dbo.TemplateFields tf ON fv.FieldId = tf.Id
+                        WHERE fv.TicketId IN ({string.Join(",", names)})
+                        ORDER BY tf.SortOrder
+                        """;
+                    await using var rf = await cmdFv.ExecuteReaderAsync(ct);
+                    while (await rf.ReadAsync(ct))
+                    {
+                        var tid = rf.GetGuid(0);
+                        var val = rf.IsDBNull(2) ? "" : rf.GetString(2);
+                        if (string.IsNullOrWhiteSpace(val)) continue;
+                        if (!fieldValuesByTicket.TryGetValue(tid, out var list)) fieldValuesByTicket[tid] = list = [];
+                        list.Add($"{rf.GetString(1)}: {val}");
+                    }
+                }
+
+                await using (var cmdAt = conn.CreateCommand())
+                {
+                    for (int i = 0; i < batch.Count; i++) cmdAt.Parameters.AddWithValue($"@id{i}", batch[i]);
+                    cmdAt.CommandText = $"SELECT TicketId, COUNT(*) FROM dbo.TicketAttachments WHERE TicketId IN ({string.Join(",", names)}) GROUP BY TicketId";
+                    await using var ra = await cmdAt.ExecuteReaderAsync(ct);
+                    while (await ra.ReadAsync(ct)) attachCountByTicket[ra.GetGuid(0)] = ra.GetInt32(1);
+                }
+
+                await using (var cmdCm = conn.CreateCommand())
+                {
+                    for (int i = 0; i < batch.Count; i++) cmdCm.Parameters.AddWithValue($"@id{i}", batch[i]);
+                    cmdCm.CommandText = $"SELECT TicketId, COUNT(*) FROM dbo.TicketComments WHERE TicketId IN ({string.Join(",", names)}) GROUP BY TicketId";
+                    await using var rc = await cmdCm.ExecuteReaderAsync(ct);
+                    while (await rc.ReadAsync(ct)) commentCountByTicket[rc.GetGuid(0)] = rc.GetInt32(1);
+                }
+            }
+
+            using var wb = new ClosedXML.Excel.XLWorkbook();
+            var ws = wb.Worksheets.Add("Tickets");
+
+            string[] headers =
+            [
+                "Folio", "Título", "Estado", "Prioridad", "Puesto / Área", "Asignado a",
+                "Solicitado por", "Correo", "Fecha creación", "Última actualización",
+                "Días abierto", "Nota de retraso", "Nota de cierre", "Adjuntos", "Comentarios",
+                "Detalles adicionales",
+            ];
+            for (int i = 0; i < headers.Length; i++)
+            {
+                var cell = ws.Cell(1, i + 1);
+                cell.Value = headers[i];
+                cell.Style.Font.Bold = true;
+                cell.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromHtml("#0d2137");
+                cell.Style.Font.FontColor       = ClosedXML.Excel.XLColor.White;
+            }
+
+            int row = 2;
+            foreach (var t in rows)
+            {
+                var id      = (Guid)t["Id"]!;
+                var status2 = (string)t["Status"]!;
+                var created = (DateTime)t["CreatedAt"]!;
+                var updated = t["UpdatedAt"] as DateTime?;
+
+                int? diasAbierto = status2 is "Resuelto" or "Cerrado"
+                    ? (updated.HasValue ? (int)Math.Round((updated.Value - created).TotalDays) : null)
+                    : (int)Math.Round((DateTime.UtcNow - created).TotalDays);
+
+                ws.Cell(row, 1).Value  = (string)t["TicketNumber"]!;
+                ws.Cell(row, 2).Value  = (string)t["Title"]!;
+                ws.Cell(row, 3).Value  = status2;
+                ws.Cell(row, 4).Value  = (string)t["Priority"]!;
+                ws.Cell(row, 5).Value  = (string?)t["Area"] ?? (string?)t["Department"] ?? "";
+                ws.Cell(row, 6).Value  = (string?)t["AssignedTo"] ?? "";
+                ws.Cell(row, 7).Value  = (string)t["SubmittedBy"]!;
+                ws.Cell(row, 8).Value  = (string?)t["SubmittedByEmail"] ?? "";
+                ws.Cell(row, 9).Value  = created.ToString("yyyy-MM-dd HH:mm");
+                ws.Cell(row, 10).Value = updated.HasValue ? updated.Value.ToString("yyyy-MM-dd HH:mm") : "";
+                ws.Cell(row, 11).Value = diasAbierto?.ToString() ?? "";
+                ws.Cell(row, 12).Value = (string?)t["DelayNote"] ?? "";
+                ws.Cell(row, 13).Value = (string?)t["CloseNote"] ?? "";
+                ws.Cell(row, 14).Value = attachCountByTicket.GetValueOrDefault(id, 0);
+                ws.Cell(row, 15).Value = commentCountByTicket.GetValueOrDefault(id, 0);
+                ws.Cell(row, 16).Value = fieldValuesByTicket.TryGetValue(id, out var fv) ? string.Join(" | ", fv) : "";
+                row++;
+            }
+
+            ws.SheetView.FreezeRows(1);
+            ws.Columns().AdjustToContents();
+            ws.Column(2).Width  = Math.Min(ws.Column(2).Width, 45);
+            ws.Column(16).Width = Math.Min(ws.Column(16).Width, 60);
+
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            return File(ms.ToArray(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                $"tickets_historico_{DateTime.Now:yyyyMMdd_HHmm}.xlsx");
+        }
+        catch (Exception ex) { logger.LogError(ex, "Tickets.ExportExcel"); return StatusCode(500, ex.Message); }
+    }
+
     // ── GET /api/tickets/positions — lista pública de puestos (para el formulario) ──
     [HttpGet("positions")]
     public async Task<IActionResult> GetPositions(CancellationToken ct)
