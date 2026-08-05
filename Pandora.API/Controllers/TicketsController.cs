@@ -426,10 +426,12 @@ public class TicketsController(
 
     [HttpGet]
     public async Task<IActionResult> GetTickets(
-        [FromQuery] string? status   = null,
-        [FromQuery] string? priority = null,
-        [FromQuery] string? area     = null,
-        [FromQuery] string? search   = null,
+        [FromQuery] string?   status   = null,
+        [FromQuery] string?   priority = null,
+        [FromQuery] string?   area     = null,
+        [FromQuery] string?   search   = null,
+        [FromQuery] DateTime? desde    = null,
+        [FromQuery] DateTime? hasta    = null,
         CancellationToken ct = default)
     {
         try
@@ -446,6 +448,8 @@ public class TicketsController(
             if (!string.IsNullOrWhiteSpace(priority)) where.Add("Priority = @Priority");
             if (!string.IsNullOrWhiteSpace(area))     where.Add("(Area = @Area OR Department = @Area)");
             if (!string.IsNullOrWhiteSpace(search))   where.Add("(Title LIKE @Search OR TicketNumber LIKE @Search OR Department LIKE @Search OR Area LIKE @Search)");
+            if (desde.HasValue)                       where.Add("CreatedAt >= @Desde");
+            if (hasta.HasValue)                       where.Add("CreatedAt < @Hasta");
 
             var sql = $"""
                 SELECT Id, TicketNumber, Title, Status, Priority, Area, Department, AssignedTo, SubmittedBy, CreatedAt, UpdatedAt
@@ -462,6 +466,8 @@ public class TicketsController(
             if (!string.IsNullOrWhiteSpace(priority)) cmd.Parameters.AddWithValue("@Priority", priority);
             if (!string.IsNullOrWhiteSpace(area))     cmd.Parameters.AddWithValue("@Area",     area);
             if (!string.IsNullOrWhiteSpace(search))   cmd.Parameters.AddWithValue("@Search",   $"%{search}%");
+            if (desde.HasValue)                       cmd.Parameters.AddWithValue("@Desde",    desde.Value.Date);
+            if (hasta.HasValue)                       cmd.Parameters.AddWithValue("@Hasta",    hasta.Value.Date.AddDays(1));
 
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
