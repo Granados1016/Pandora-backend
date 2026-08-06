@@ -43,6 +43,9 @@ if (resolvedConnStr != rawConnStr)
 
 // ── MVC + FluentValidation ───────────────────────────────────────────────────
 builder.Services.AddMemoryCache();
+// Usado por GoogleWorkspaceProvisioningController para llamar al
+// microservicio Node (reenvío de Excel subido, red privada de Railway).
+builder.Services.AddHttpClient();
 builder.Services.AddControllers()
     .AddJsonOptions(opts =>
     {
@@ -1044,6 +1047,52 @@ using (var scopeExtra = app.Services.CreateScope())
         END
         """;
     await cmdX.ExecuteNonQueryAsync();
+}
+
+// ── Integración google-workspace-provisioning (microservicio Node, alta
+//    masiva de cuentas institucionales en Google Workspace) — jobs y
+//    auditoría inmutable ────────────────────────────────────────────────────
+using (var scopeGwp = app.Services.CreateScope())
+{
+    var cfgGwp = scopeGwp.ServiceProvider.GetRequiredService<IConfiguration>();
+    await using var connGwp = new Microsoft.Data.SqlClient.SqlConnection(
+        cfgGwp.GetConnectionString("PandoraDb"));
+    await connGwp.OpenAsync();
+    await using var cmdGwp = connGwp.CreateCommand();
+    cmdGwp.CommandText = """
+        -- Estado de los jobs de alta masiva (mirror del jobStore en memoria de Node)
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='GoogleWorkspaceProvisioningJobs' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.GoogleWorkspaceProvisioningJobs (
+                JobId      UNIQUEIDENTIFIER PRIMARY KEY,
+                Status     NVARCHAR(20)  NOT NULL,
+                Total      INT           NOT NULL DEFAULT 0,
+                Completed  INT           NOT NULL DEFAULT 0,
+                Failed     INT           NOT NULL DEFAULT 0,
+                CreatedBy  NVARCHAR(100) NOT NULL,
+                CreatedAt  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
+                UpdatedAt  DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME()
+            );
+        END
+
+        -- Log de auditoría por alumno, append-only (datos de menores).
+        -- Nunca se recibe/guarda la contraseña, solo el resultado del alta.
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='GoogleWorkspaceProvisioningAuditLog' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.GoogleWorkspaceProvisioningAuditLog (
+                Id           INT              IDENTITY(1,1) PRIMARY KEY,
+                JobId        NVARCHAR(50)     NOT NULL,
+                Matricula    NVARCHAR(100)    NOT NULL,
+                PrimaryEmail NVARCHAR(200)    NOT NULL,
+                Resultado    NVARCHAR(30)     NOT NULL, -- creado | ya_existia | error
+                Detalle      NVARCHAR(500)    NULL,
+                CreatedAt    DATETIME2        NOT NULL DEFAULT SYSUTCDATETIME()
+            );
+            CREATE INDEX IX_GoogleWorkspaceProvisioningAuditLog_JobId ON dbo.GoogleWorkspaceProvisioningAuditLog (JobId);
+            CREATE INDEX IX_GoogleWorkspaceProvisioningAuditLog_CreatedAt ON dbo.GoogleWorkspaceProvisioningAuditLog (CreatedAt DESC);
+        END
+        """;
+    await cmdGwp.ExecuteNonQueryAsync();
 }
 
 // ── Módulo de Vacaciones: tablas y festivos iniciales ────────────────────────
