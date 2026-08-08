@@ -78,7 +78,8 @@ public static class SmtpHelper
     public static async Task<string?> SendAsync(
         SmtpConfig cfg,
         string toEmail, string toName,
-        string subject, string htmlBody)
+        string subject, string htmlBody,
+        IReadOnlyList<EmailAttachment>? attachments = null)
     {
         if (string.IsNullOrWhiteSpace(cfg.Host) ||
             string.IsNullOrWhiteSpace(cfg.From) ||
@@ -95,7 +96,14 @@ public static class SmtpHelper
             msg.From.Add(new MailboxAddress(cfg.FromName, cfg.From));
             msg.To.Add(new MailboxAddress(toName, toEmail));
             msg.Subject = subject;
-            msg.Body    = new TextPart("html") { Text = htmlBody };
+
+            var builder = new BodyBuilder { HtmlBody = htmlBody };
+            if (attachments is { Count: > 0 })
+                foreach (var att in attachments)
+                    builder.Attachments.Add(att.FileName, att.Bytes,
+                        ContentType.Parse(att.ContentType));
+
+            msg.Body = builder.ToMessageBody();
 
             await client.SendAsync(msg);
             await client.DisconnectAsync(true);
@@ -107,6 +115,8 @@ public static class SmtpHelper
         }
     }
 }
+
+public record EmailAttachment(string FileName, byte[] Bytes, string ContentType = "application/octet-stream");
 
 public record SmtpConfig(
     string Host,

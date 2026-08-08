@@ -13,173 +13,156 @@ namespace Pandora.API.Controllers;
 public class AdminController(
     IConfiguration config,
     IWebHostEnvironment env,
+    BackupService backupService,
+    BackupOrchestrator backupOrchestrator,
+    BackupRestoreService backupRestoreService,
+    GoogleDriveBackupUploader driveUploader,
     ILogger<AdminController> logger) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
     // ── GET /api/admin/backup/download ────────────────────────────────────────
     /// <summary>
-    /// Intenta un BACKUP DATABASE nativo (.bak).
-    /// Si el motor no lo soporta (LocalDB, permisos, etc.) genera un .sql ejecutable.
+    /// Sin parámetro: intenta un BACKUP DATABASE nativo (.bak) y cae a .sql si el
+    /// motor no lo soporta (LocalDB, permisos, etc.). Con ?format=sql o ?format=bak
+    /// fuerza ese formato específico — bak falla con 400 si el motor no lo soporta.
     /// </summary>
     [HttpGet("backup/download")]
-    public async Task<IActionResult> DownloadBackup(CancellationToken ct)
+    public async Task<IActionResult> DownloadBackup([FromQuery] string? format, CancellationToken ct)
     {
-        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-
-        await using var conn = Conn();
-        await conn.OpenAsync(ct);
-
-        // ── Obtener nombre de la base de datos ────────────────────────────────
-        string database;
-        await using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = "SELECT DB_NAME()";
-            database = (string)(await cmd.ExecuteScalarAsync(ct) ?? "PandoraDB");
-        }
-
-        // ── Intentar BACKUP DATABASE nativo (.bak) ────────────────────────────
-        // El archivo se escribe en el directorio de trabajo del servidor SQL;
-        // en Docker (same-container) coincide con el del proceso .NET.
-        var backupDir  = Path.Combine(env.ContentRootPath, "backups");
-        Directory.CreateDirectory(backupDir);
-        var backupFile = Path.Combine(backupDir, $"PandoraDB_{timestamp}.bak");
-        // Normalizar separadores para SQL Server en Linux/Windows
-        var sqlPath = backupFile.Replace("\\", "/");
-
         try
         {
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandTimeout = 300;
-            cmd.CommandText = $"""
-                BACKUP DATABASE [{database}]
-                TO DISK = N'{sqlPath.Replace("'", "''")}'
-                WITH FORMAT, INIT,
-                     NAME = N'Pandora Full Backup {timestamp}',
-                     SKIP, NOREWIND, NOUNLOAD, STATS = 10
-                """;
+            var result = format?.ToLowerInvariant() switch
+            {
+                "sql" => await backupService.GenerateSqlAsync(ct),
+                "bak" => await backupService.GenerateBakAsync(ct),
+                _     => await backupService.GenerateAsync(ct),
+            };
 
-            await cmd.ExecuteNonQueryAsync(ct);
-
-            if (!System.IO.File.Exists(backupFile))
-                throw new FileNotFoundException("SQL Server no generó el archivo .bak en la ruta esperada.", backupFile);
-
-            // Leer y borrar el archivo temporal
-            var bytes    = await System.IO.File.ReadAllBytesAsync(backupFile, ct);
-            System.IO.File.Delete(backupFile);
-
-            logger.LogInformation("Backup .bak generado por {User}: {File} ({Kb} KB)",
-                User.Identity?.Name, $"PandoraDB_{timestamp}.bak", bytes.Length / 1024);
-
-            return File(bytes, "application/octet-stream", $"PandoraDB_{timestamp}.bak");
+            logger.LogInformation("Backup ({Method}) descargado manualmente por {User}: {File} ({Kb} KB)",
+                result.Method, User.Identity?.Name, result.FileName, result.Bytes.Length / 1024);
+            return File(result.Bytes, "application/octet-stream", result.FileName);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (format?.ToLowerInvariant() == "bak")
         {
-            // Limpiar archivo parcial si quedó
-            if (System.IO.File.Exists(backupFile))
-                try { System.IO.File.Delete(backupFile); } catch { /* ignorar */ }
-
-            logger.LogWarning(ex,
-                "BACKUP DATABASE no disponible ({Msg}). Generando respaldo SQL ejecutable como fallback.",
-                ex.Message);
-
-            // ── Fallback: script SQL ejecutable (.sql con INSERTs) ─────────────
-            return await GenerateSqlBackupAsync(conn, database, timestamp, ct);
+            logger.LogWarning(ex, "Descarga forzada de .bak falló");
+            return BadRequest(new { error = "El motor de base de datos no soporta BACKUP DATABASE nativo (.bak) en este entorno." });
         }
     }
 
-    // ── Fallback: genera un .sql con INSERTs ejecutables ─────────────────────
-    private async Task<IActionResult> GenerateSqlBackupAsync(
-        SqlConnection conn, string database, string timestamp, CancellationToken ct)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // BACKUP AUTOMÁTICO (correo + Google Drive)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── GET /api/admin/backup/settings ───────────────────────────────────────
+    [HttpGet("backup/settings")]
+    public async Task<IActionResult> GetBackupSettings(CancellationToken ct)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine($"-- Pandora DB Backup (SQL Script)");
-        sb.AppendLine($"-- Base de datos: {database}");
-        sb.AppendLine($"-- Generado: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        sb.AppendLine("-- ============================================================");
-        sb.AppendLine();
-        sb.AppendLine("SET NOCOUNT ON;");
-        sb.AppendLine("BEGIN TRANSACTION;");
-        sb.AppendLine();
-
-        // Obtener tablas
-        var tables = new List<string>();
-        await using (var tCmd = conn.CreateCommand())
+        var s = await backupOrchestrator.LoadSettingsAsync(ct);
+        return Ok(new
         {
-            tCmd.CommandText = """
-                SELECT TABLE_SCHEMA + '.' + TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE = 'BASE TABLE'
-                ORDER BY TABLE_NAME
-                """;
-            await using var tReader = await tCmd.ExecuteReaderAsync(ct);
-            while (await tReader.ReadAsync(ct))
-                tables.Add(tReader.GetString(0));
-        }
+            enabled            = s.GetValueOrDefault("backup_auto_enabled") == "true",
+            recipientEmails    = s.GetValueOrDefault("backup_recipient_emails") ?? "",
+            driveImpersonateEmail = s.GetValueOrDefault("backup_drive_impersonate_email") ?? "",
+            driveConfigured    = driveUploader.IsConfigured,
+        });
+    }
 
-        foreach (var table in tables)
+    // ── POST /api/admin/backup/settings ──────────────────────────────────────
+    [HttpPost("backup/settings")]
+    public async Task<IActionResult> SaveBackupSettings([FromBody] BackupSettingsDto dto, CancellationToken ct)
+    {
+        await backupOrchestrator.SaveSettingAsync("backup_auto_enabled", dto.Enabled ? "true" : "false", ct);
+        await backupOrchestrator.SaveSettingAsync("backup_recipient_emails", dto.RecipientEmails?.Trim() ?? "", ct);
+        await backupOrchestrator.SaveSettingAsync("backup_drive_impersonate_email", dto.DriveImpersonateEmail?.Trim() ?? "", ct);
+
+        logger.LogInformation("Configuración de backup automático actualizada por {User}", User.Identity?.Name);
+        return Ok(new { message = "Configuración de backup automático guardada." });
+    }
+
+    // ── POST /api/admin/backup/run-now ───────────────────────────────────────
+    /// <summary>Ejecuta un ciclo completo (generar + repartir) inmediatamente, sin esperar al cron diario.</summary>
+    [HttpPost("backup/run-now")]
+    public async Task<IActionResult> RunBackupNow(CancellationToken ct)
+    {
+        try
         {
-            try
+            var summary = await backupOrchestrator.RunAsync(ct);
+            logger.LogInformation("Backup ejecutado manualmente ('Ejecutar ahora') por {User}: {File}",
+                User.Identity?.Name, summary.FileName);
+            return Ok(new
             {
-                await using var dCmd = conn.CreateCommand();
-                // Escapar con corchetes: "dbo.Tabla" → "[dbo].[Tabla]"
-                var safeName = string.Join(".", table.Split('.').Select(p => $"[{p}]"));
-                dCmd.CommandText = $"SELECT * FROM {safeName}";
-                await using var r = await dCmd.ExecuteReaderAsync(ct);
-
-                var cols = Enumerable.Range(0, r.FieldCount)
-                    .Select(i => $"[{r.GetName(i)}]").ToList();
-
-                bool hasRows = false;
-                while (await r.ReadAsync(ct))
-                {
-                    if (!hasRows)
-                    {
-                        sb.AppendLine($"-- ── {table} ──────────────────────────────");
-                        hasRows = true;
-                    }
-
-                    var vals = Enumerable.Range(0, r.FieldCount).Select(i =>
-                    {
-                        if (r.IsDBNull(i)) return "NULL";
-                        return r.GetValue(i) switch
-                        {
-                            string s           => $"N'{s.Replace("'", "''")}'",
-                            DateTime d         => $"'{d:yyyy-MM-ddTHH:mm:ss.fff}'",
-                            DateTimeOffset dto => $"'{dto:yyyy-MM-ddTHH:mm:ss.fffzzz}'",
-                            bool b             => b ? "1" : "0",
-                            Guid g             => $"'{g}'",
-                            byte[] arr         => $"0x{Convert.ToHexString(arr)}",
-                            var v              => v?.ToString() ?? "NULL",
-                        };
-                    }).ToList();
-
-                    sb.AppendLine(
-                        $"INSERT INTO {table} ({string.Join(", ", cols)}) " +
-                        $"VALUES ({string.Join(", ", vals)});");
-                }
-
-                if (hasRows) sb.AppendLine();
-            }
-            catch (Exception ex)
-            {
-                sb.AppendLine($"-- ADVERTENCIA: no se pudo exportar {table}: {ex.Message}");
-                sb.AppendLine();
-            }
+                fileName      = summary.FileName,
+                method        = summary.Method,
+                sizeBytes     = summary.SizeBytes,
+                emailedTo     = summary.EmailedTo,
+                emailError    = summary.EmailError,
+                driveUploaded = summary.DriveUploaded,
+                driveError    = summary.DriveError,
+                driveLink     = summary.DriveLink,
+            });
         }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "RunBackupNow falló");
+            return StatusCode(500, new { error = ex.Message });
+        }
+    }
 
-        sb.AppendLine("COMMIT TRANSACTION;");
-        sb.AppendLine($"-- Fin del respaldo — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+    // ── GET /api/admin/backup/history ────────────────────────────────────────
+    [HttpGet("backup/history")]
+    public async Task<IActionResult> GetBackupHistory(CancellationToken ct)
+    {
+        var rows = await backupOrchestrator.GetHistoryAsync(20, ct);
+        return Ok(rows);
+    }
 
-        logger.LogInformation("Respaldo SQL generado por {User} a las {Time}",
-            User.Identity?.Name, DateTime.Now);
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RESTAURAR (recuperar registros faltantes / reemplazo total)
+    // ═══════════════════════════════════════════════════════════════════════════
 
-        var bytes = Encoding.UTF8.GetPreamble()
-            .Concat(Encoding.UTF8.GetBytes(sb.ToString()))
-            .ToArray();
+    // ── POST /api/admin/backup/restore-missing ───────────────────────────────
+    /// <summary>
+    /// Modo seguro: sube un .sql (generado por Pandora) y solo repone las filas
+    /// que ya no existan. No borra ni modifica nada existente.
+    /// </summary>
+    [HttpPost("backup/restore-missing")]
+    [RequestSizeLimit(200 * 1024 * 1024)] // 200 MB
+    public async Task<IActionResult> RestoreMissing(IFormFile file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0) return BadRequest(new { error = "Archivo .sql requerido." });
+        if (!file.FileName.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { error = "Se esperaba un archivo .sql (el generado por 'Descargar Backup')." });
 
-        return File(bytes, "application/octet-stream", $"PandoraDB_{timestamp}.sql");
+        await using var stream = file.OpenReadStream();
+        var result = await backupRestoreService.RestoreMissingAsync(stream, ct);
+
+        logger.LogInformation("RestoreMissing ejecutado por {User}: {Ok} — {Msg}",
+            User.Identity?.Name, result.Success, result.Message);
+
+        return result.Success ? Ok(new { message = result.Message }) : BadRequest(new { error = result.Message });
+    }
+
+    // ── POST /api/admin/backup/restore-full ──────────────────────────────────
+    /// <summary>
+    /// Modo destructivo: sube un .bak y reemplaza TODA la base de datos actual.
+    /// Irreversible — cualquier dato creado después de ese backup se pierde.
+    /// </summary>
+    [HttpPost("backup/restore-full")]
+    [RequestSizeLimit(500 * 1024 * 1024)] // 500 MB
+    public async Task<IActionResult> RestoreFull(IFormFile file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0) return BadRequest(new { error = "Archivo .bak requerido." });
+        if (!file.FileName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { error = "Se esperaba un archivo .bak (backup nativo de SQL Server)." });
+
+        await using var stream = file.OpenReadStream();
+        var result = await backupRestoreService.RestoreFullAsync(stream, env, ct);
+
+        logger.LogWarning("RestoreFull (REEMPLAZO TOTAL) ejecutado por {User}: {Ok} — {Msg}",
+            User.Identity?.Name, result.Success, result.Message);
+
+        return result.Success ? Ok(new { message = result.Message }) : BadRequest(new { error = result.Message });
     }
 
     // ── POST /api/admin/fix-encoding ──────────────────────────────────────────
@@ -507,3 +490,6 @@ public record SmtpSettingsDto(
 );
 
 public record SmtpTestDto(string? TestEmail);
+
+// ── DTO Backup automático ────────────────────────────────────────────────────
+public record BackupSettingsDto(bool Enabled, string? RecipientEmails, string? DriveImpersonateEmail);

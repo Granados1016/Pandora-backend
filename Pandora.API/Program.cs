@@ -152,6 +152,13 @@ builder.Services.AddHostedService<Pandora.API.Services.TenantLicenseAlertService
 builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
 builder.Services.AddHostedService<Pandora.API.Services.CalendarReminderService>();
 
+// ── Backup de base de datos (manual + automático) ─────────────────────────────
+builder.Services.AddScoped<Pandora.API.Services.BackupService>();
+builder.Services.AddScoped<Pandora.API.Services.GoogleDriveBackupUploader>();
+builder.Services.AddScoped<Pandora.API.Services.BackupOrchestrator>();
+builder.Services.AddScoped<Pandora.API.Services.BackupRestoreService>();
+builder.Services.AddHostedService<Pandora.API.Services.AutomatedBackupWorker>();
+
 // ── Push Notifications ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<Pandora.API.Services.PushService>();
 
@@ -1729,6 +1736,32 @@ using (var scopeEnc = app.Services.CreateScope())
         END
         """;
     await cmdCalNotif.ExecuteNonQueryAsync();
+}
+
+// ── Tabla BackupHistory (auditoría de backups automáticos) ───────────────────
+{
+    await using var connBkp = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connBkp.OpenAsync();
+    await using var cmdBkp = connBkp.CreateCommand();
+    cmdBkp.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='BackupHistory' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.BackupHistory (
+                Id            INT IDENTITY PRIMARY KEY,
+                FileName      NVARCHAR(200)  NOT NULL,
+                Method        NVARCHAR(10)   NOT NULL,  -- 'bak' | 'sql'
+                SizeBytes     BIGINT         NOT NULL,
+                EmailedTo     NVARCHAR(500)  NULL,
+                EmailError    NVARCHAR(500)  NULL,
+                DriveUploaded BIT            NOT NULL DEFAULT 0,
+                DriveError    NVARCHAR(500)  NULL,
+                DriveLink     NVARCHAR(500)  NULL,
+                RanAt         DATETIME2      NOT NULL DEFAULT GETUTCDATE()
+            );
+        END
+        """;
+    await cmdBkp.ExecuteNonQueryAsync();
 }
 
 await app.RunAsync();

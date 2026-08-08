@@ -1,6 +1,9 @@
 # Secretos
 .env
 *.env.local
+appsettings.Development.json
+appsettings.Local.json
+**/google-service-account*.json
 
 # OS
 .DS_Store
