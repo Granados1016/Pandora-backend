@@ -10,6 +10,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.IdentityModel.Tokens;
 using Pandora.API.Services;
 using Pandora.Application.DTOs;
+using Pandora.Application.Features.Users;
 using Pandora.Application.Interfaces;
 
 namespace Pandora.API.Controllers;
@@ -378,7 +379,13 @@ public class AuthController(
                 return BadRequest("Token inválido o expirado.");
 
             // Actualizar contraseña
-            string hash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword);
+            // IMPORTANTE: usar el mismo esquema (PBKDF2 "salt:hash") que
+            // UserService.HashPassword/VerifyPassword — no BCrypt. El login
+            // real (Pandora.Infrastructure.Services.JwtService) verifica vía
+            // UserService.VerifyPassword, que espera ese formato exacto;
+            // un hash BCrypt no tiene ':' y siempre falla la verificación,
+            // dejando al usuario bloqueado tras usar "Olvidé mi contraseña".
+            string hash = UserService.HashPassword(req.NewPassword);
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """

@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Pandora.API.Services;
-using BCrypt.Net;
+using Pandora.Application.Features.Users;
 
 namespace Pandora.API.Controllers;
 
@@ -145,7 +145,9 @@ public class TenantsController(IConfiguration config, ILogger<TenantsController>
                 cmdAdmin.Parameters.AddWithValue("@User",     adminUsername);
                 cmdAdmin.Parameters.AddWithValue("@FullName", $"Admin — {dto.DisplayName}");
                 cmdAdmin.Parameters.AddWithValue("@Email",    (object?)dto.ContactEmail?.Trim() ?? DBNull.Value);
-                cmdAdmin.Parameters.AddWithValue("@Hash",     BCrypt.Net.BCrypt.HashPassword(adminPassword));
+                // PBKDF2 "salt:hash" — mismo esquema que UserService.VerifyPassword
+                // usa en el login real (Pandora.Infrastructure.Services.JwtService).
+                cmdAdmin.Parameters.AddWithValue("@Hash",     UserService.HashPassword(adminPassword));
                 cmdAdmin.Parameters.AddWithValue("@TenantId", id);
                 await cmdAdmin.ExecuteNonQueryAsync(ct);
 

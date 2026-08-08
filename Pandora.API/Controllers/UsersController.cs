@@ -1,4 +1,3 @@
-using BCrypt.Net;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -467,11 +466,14 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             }
 
             if (hash == null) return Unauthorized();
-            if (!BCrypt.Net.BCrypt.Verify(dto.CurrentPassword, hash))
+            // PBKDF2 "salt:hash" — mismo esquema que UserService.VerifyPassword
+            // usa en el login real (Pandora.Infrastructure.Services.JwtService).
+            // BCrypt.Verify aquí siempre fallaría contra un hash PBKDF2 (sin ':').
+            if (!UserService.VerifyPassword(dto.CurrentPassword, hash))
                 return BadRequest("La contraseña actual es incorrecta.");
 
             // Actualizar contraseña
-            var newHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
+            var newHash = UserService.HashPassword(dto.NewPassword);
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = "UPDATE dbo.AppUsers SET PasswordHash = @Hash, UpdatedAt = GETUTCDATE() WHERE LOWER(Username) = LOWER(@User)";
