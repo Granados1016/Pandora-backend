@@ -1326,7 +1326,7 @@ public class TicketsController(
                       <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Área</td><td style="padding:8px">{area}</td></tr>
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Solicitante</td><td style="padding:8px">{submittedBy}{(string.IsNullOrWhiteSpace(submittedByEmail) ? "" : $" &lt;{submittedByEmail}&gt;")}</td></tr>
                     </table>
-                    <p style="margin-top:16px;font-size:12px;color:#999">Por favor atiende este ticket a la brevedad. — Pandora HelpDesk iMET</p>
+                    <p style="margin-top:16px;font-size:12px;color:#999">Por favor atiende este ticket a la brevedad. — Pandora HelpDesk</p>
                   </div>
                 </div></body></html>
                 """;
@@ -1358,7 +1358,7 @@ public class TicketsController(
                     <div style="text-align:center;margin-bottom:24px">
                       <a href="{ticketUrl}" style="display:inline-block;background:#1a237e;color:white;padding:13px 32px;border-radius:8px;text-decoration:none;font-weight:700;font-size:14px">Ver mi ticket →</a>
                     </div>
-                    <p style="font-size:12px;color:#999;text-align:center;margin:0">Pandora HelpDesk — iMET</p>
+                    <p style="font-size:12px;color:#999;text-align:center;margin:0">Pandora HelpDesk</p>
                   </div>
                 </div></body></html>
                 """;
@@ -1390,7 +1390,7 @@ public class TicketsController(
                     <div style="margin-top:20px;text-align:center">
                       <a href="{FrontendUrl}/tickets" style="background:#1a237e;color:white;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Ver tickets →</a>
                     </div>
-                    <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora — Sistema de Gestión iMET</p>
+                    <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora — Sistema de Gestión</p>
                   </div>
                 </div></body></html>
                 """;
@@ -1416,7 +1416,7 @@ public class TicketsController(
                       <strong>Motivo de la espera:</strong><br/>{delayNote}
                     </div>
                     <p>Nos comunicaremos contigo en cuanto tengamos una actualización. Disculpa la espera.</p>
-                    <p style="font-size:12px;color:#999;margin-top:20px">Pandora — Sistema de Gestión iMET</p>
+                    <p style="font-size:12px;color:#999;margin-top:20px">Pandora — Sistema de Gestión</p>
                   </div>
                 </div></body></html>
                 """;
@@ -1442,7 +1442,7 @@ public class TicketsController(
                       <strong>Resolución:</strong><br/>{closeNote}
                     </div>
                     <p>Gracias por usar Pandora Tickets. Si el problema persiste, puedes abrir un nuevo ticket.</p>
-                    <p style="font-size:12px;color:#999;margin-top:20px">Pandora — Sistema de Gestión iMET</p>
+                    <p style="font-size:12px;color:#999;margin-top:20px">Pandora — Sistema de Gestión</p>
                   </div>
                 </div></body></html>
                 """;

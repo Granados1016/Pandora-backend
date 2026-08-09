@@ -994,7 +994,7 @@ public class VacacionesController(
                   <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1)">
                     <div style="background:#1a237e;padding:24px;text-align:center">
                       <h1 style="color:white;margin:0;font-size:22px">PANDORA</h1>
-                      <p style="color:rgba(255,255,255,.7);margin:4px 0 0;font-size:13px">Sistema de Gestión — iMET</p>
+                      <p style="color:rgba(255,255,255,.7);margin:4px 0 0;font-size:13px">Sistema de Gestión</p>
                     </div>
                     <div style="padding:28px">
                       <h2 style="color:{color};font-size:18px;margin:0 0 16px">{icon} Solicitud {status.ToLower()}</h2>
@@ -1008,7 +1008,7 @@ public class VacacionesController(
                       <p style="color:#888;font-size:12px">Puedes revisar el estado en el módulo de Vacaciones.</p>
                     </div>
                     <div style="background:#f9f9f9;border-top:1px solid #eee;padding:14px 28px;text-align:center">
-                      <p style="color:#aaa;font-size:11px;margin:0">Pandora — Coordinación de TI | iMET</p>
+                      <p style="color:#aaa;font-size:11px;margin:0">Pandora — Coordinación de TI</p>
                     </div>
                   </div>
                 </body></html>

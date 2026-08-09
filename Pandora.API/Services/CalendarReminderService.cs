@@ -130,8 +130,8 @@ public class CalendarReminderService(
                     msg.From.Add(new MailboxAddress(fromName, from));
                     msg.To.Add(new MailboxAddress(name, email));
                     msg.Subject = task.ReminderType == "1h"
-                        ? $"[iMET] ⏰ Tu reunión '{task.Title}' comienza en 1 hora"
-                        : $"[iMET] 📅 Recordatorio: mañana tienes '{task.Title}'";
+                        ? $"[Pandora] ⏰ Tu reunión '{task.Title}' comienza en 1 hora"
+                        : $"[Pandora] 📅 Recordatorio: mañana tienes '{task.Title}'";
 
                     msg.Body = new TextPart("html")
                     {
@@ -260,7 +260,7 @@ public class CalendarReminderService(
                   {meetRow}
                 </table>
                 <p style="margin-top:24px;font-size:12px;color:#888">
-                  Este recordatorio fue generado automáticamente por <strong>Pandora — Sistema de Gestión iMET</strong>.<br/>
+                  Este recordatorio fue generado automáticamente por <strong>Pandora — Sistema de Gestión</strong>.<br/>
                   Para gestionar tus reservaciones, accede a Pandora Calendar.
                 </p>
               </div>

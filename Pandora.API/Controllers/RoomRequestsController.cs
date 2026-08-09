@@ -360,7 +360,7 @@ public class RoomRequestsController(
                       </a>
                     </div>
                     <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">
-                      Pandora — Sistema de Gestión iMET · Solicitud #{requestId.ToString()[..8]}
+                      Pandora — Sistema de Gestión · Solicitud #{requestId.ToString()[..8]}
                     </p>
                   </div>
                 </div>

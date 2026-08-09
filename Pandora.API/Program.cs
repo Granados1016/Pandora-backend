@@ -63,7 +63,7 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title       = "Pandora API",
         Version     = "v1",
-        Description = "Sistema de envio masivo de correos - iMET"
+        Description = "Sistema de gestión Pandora — API"
     });
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
@@ -331,8 +331,8 @@ using (var scope = app.Services.CreateScope())
         db.AppUsers.Add(new AppUser
         {
             Username     = adminUsername.ToLower(),
-            FullName     = "Administrador iMET",
-            Email        = "sistemas@imet.edu.mx",
+            FullName     = "Administrador Pandora",
+            Email        = builder.Configuration["AdminUser:Email"] ?? "admin@pandora.local",
             PasswordHash = UserService.HashPassword(adminPassword),
             Role         = "Admin",
             Modules      = ModuleAccess.All,

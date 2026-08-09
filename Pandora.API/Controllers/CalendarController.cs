@@ -777,8 +777,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             var endStr   = mxEnd.ToString("HH:mm");
 
             var subject = isUpdate
-                ? $"[iMET] Reservación actualizada: {dto.Title}"
-                : $"[iMET] Nueva reservación de sala: {dto.Title}";
+                ? $"[Pandora] Reservación actualizada: {dto.Title}"
+                : $"[Pandora] Nueva reservación de sala: {dto.Title}";
 
             using var smtpClient = new SmtpClient();
             await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
@@ -849,7 +849,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
               </div>
               <div style="border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px">
                 <p>Hola <strong>{recipientName}</strong>,</p>
-                <p>Te informamos sobre la siguiente reservación de sala en el sistema Pandora de iMET:</p>
+                <p>Te informamos sobre la siguiente reservación de sala en el sistema Pandora:</p>
                 <table style="width:100%;border-collapse:collapse">
                   <tr style="border-bottom:1px solid #eee">
                     <td style="padding:8px;font-weight:bold;color:#555;width:40%">Evento</td>
@@ -875,7 +875,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                   {descRow}
                 </table>
                 <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">
-                  Pandora — Sistema de Gestión iMET · Reservación #{reservationId.ToString()[..8]}
+                  Pandora — Sistema de Gestión · Reservación #{reservationId.ToString()[..8]}
                 </p>
               </div>
             </div>

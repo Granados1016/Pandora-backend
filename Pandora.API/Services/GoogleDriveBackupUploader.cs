@@ -8,7 +8,7 @@ namespace Pandora.API.Services;
 /// <summary>
 /// Sube el archivo de backup a Google Drive usando una cuenta de servicio con
 /// delegación de dominio (domain-wide delegation), impersonando la cuenta que
-/// aloja los backups (ej. sistemas@imet.edu.mx).
+/// aloja los backups (ej. sistemas@tuempresa.com).
 ///
 /// Credenciales: se leen de (en este orden)
 ///   1) GoogleDrive:ServiceAccountJson  — el JSON completo de la cuenta de servicio

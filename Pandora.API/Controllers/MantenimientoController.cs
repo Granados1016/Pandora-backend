@@ -554,8 +554,8 @@ public class MantenimientoController(
             msg.From.Add(new MimeKit.MailboxAddress(fromName, from));
             msg.To.Add(new MimeKit.MailboxAddress(dto.TecnicoAsignado ?? "Técnico", dto.EmailTecnico!));
             msg.Subject = isNew
-                ? $"[iMET] Nuevo mantenimiento asignado: {folio}"
-                : $"[iMET] Mantenimiento actualizado: {folio}";
+                ? $"[Pandora] Nuevo mantenimiento asignado: {folio}"
+                : $"[Pandora] Mantenimiento actualizado: {folio}";
 
             var fecha = dto.FechaProgramada.ToString("dd/MM/yyyy HH:mm");
             msg.Body = new MimeKit.TextPart("html") { Text = $"""
@@ -576,7 +576,7 @@ public class MantenimientoController(
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Fecha programada</td><td style="padding:8px">{fecha}</td></tr>
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Prioridad</td><td style="padding:8px">{dto.Prioridad}</td></tr>
                     </table>
-                    <p style="margin-top:20px;font-size:12px;color:#888">Pandora — Sistema de Gestión iMET</p>
+                    <p style="margin-top:20px;font-size:12px;color:#888">Pandora — Sistema de Gestión</p>
                   </div>
                 </div>
                 </body></html>

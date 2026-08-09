@@ -358,7 +358,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                 ));
 
             var bytes = BuildExcel(rows);
-            string fname = $"iMET_Control_Licencias_{DateTime.Now:yyyy-MM-dd}.xlsx";
+            string fname = $"Pandora_Control_Licencias_{DateTime.Now:yyyy-MM-dd}.xlsx";
             return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fname);
         }
         catch (Exception ex) { logger.LogError(ex, "ExportarExcel licencias"); return StatusCode(500, ex.Message); }
@@ -596,7 +596,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         var ws = wb.Worksheets.Add("Control de Licencias");
 
         ws.Range("A1:K1").Merge();
-        ws.Cell("A1").Value = "iMET — CONTROL DE LICENCIAS Y PAGOS DE PLATAFORMAS";
+        ws.Cell("A1").Value = "CONTROL DE LICENCIAS Y PAGOS DE PLATAFORMAS";
         ws.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(14).Font.SetFontColor(XLColor.White)
             .Fill.SetBackgroundColor(cAzul)
             .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
@@ -679,7 +679,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         // ── Hoja 2: Resumen por Área ──────────────────────────────────────────
         var ws2 = wb.Worksheets.Add("Resumen por Área");
         ws2.Range("A1:F1").Merge();
-        ws2.Cell("A1").Value = "iMET — RESUMEN EJECUTIVO DE LICENCIAS";
+        ws2.Cell("A1").Value = "RESUMEN EJECUTIVO DE LICENCIAS";
         ws2.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(13).Font.SetFontColor(XLColor.White)
             .Fill.SetBackgroundColor(cAzul).Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
         ws2.Row(1).Height = 28;
@@ -750,7 +750,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         // ── Hoja 3: Calendario de Pagos ───────────────────────────────────────
         var ws3 = wb.Worksheets.Add("Calendario de Pagos");
         ws3.Range("A1:N1").Merge();
-        ws3.Cell("A1").Value = $"iMET — CALENDARIO ANUAL DE PAGOS DE LICENCIAS  |  {DateTime.Now.Year}";
+        ws3.Cell("A1").Value = $"CALENDARIO ANUAL DE PAGOS DE LICENCIAS  |  {DateTime.Now.Year}";
         ws3.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(13).Font.SetFontColor(XLColor.White)
             .Fill.SetBackgroundColor(cAzul).Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
         ws3.Row(1).Height = 28;
