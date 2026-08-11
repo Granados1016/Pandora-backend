@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -202,6 +203,124 @@ public class GoogleWorkspaceProvisioningController(
             });
         }
         return Ok(results);
+    }
+
+    // ── GET /api/google-workspace-provisioning/jobs/{id}/audit/exportar ─────
+    /// <summary>Exporta el resultado del job a Excel — mismo diseño que Licencias.</summary>
+    [HttpGet("api/google-workspace-provisioning/jobs/{id}/audit/exportar")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ExportJobAudit(string id, CancellationToken ct)
+    {
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT Matricula, Nombre, Apellidos, PrimaryEmail, Resultado, Detalle, CreatedAt
+            FROM dbo.GoogleWorkspaceProvisioningAuditLog
+            WHERE JobId = @JobId
+            ORDER BY CreatedAt
+            """;
+        cmd.Parameters.AddWithValue("@JobId", id);
+
+        var rows = new List<AuditRow>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new AuditRow(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
+                reader.GetDateTime(6)
+            ));
+        }
+
+        var bytes = BuildAuditExcel(rows);
+        string fname = $"Pandora_Alta_Masiva_GoogleWorkspace_{DateTime.Now:yyyy-MM-dd}.xlsx";
+        return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fname);
+    }
+
+    private record AuditRow(string Matricula, string Nombre, string Apellidos, string PrimaryEmail, string Resultado, string Detalle, DateTime CreatedAt);
+
+    /// <summary>Mismo estilo visual que LicenciasController.BuildExcel — encabezado azul, filas coloreadas por resultado.</summary>
+    private static byte[] BuildAuditExcel(List<AuditRow> rows)
+    {
+        using var wb = new XLWorkbook();
+
+        var cAzul     = XLColor.FromHtml("#1A237E");
+        var cMedio    = XLColor.FromHtml("#3949AB");
+        var cVerde    = XLColor.FromHtml("#E8F5E9");
+        var cVerdeTx  = XLColor.FromHtml("#2E7D32");
+        var cGris     = XLColor.FromHtml("#F5F5F5");
+        var cGrisTx   = XLColor.FromHtml("#757575");
+        var cRojo     = XLColor.FromHtml("#FFEBEE");
+        var cRojoTx   = XLColor.FromHtml("#C62828");
+
+        var ws = wb.Worksheets.Add("Alta masiva");
+
+        ws.Range("A1:F1").Merge();
+        ws.Cell("A1").Value = "ALTA MASIVA DE CUENTAS — GOOGLE WORKSPACE";
+        ws.Cell("A1").Style.Font.SetBold(true).Font.SetFontSize(14).Font.SetFontColor(XLColor.White)
+            .Fill.SetBackgroundColor(cAzul)
+            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
+            .Alignment.SetVertical(XLAlignmentVerticalValues.Center);
+        ws.Row(1).Height = 30;
+
+        ws.Range("A2:F2").Merge();
+        ws.Cell("A2").Value = $"Pandora  |  Generado: {DateTime.Now:dd/MM/yyyy HH:mm}";
+        ws.Cell("A2").Style.Font.SetItalic(true).Font.SetFontColor(XLColor.White)
+            .Fill.SetBackgroundColor(cMedio)
+            .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center);
+        ws.Row(2).Height = 20;
+
+        string[] hdrs = ["Matrícula", "Nombre", "Apellidos", "Correo", "Resultado", "Detalle"];
+        for (int i = 0; i < hdrs.Length; i++)
+        {
+            var c = ws.Cell(3, i + 1);
+            c.Value = hdrs[i];
+            c.Style.Font.SetBold(true).Font.SetFontColor(XLColor.White)
+                .Fill.SetBackgroundColor(cAzul)
+                .Alignment.SetHorizontal(XLAlignmentHorizontalValues.Center)
+                .Border.SetOutsideBorder(XLBorderStyleValues.Thin)
+                .Border.SetOutsideBorderColor(XLColor.White);
+        }
+        ws.Row(3).Height = 22;
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            int er = i + 4;
+            ws.Cell(er, 1).Value = row.Matricula;
+            ws.Cell(er, 2).Value = row.Nombre;
+            ws.Cell(er, 3).Value = row.Apellidos;
+            ws.Cell(er, 4).Value = row.PrimaryEmail;
+            ws.Cell(er, 5).Value = row.Resultado switch
+            {
+                "creado" => "Creado",
+                "ya_existia" => "Ya existía",
+                "error" => "Error",
+                _ => row.Resultado,
+            };
+            ws.Cell(er, 6).Value = row.Detalle;
+
+            var (bg, tx) = row.Resultado switch
+            {
+                "creado" => (cVerde, cVerdeTx),
+                "ya_existia" => (cGris, cGrisTx),
+                "error" => (cRojo, cRojoTx),
+                _ => (XLColor.White, XLColor.Black),
+            };
+            ws.Range(er, 1, er, 6).Style.Fill.SetBackgroundColor(bg).Font.SetFontColor(tx);
+        }
+
+        ws.Columns().AdjustToContents();
+        ws.SheetView.FreezeRows(3);
+
+        using var stream = new MemoryStream();
+        wb.SaveAs(stream);
+        return stream.ToArray();
     }
 
     // ── POST /api/internal/google-workspace-provisioning/jobs ───────────────
