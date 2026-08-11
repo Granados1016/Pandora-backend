@@ -1090,6 +1090,8 @@ using (var scopeGwp = app.Services.CreateScope())
                 Id           INT              IDENTITY(1,1) PRIMARY KEY,
                 JobId        NVARCHAR(50)     NOT NULL,
                 Matricula    NVARCHAR(100)    NOT NULL,
+                Nombre       NVARCHAR(100)    NULL,
+                Apellidos    NVARCHAR(100)    NULL,
                 PrimaryEmail NVARCHAR(200)    NOT NULL,
                 Resultado    NVARCHAR(30)     NOT NULL, -- creado | ya_existia | error
                 Detalle      NVARCHAR(500)    NULL,
@@ -1097,6 +1099,17 @@ using (var scopeGwp = app.Services.CreateScope())
             );
             CREATE INDEX IX_GoogleWorkspaceProvisioningAuditLog_JobId ON dbo.GoogleWorkspaceProvisioningAuditLog (JobId);
             CREATE INDEX IX_GoogleWorkspaceProvisioningAuditLog_CreatedAt ON dbo.GoogleWorkspaceProvisioningAuditLog (CreatedAt DESC);
+        END
+
+        -- Nombre/Apellidos agregados después del primer despliegue — para
+        -- instalaciones que ya tenían la tabla creada sin estas columnas.
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.GoogleWorkspaceProvisioningAuditLog') AND name = 'Nombre')
+        BEGIN
+            ALTER TABLE dbo.GoogleWorkspaceProvisioningAuditLog ADD Nombre NVARCHAR(100) NULL;
+        END
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.GoogleWorkspaceProvisioningAuditLog') AND name = 'Apellidos')
+        BEGIN
+            ALTER TABLE dbo.GoogleWorkspaceProvisioningAuditLog ADD Apellidos NVARCHAR(100) NULL;
         END
         """;
     await cmdGwp.ExecuteNonQueryAsync();

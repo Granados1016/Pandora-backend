@@ -179,7 +179,7 @@ public class GoogleWorkspaceProvisioningController(
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT Matricula, PrimaryEmail, Resultado, Detalle, CreatedAt
+            SELECT Matricula, Nombre, Apellidos, PrimaryEmail, Resultado, Detalle, CreatedAt
             FROM dbo.GoogleWorkspaceProvisioningAuditLog
             WHERE JobId = @JobId
             ORDER BY CreatedAt
@@ -193,10 +193,12 @@ public class GoogleWorkspaceProvisioningController(
             results.Add(new
             {
                 matricula = reader.GetString(0),
-                primaryEmail = reader.GetString(1),
-                resultado = reader.GetString(2),
-                detalle = reader.IsDBNull(3) ? null : reader.GetString(3),
-                createdAt = reader.GetDateTime(4),
+                nombre = reader.IsDBNull(1) ? null : reader.GetString(1),
+                apellidos = reader.IsDBNull(2) ? null : reader.GetString(2),
+                primaryEmail = reader.GetString(3),
+                resultado = reader.GetString(4),
+                detalle = reader.IsDBNull(5) ? null : reader.GetString(5),
+                createdAt = reader.GetDateTime(6),
             });
         }
         return Ok(results);
@@ -268,11 +270,13 @@ public class GoogleWorkspaceProvisioningController(
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO dbo.GoogleWorkspaceProvisioningAuditLog (JobId, Matricula, PrimaryEmail, Resultado, Detalle, CreatedAt)
-            VALUES (@JobId, @Matricula, @PrimaryEmail, @Resultado, @Detalle, SYSUTCDATETIME());
+            INSERT INTO dbo.GoogleWorkspaceProvisioningAuditLog (JobId, Matricula, Nombre, Apellidos, PrimaryEmail, Resultado, Detalle, CreatedAt)
+            VALUES (@JobId, @Matricula, @Nombre, @Apellidos, @PrimaryEmail, @Resultado, @Detalle, SYSUTCDATETIME());
             """;
         cmd.Parameters.AddWithValue("@JobId", S("jobId"));
         cmd.Parameters.AddWithValue("@Matricula", S("matricula"));
+        cmd.Parameters.AddWithValue("@Nombre", string.IsNullOrWhiteSpace(S("nombre")) ? DBNull.Value : S("nombre"));
+        cmd.Parameters.AddWithValue("@Apellidos", string.IsNullOrWhiteSpace(S("apellidos")) ? DBNull.Value : S("apellidos"));
         cmd.Parameters.AddWithValue("@PrimaryEmail", S("primaryEmail"));
         cmd.Parameters.AddWithValue("@Resultado", S("resultado"));
         cmd.Parameters.AddWithValue("@Detalle", (object?)S("detalle") ?? DBNull.Value);
