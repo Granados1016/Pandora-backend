@@ -205,6 +205,49 @@ public class GoogleWorkspaceProvisioningController(
         return Ok(results);
     }
 
+    // ── GET /api/google-workspace-provisioning/audit/buscar ─────────────────
+    /// <summary>
+    /// Búsqueda global por matrícula/nombre/apellidos/correo, sin importar
+    /// en qué lote (job) se creó — para que el admin pueda confirmar si un
+    /// alumno ya tiene cuenta sin acordarse cuándo se subió.
+    /// </summary>
+    [HttpGet("api/google-workspace-provisioning/audit/buscar")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> BuscarAudit([FromQuery] string q, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
+            return BadRequest(new { error = "Escribe al menos 2 caracteres para buscar." });
+
+        await using var conn = Conn();
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT TOP 100 JobId, Matricula, Nombre, Apellidos, PrimaryEmail, Resultado, Detalle, CreatedAt
+            FROM dbo.GoogleWorkspaceProvisioningAuditLog
+            WHERE Matricula LIKE @Q OR Nombre LIKE @Q OR Apellidos LIKE @Q OR PrimaryEmail LIKE @Q
+            ORDER BY CreatedAt DESC
+            """;
+        cmd.Parameters.AddWithValue("@Q", $"%{q.Trim()}%");
+
+        var results = new List<object>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new
+            {
+                jobId = reader.GetString(0),
+                matricula = reader.GetString(1),
+                nombre = reader.IsDBNull(2) ? null : reader.GetString(2),
+                apellidos = reader.IsDBNull(3) ? null : reader.GetString(3),
+                primaryEmail = reader.GetString(4),
+                resultado = reader.GetString(5),
+                detalle = reader.IsDBNull(6) ? null : reader.GetString(6),
+                createdAt = reader.GetDateTime(7),
+            });
+        }
+        return Ok(results);
+    }
+
     // ── GET /api/google-workspace-provisioning/jobs/{id}/audit/exportar ─────
     /// <summary>Exporta el resultado del job a Excel — mismo diseño que Licencias.</summary>
     [HttpGet("api/google-workspace-provisioning/jobs/{id}/audit/exportar")]
