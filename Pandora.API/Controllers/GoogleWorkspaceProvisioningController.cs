@@ -1,4 +1,5 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Linq;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -129,6 +130,74 @@ public class GoogleWorkspaceProvisioningController(
         {
             // Sanitizado: no se expone la URL interna ni detalles de red al frontend.
             logger.LogError(ex, "No se pudo contactar al microservicio google-workspace-provisioning");
+            return StatusCode(502, new { error = "El servicio de aprovisionamiento no está disponible. Intenta de nuevo en unos minutos." });
+        }
+    }
+
+    // ── GET /api/google-workspace-provisioning/directory/buscar ─────────────
+    /// <summary>
+    /// Busca en el directorio REAL de Google Workspace (proxy al
+    /// microservicio Node) — a diferencia de <see cref="BuscarAudit"/>, esto
+    /// incluye cuentas creadas antes de que existiera este módulo, porque
+    /// consulta a Google directamente en vez del historial propio de Pandora.
+    /// </summary>
+    [HttpGet("api/google-workspace-provisioning/directory/buscar")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> BuscarDirectorio([FromQuery] string q, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(q) || q.Trim().Length < 2)
+            return BadRequest(new { error = "Escribe al menos 2 caracteres para buscar." });
+
+        if (string.IsNullOrWhiteSpace(ServiceKey) || string.IsNullOrWhiteSpace(ServiceUrl))
+        {
+            logger.LogError("GoogleWorkspaceProvisioning:ServiceKey/ServiceUrl no configurados.");
+            return StatusCode(500, new { error = "Integración no configurada." });
+        }
+
+        var adminUsername = User.FindFirstValue(ClaimTypes.Name) ?? "admin";
+        var token = BuildServiceToken(adminUsername);
+
+        try
+        {
+            using var client = httpClientFactory.CreateClient();
+            client.BaseAddress = new Uri(ServiceUrl);
+            client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            var query = Uri.EscapeDataString(q.Trim());
+            using var response = await client.GetAsync($"/api/v1/provisioning/users?q={query}", ct);
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning(
+                    "google-workspace-provisioning respondió {Status} al buscar en el directorio", response.StatusCode);
+                return StatusCode((int)response.StatusCode, System.Text.Json.JsonSerializer.Deserialize<JsonElement>(responseBody));
+            }
+
+            var users = System.Text.Json.JsonSerializer.Deserialize<List<JsonElement>>(responseBody) ?? [];
+            var mapped = users.Select(u =>
+            {
+                string email = u.GetProperty("primaryEmail").GetString() ?? "";
+                string matricula = email.Contains('@') ? email[..email.IndexOf('@')] : email;
+                bool suspended = u.TryGetProperty("suspended", out var s) && s.GetBoolean();
+                return new
+                {
+                    matricula,
+                    nombre = u.TryGetProperty("givenName", out var gn) ? gn.GetString() : null,
+                    apellidos = u.TryGetProperty("familyName", out var fn) ? fn.GetString() : null,
+                    primaryEmail = email,
+                    resultado = suspended ? "suspendida" : "ya_existia",
+                    detalle = suspended ? "Cuenta suspendida en Google Workspace" : (string?)null,
+                    createdAt = u.TryGetProperty("creationTime", out var ct2) ? ct2.GetString() : null,
+                };
+            }).ToList();
+
+            return Ok(mapped);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "No se pudo contactar al microservicio google-workspace-provisioning (búsqueda de directorio)");
             return StatusCode(502, new { error = "El servicio de aprovisionamiento no está disponible. Intenta de nuevo en unos minutos." });
         }
     }
