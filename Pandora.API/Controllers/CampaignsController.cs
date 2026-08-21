@@ -110,8 +110,8 @@ public class CampaignsController(
         sentCount       = r.IsDBNull(r.GetOrdinal("SentCount"))       ? 0 : r.GetInt32(r.GetOrdinal("SentCount")),
         failedCount     = r.IsDBNull(r.GetOrdinal("FailedCount"))     ? 0 : r.GetInt32(r.GetOrdinal("FailedCount")),
         isDeleted       = r.GetBoolean(r.GetOrdinal("IsDeleted")),
-        createdAt       = r.GetDateTime(r.GetOrdinal("CreatedAt")),
-        sentAt          = r.IsDBNull(r.GetOrdinal("SentAt"))  ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("SentAt")),
+        createdAt       = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("CreatedAt")), DateTimeKind.Utc),
+        sentAt          = r.IsDBNull(r.GetOrdinal("SentAt"))  ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("SentAt")), DateTimeKind.Utc),
         templateId      = r.IsDBNull(r.GetOrdinal("TemplateId")) ? (Guid?)null : r.GetGuid(r.GetOrdinal("TemplateId")),
     };
 
@@ -633,8 +633,8 @@ public class CampaignsController(
                     username     = r.IsDBNull(3) ? null : r.GetString(3),
                     status       = r.IsDBNull(4) ? "Pending" : r.GetString(4),
                     errorMessage = r.IsDBNull(5) ? null : r.GetString(5),
-                    sentAt       = r.IsDBNull(6) ? (DateTime?)null : r.GetDateTime(6),
-                    readAt       = r.IsDBNull(7) ? (DateTime?)null : r.GetDateTime(7),
+                    sentAt       = r.IsDBNull(6) ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(6), DateTimeKind.Utc),
+                    readAt       = r.IsDBNull(7) ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(7), DateTimeKind.Utc),
                 });
             return Ok(list);
         }
