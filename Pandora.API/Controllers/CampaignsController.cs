@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using MimeKit;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
@@ -110,8 +111,8 @@ public class CampaignsController(
         sentCount       = r.IsDBNull(r.GetOrdinal("SentCount"))       ? 0 : r.GetInt32(r.GetOrdinal("SentCount")),
         failedCount     = r.IsDBNull(r.GetOrdinal("FailedCount"))     ? 0 : r.GetInt32(r.GetOrdinal("FailedCount")),
         isDeleted       = r.GetBoolean(r.GetOrdinal("IsDeleted")),
-        createdAt       = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("CreatedAt")), DateTimeKind.Utc),
-        sentAt          = r.IsDBNull(r.GetOrdinal("SentAt"))  ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("SentAt")), DateTimeKind.Utc),
+        createdAt       = r.GetUtcDateTime("CreatedAt"),
+        sentAt          = r.GetUtcDateTimeOrNull("SentAt"),
         templateId      = r.IsDBNull(r.GetOrdinal("TemplateId")) ? (Guid?)null : r.GetGuid(r.GetOrdinal("TemplateId")),
     };
 
@@ -633,8 +634,8 @@ public class CampaignsController(
                     username     = r.IsDBNull(3) ? null : r.GetString(3),
                     status       = r.IsDBNull(4) ? "Pending" : r.GetString(4),
                     errorMessage = r.IsDBNull(5) ? null : r.GetString(5),
-                    sentAt       = r.IsDBNull(6) ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(6), DateTimeKind.Utc),
-                    readAt       = r.IsDBNull(7) ? (DateTime?)null : DateTime.SpecifyKind(r.GetDateTime(7), DateTimeKind.Utc),
+                    sentAt       = r.GetUtcDateTimeOrNull(6),
+                    readAt       = r.GetUtcDateTimeOrNull(7),
                 });
             return Ok(list);
         }

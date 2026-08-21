@@ -2,6 +2,7 @@ using ClosedXML.Excel;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 using System.Text;
 
@@ -49,7 +50,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     description = r.IsDBNull(r.GetOrdinal("Description")) ? null : r.GetString(r.GetOrdinal("Description")),
                     department  = r.IsDBNull(r.GetOrdinal("Department"))  ? null : r.GetString(r.GetOrdinal("Department")),
                     isActive    = r.GetBoolean(r.GetOrdinal("IsActive")),
-                    createdAt   = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt   = r.GetUtcDateTime("CreatedAt"),
                     itemCount   = r.GetInt32(r.GetOrdinal("ItemCount")),
                 });
             return Ok(list);
@@ -79,7 +80,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 description = r.IsDBNull(r.GetOrdinal("Description")) ? null : r.GetString(r.GetOrdinal("Description")),
                 department  = r.IsDBNull(r.GetOrdinal("Department"))  ? null : r.GetString(r.GetOrdinal("Department")),
                 isActive    = r.GetBoolean(r.GetOrdinal("IsActive")),
-                createdAt   = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                createdAt   = r.GetUtcDateTime("CreatedAt"),
             });
         }
         catch (Exception ex) { logger.LogError(ex, "GetTypeById {Id}", id); return StatusCode(500, ex.Message); }
@@ -233,7 +234,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     itemName     = r3.GetString(1),
                     fromPerson   = r3.IsDBNull(2) ? null : r3.GetString(2),
                     toPerson     = r3.IsDBNull(3) ? null : r3.GetString(3),
-                    transferDate = r3.GetDateTime(4),
+                    transferDate = r3.GetUtcDateTime(4),
                 });
 
             return Ok(new
@@ -519,10 +520,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     fromPerson     = r.IsDBNull(r.GetOrdinal("FromPerson"))     ? null : r.GetString(r.GetOrdinal("FromPerson")),
                     toDepartment   = r.IsDBNull(r.GetOrdinal("ToDepartment"))   ? null : r.GetString(r.GetOrdinal("ToDepartment")),
                     toPerson       = r.IsDBNull(r.GetOrdinal("ToPerson"))       ? null : r.GetString(r.GetOrdinal("ToPerson")),
-                    transferDate   = r.GetDateTime(r.GetOrdinal("TransferDate")),
+                    transferDate   = r.GetUtcDateTime("TransferDate"),
                     notes          = r.IsDBNull(r.GetOrdinal("Notes"))          ? null : r.GetString(r.GetOrdinal("Notes")),
                     createdBy      = r.IsDBNull(r.GetOrdinal("CreatedBy"))      ? null : r.GetString(r.GetOrdinal("CreatedBy")),
-                    createdAt      = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt      = r.GetUtcDateTime("CreatedAt"),
                 });
             return Ok(list);
         }
@@ -599,7 +600,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     oldValue  = r.IsDBNull(2) ? null : r.GetString(2),
                     newValue  = r.IsDBNull(3) ? null : r.GetString(3),
                     changedBy = r.IsDBNull(4) ? null : r.GetString(4),
-                    changedAt = r.GetDateTime(5),
+                    changedAt = r.GetUtcDateTime(5),
                     notes     = r.IsDBNull(6) ? null : r.GetString(6),
                 });
             return Ok(list);
@@ -952,10 +953,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         assignedEmployeeId  = r.IsDBNull(r.GetOrdinal("AssignedEmployeeId"))  ? (Guid?)null : r.GetGuid(r.GetOrdinal("AssignedEmployeeId")),
         inventoryTypeId     = r.GetGuid(r.GetOrdinal("InventoryTypeId")),
         isPhone             = r.GetBoolean(r.GetOrdinal("IsPhone")),
-        purchaseDate        = r.IsDBNull(r.GetOrdinal("PurchaseDate"))        ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("PurchaseDate")),
+        purchaseDate        = r.GetUtcDateTimeOrNull("PurchaseDate"),
         purchasePrice       = r.IsDBNull(r.GetOrdinal("PurchasePrice"))       ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("PurchasePrice")),
         accessories         = r.IsDBNull(r.GetOrdinal("Accessories"))         ? null : r.GetString(r.GetOrdinal("Accessories")),
-        createdAt           = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+        createdAt           = r.GetUtcDateTime("CreatedAt"),
         typeName            = r.IsDBNull(r.GetOrdinal("TypeName"))            ? null : r.GetString(r.GetOrdinal("TypeName")),
         employeeName        = r.IsDBNull(r.GetOrdinal("EmployeeName"))        ? null : r.GetString(r.GetOrdinal("EmployeeName")),
     };

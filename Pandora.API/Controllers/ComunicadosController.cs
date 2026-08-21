@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.API.Hubs;
 using System.Security.Claims;
 
@@ -100,8 +101,8 @@ public class ComunicadosController(
                 content   = reader.GetString(2),
                 priority  = reader.GetString(3),
                 author    = reader.GetString(4),
-                createdAt = reader.GetDateTime(5),
-                expiresAt = reader.IsDBNull(6) ? (DateTime?)null : reader.GetDateTime(6),
+                createdAt = reader.GetUtcDateTime(5),
+                expiresAt = reader.GetUtcDateTimeOrNull(6),
             });
         }
 
@@ -134,8 +135,8 @@ public class ComunicadosController(
             priority    = reader.GetString(3),
             author      = reader.GetString(4),
             isPublished = reader.GetBoolean(5),
-            expiresAt   = reader.IsDBNull(6) ? (DateTime?)null : reader.GetDateTime(6),
-            createdAt   = reader.GetDateTime(7),
+            expiresAt   = reader.GetUtcDateTimeOrNull(6),
+            createdAt   = reader.GetUtcDateTime(7),
         });
     }
 

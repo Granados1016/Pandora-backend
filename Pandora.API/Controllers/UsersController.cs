@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.Application.Features.Users;
 using System.Security.Claims;
 
@@ -46,7 +47,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         smtpEmail       = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
         profilePhotoUrl = r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl")) ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
         bannerPhotoUrl  = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))  ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
-        createdAt       = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+        createdAt       = r.GetUtcDateTime("CreatedAt"),
     };
 
     // Full reader — resolves binary photo data to data URL (used only for single-user endpoints)
@@ -81,7 +82,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             smtpEmail        = r.IsDBNull(r.GetOrdinal("SmtpEmail"))       ? null : r.GetString(r.GetOrdinal("SmtpEmail")),
             profilePhotoUrl  = ResolvePhoto(r, "ProfilePhotoData", "ProfilePhotoMime", "ProfilePhotoUrl"),
             bannerPhotoUrl   = ResolvePhoto(r, "BannerPhotoData",  "BannerPhotoMime",  "BannerPhotoUrl"),
-            createdAt        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+            createdAt        = r.GetUtcDateTime("CreatedAt"),
         };
     }
 

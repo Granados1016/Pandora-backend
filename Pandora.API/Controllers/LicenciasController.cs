@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using IConfiguration = Microsoft.Extensions.Configuration.IConfiguration;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -534,7 +535,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                                        : r.GetDateTime(r.GetOrdinal("NuevoProximoPago")).ToString("yyyy-MM-dd"),
                     notas            = r.IsDBNull(r.GetOrdinal("Notas")) ? null : r.GetString(r.GetOrdinal("Notas")),
                     registradoPor    = r.IsDBNull(r.GetOrdinal("RegistradoPor")) ? null : r.GetString(r.GetOrdinal("RegistradoPor")),
-                    creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+                    creadoEn         = r.GetUtcDateTime("CreadoEn"),
                 });
             return Ok(list);
         }
@@ -558,8 +559,8 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         costoAnualMXN  = r.GetDecimal(r.GetOrdinal("CostoAnualMXN")),
         estado         = r.GetString(r.GetOrdinal("Estado")),
         notas          = r.IsDBNull(r.GetOrdinal("Notas")) ? null : r.GetString(r.GetOrdinal("Notas")),
-        creadoEn       = r.GetDateTime(r.GetOrdinal("CreadoEn")),
-        actualizadoEn  = r.GetDateTime(r.GetOrdinal("ActualizadoEn")),
+        creadoEn       = r.GetUtcDateTime("CreadoEn"),
+        actualizadoEn  = r.GetUtcDateTime("ActualizadoEn"),
         ultimoPago     = r.IsDBNull(r.GetOrdinal("UltimoPago")) ? null : r.GetString(r.GetOrdinal("UltimoPago")),
     };
 

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 
 namespace Pandora.API.Controllers;
 
@@ -37,7 +38,7 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
                     name            = r.GetString(r.GetOrdinal("Name")),
                     inventoryPrefix = r.IsDBNull(r.GetOrdinal("InventoryPrefix")) ? null : r.GetString(r.GetOrdinal("InventoryPrefix")),
                     isActive        = r.GetBoolean(r.GetOrdinal("IsActive")),
-                    createdAt       = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt       = r.GetUtcDateTime("CreatedAt"),
                 });
             return Ok(list);
         }
@@ -146,7 +147,7 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
                     departmentId   = r.IsDBNull(r.GetOrdinal("DepartmentId"))   ? (Guid?)null : r.GetGuid(r.GetOrdinal("DepartmentId")),
                     departmentName = r.IsDBNull(r.GetOrdinal("DepartmentName")) ? null : r.GetString(r.GetOrdinal("DepartmentName")),
                     isActive       = r.GetBoolean(r.GetOrdinal("IsActive")),
-                    createdAt      = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt      = r.GetUtcDateTime("CreatedAt"),
                 });
             return Ok(list);
         }

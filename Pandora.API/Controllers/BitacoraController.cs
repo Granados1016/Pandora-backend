@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -107,7 +108,7 @@ public class BitacoraController(
                     nota      = sr.GetString(1),
                     tipo      = sr.GetString(2),
                     creadoPor = sr.GetString(3),
-                    creadoEn  = sr.GetDateTime(4),
+                    creadoEn  = sr.GetUtcDateTime(4),
                 });
 
             return Ok(new { entry, seguimientos });
@@ -418,10 +419,10 @@ public class BitacoraController(
         usuarioAfectado  = r.IsDBNull(r.GetOrdinal("UsuarioAfectado"))  ? null : r.GetString(r.GetOrdinal("UsuarioAfectado")),
         reportadoPor     = r.GetString(r.GetOrdinal("ReportadoPor")),
         asignadoA        = r.IsDBNull(r.GetOrdinal("AsignadoA"))        ? null : r.GetString(r.GetOrdinal("AsignadoA")),
-        fechaIncidencia  = r.GetDateTime(r.GetOrdinal("FechaIncidencia")),
-        fechaResolucion  = r.IsDBNull(r.GetOrdinal("FechaResolucion"))  ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("FechaResolucion")),
+        fechaIncidencia  = r.GetUtcDateTime("FechaIncidencia"),
+        fechaResolucion  = r.GetUtcDateTimeOrNull("FechaResolucion"),
         tiempoResolucion = r.IsDBNull(r.GetOrdinal("TiempoResolucion")) ? (int?)null : r.GetInt32(r.GetOrdinal("TiempoResolucion")),
-        creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+        creadoEn         = r.GetUtcDateTime("CreadoEn"),
     };
 
     private static object MapRowDetail(SqlDataReader r) => new
@@ -438,11 +439,11 @@ public class BitacoraController(
         usuarioAfectado  = r.IsDBNull(r.GetOrdinal("UsuarioAfectado"))  ? null : r.GetString(r.GetOrdinal("UsuarioAfectado")),
         reportadoPor     = r.GetString(r.GetOrdinal("ReportadoPor")),
         asignadoA        = r.IsDBNull(r.GetOrdinal("AsignadoA"))        ? null : r.GetString(r.GetOrdinal("AsignadoA")),
-        fechaIncidencia  = r.GetDateTime(r.GetOrdinal("FechaIncidencia")),
-        fechaResolucion  = r.IsDBNull(r.GetOrdinal("FechaResolucion"))  ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("FechaResolucion")),
+        fechaIncidencia  = r.GetUtcDateTime("FechaIncidencia"),
+        fechaResolucion  = r.GetUtcDateTimeOrNull("FechaResolucion"),
         tiempoResolucion = r.IsDBNull(r.GetOrdinal("TiempoResolucion")) ? (int?)null : r.GetInt32(r.GetOrdinal("TiempoResolucion")),
         resolucion       = r.IsDBNull(r.GetOrdinal("Resolucion"))       ? null : r.GetString(r.GetOrdinal("Resolucion")),
-        creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+        creadoEn         = r.GetUtcDateTime("CreadoEn"),
     };
 }
 

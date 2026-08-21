@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Text.Json;
 
 namespace Pandora.API.Controllers;
@@ -90,7 +91,7 @@ public class TemplatesController(
                     isActive    = r.GetBoolean(r.GetOrdinal("IsActive")),
                     variables   = DeserializeVars(r.IsDBNull(r.GetOrdinal("Variables"))
                                                     ? null : r.GetString(r.GetOrdinal("Variables"))),
-                    createdAt   = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt   = r.GetUtcDateTime("CreatedAt"),
                 });
             }
             return Ok(list);
@@ -136,7 +137,7 @@ public class TemplatesController(
                 isActive    = r.GetBoolean(r.GetOrdinal("IsActive")),
                 variables   = DeserializeVars(r.IsDBNull(r.GetOrdinal("Variables"))
                                                 ? null : r.GetString(r.GetOrdinal("Variables"))),
-                createdAt   = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                createdAt   = r.GetUtcDateTime("CreatedAt"),
             });
         }
         catch (Exception ex)

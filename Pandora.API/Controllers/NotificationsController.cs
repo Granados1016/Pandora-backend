@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.API.Hubs;
 using System.Security.Claims;
 
@@ -53,7 +54,7 @@ public class NotificationsController(
                 isRead    = reader.GetBoolean(4),
                 targetUser = reader.IsDBNull(5) ? null : reader.GetString(5),
                 createdBy = reader.GetString(6),
-                createdAt = reader.GetDateTime(7),
+                createdAt = reader.GetUtcDateTime(7),
             });
         }
 

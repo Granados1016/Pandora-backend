@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.API.Hubs;
 using Pandora.API.Services;
 using System.Security.Claims;
@@ -305,10 +306,10 @@ public class VacacionesController(
                 status      = r.GetString(5),
                 notes       = r.IsDBNull(6) ? null : r.GetString(6),
                 reviewNotes = r.IsDBNull(7) ? null : r.GetString(7),
-                createdAt   = r.GetDateTime(8),
+                createdAt   = r.GetUtcDateTime(8),
                 hasDocument = r.GetInt32(9) == 1,
                 reviewedBy  = r.IsDBNull(10) ? null : r.GetString(10),
-                reviewedAt  = r.IsDBNull(11) ? (DateTime?)null : r.GetDateTime(11),
+                reviewedAt  = r.GetUtcDateTimeOrNull(11),
             });
         return Ok(items);
     }
@@ -352,13 +353,13 @@ public class VacacionesController(
                 status          = r.GetString(7),
                 notes           = r.IsDBNull(8)  ? null : r.GetString(8),
                 reviewedBy      = r.IsDBNull(9)  ? null : r.GetString(9),
-                reviewedAt      = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10),
+                reviewedAt      = r.GetUtcDateTimeOrNull(10),
                 reviewNotes     = r.IsDBNull(11) ? null : r.GetString(11),
-                createdAt       = r.GetDateTime(12),
+                createdAt       = r.GetUtcDateTime(12),
                 hasDocument     = r.GetInt32(13) == 1,
                 approvalStage   = r.GetString(14),
                 jefeReviewedBy  = r.IsDBNull(15) ? null : r.GetString(15),
-                jefeReviewedAt  = r.IsDBNull(16) ? (DateTime?)null : r.GetDateTime(16),
+                jefeReviewedAt  = r.GetUtcDateTimeOrNull(16),
                 jefeNotes       = r.IsDBNull(17) ? null : r.GetString(17),
             });
         return Ok(items);

@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Microsoft.IdentityModel.Tokens;
+using Pandora.API.Extensions;
 
 namespace Pandora.API.Controllers;
 
@@ -234,8 +235,8 @@ public class GoogleWorkspaceProvisioningController(
             completed = reader.GetInt32(3),
             failed = reader.GetInt32(4),
             createdBy = reader.GetString(5),
-            createdAt = reader.GetDateTime(6),
-            updatedAt = reader.GetDateTime(7),
+            createdAt = reader.GetUtcDateTime(6),
+            updatedAt = reader.GetUtcDateTime(7),
         });
     }
 
@@ -268,7 +269,7 @@ public class GoogleWorkspaceProvisioningController(
                 primaryEmail = reader.GetString(3),
                 resultado = reader.GetString(4),
                 detalle = reader.IsDBNull(5) ? null : reader.GetString(5),
-                createdAt = reader.GetDateTime(6),
+                createdAt = reader.GetUtcDateTime(6),
             });
         }
         return Ok(results);
@@ -311,7 +312,7 @@ public class GoogleWorkspaceProvisioningController(
                 primaryEmail = reader.GetString(4),
                 resultado = reader.GetString(5),
                 detalle = reader.IsDBNull(6) ? null : reader.GetString(6),
-                createdAt = reader.GetDateTime(7),
+                createdAt = reader.GetUtcDateTime(7),
             });
         }
         return Ok(results);

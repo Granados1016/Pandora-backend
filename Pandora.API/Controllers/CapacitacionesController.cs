@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -146,10 +147,10 @@ public class CapacitacionesController(
                     username    = pr.GetString(1),
                     fullName    = pr.IsDBNull(2) ? null : pr.GetString(2),
                     status      = pr.GetString(3),
-                    completedAt = pr.IsDBNull(4) ? (DateTime?)null : pr.GetDateTime(4),
+                    completedAt = pr.GetUtcDateTimeOrNull(4),
                     score       = pr.IsDBNull(5) ? (decimal?)null : pr.GetDecimal(5),
                     notes       = pr.IsDBNull(6) ? null : pr.GetString(6),
-                    createdAt   = pr.GetDateTime(7),
+                    createdAt   = pr.GetUtcDateTime(7),
                 });
 
             return Ok(new { capacitacion = cap, participantes = parts });
@@ -333,14 +334,14 @@ public class CapacitacionesController(
         description     = r.IsDBNull(2)  ? null : r.GetString(2),
         category        = r.IsDBNull(3)  ? null : r.GetString(3),
         instructor      = r.IsDBNull(4)  ? null : r.GetString(4),
-        startDate       = r.GetDateTime(5),
-        endDate         = r.IsDBNull(6)  ? (DateTime?)null : r.GetDateTime(6),
+        startDate       = r.GetUtcDateTime(5),
+        endDate         = r.GetUtcDateTimeOrNull(6),
         duration        = r.IsDBNull(7)  ? (int?)null : r.GetInt32(7),
         status          = r.GetString(8),
         modality        = r.IsDBNull(9)  ? null : r.GetString(9),
         maxParticipants = r.IsDBNull(10) ? (int?)null : r.GetInt32(10),
         createdBy       = r.GetString(11),
-        createdAt       = r.GetDateTime(12),
+        createdAt       = r.GetUtcDateTime(12),
         enrolledCount   = r.GetInt32(13),
     };
 }

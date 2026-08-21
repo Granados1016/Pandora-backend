@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.API.Services;
 using Pandora.Application.Features.Users;
 
@@ -56,11 +57,11 @@ public class TenantsController(IConfiguration config, ILogger<TenantsController>
                     secondaryColor = r.GetString(r.GetOrdinal("SecondaryColor")),
                     licensedModules = r.GetInt64(r.GetOrdinal("LicensedModules")),
                     maxUsers       = r.GetInt32(r.GetOrdinal("MaxUsers")),
-                    expiresAt      = r.IsDBNull(r.GetOrdinal("ExpiresAt")) ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("ExpiresAt")),
+                    expiresAt      = r.GetUtcDateTimeOrNull("ExpiresAt"),
                     isActive       = r.GetBoolean(r.GetOrdinal("IsActive")),
                     contactEmail   = r.IsDBNull(r.GetOrdinal("ContactEmail")) ? null : r.GetString(r.GetOrdinal("ContactEmail")),
                     notes          = r.IsDBNull(r.GetOrdinal("Notes")) ? null : r.GetString(r.GetOrdinal("Notes")),
-                    creadoEn       = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+                    creadoEn       = r.GetUtcDateTime("CreadoEn"),
                     activeUsers    = r.GetInt32(r.GetOrdinal("ActiveUsers")),
                     hasLogo        = r.GetInt32(r.GetOrdinal("HasLogo")) == 1,
                 });

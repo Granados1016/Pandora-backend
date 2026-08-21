@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 using System.Text;
 
@@ -255,7 +256,7 @@ public class CheckadorController(
                     precision      = r.IsDBNull(6) ? (double?)null : r.GetDouble(6),
                     esDentroDeZona = r.IsDBNull(7) ? (bool?)null   : r.GetBoolean(7),
                     notas          = r.IsDBNull(8) ? null          : r.GetString(8),
-                    timestamp      = r.GetDateTime(9),
+                    timestamp      = r.GetUtcDateTime(9),
                 });
             return Ok(list);
         }
@@ -396,7 +397,7 @@ public class CheckadorController(
                     descripcion = r.IsDBNull(2) ? null : r.GetString(2),
                     lat         = r.GetDouble(3), lng = r.GetDouble(4),
                     radioMetros = r.GetInt32(5),  activo = r.GetBoolean(6),
-                    creadoEn    = r.GetDateTime(7),
+                    creadoEn    = r.GetUtcDateTime(7),
                 });
             return Ok(list);
         }
@@ -475,7 +476,7 @@ public class CheckadorController(
         precision      = r.IsDBNull(4) ? (double?)null : r.GetDouble(4),
         esDentroDeZona = r.IsDBNull(5) ? (bool?)null   : r.GetBoolean(5),
         notas          = r.IsDBNull(6) ? null           : r.GetString(6),
-        timestamp      = r.GetDateTime(7),
+        timestamp      = r.GetUtcDateTime(7),
     };
 
     /// <summary>Fórmula Haversine — distancia en metros entre dos coordenadas.</summary>

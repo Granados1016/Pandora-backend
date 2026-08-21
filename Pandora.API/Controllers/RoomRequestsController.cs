@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Net.Mail;
 using System.Net;
 
@@ -135,7 +136,7 @@ public class RoomRequestsController(
                     status           = reader.GetString(reader.GetOrdinal("Status")),
                     adminNotes       = N(reader, "AdminNotes"),
                     reservationId    = N(reader, "ReservationId"),
-                    createdAt        = reader.GetDateTime(reader.GetOrdinal("CreatedAt")),
+                    createdAt        = reader.GetUtcDateTime("CreatedAt"),
                 });
             }
             return Ok(list);

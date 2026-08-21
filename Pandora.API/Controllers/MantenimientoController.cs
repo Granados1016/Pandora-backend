@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 using System.Text;
 
@@ -111,7 +112,7 @@ public class MantenimientoController(
                         nota      = rs.GetString(1),
                         tipo      = rs.GetString(2),
                         creadoPor = rs.GetString(3),
-                        creadoEn  = rs.GetDateTime(4),
+                        creadoEn  = rs.GetUtcDateTime(4),
                     });
 
             await using var cmdEv = conn.CreateCommand();
@@ -130,7 +131,7 @@ public class MantenimientoController(
                         nombreArchivo = re.GetString(1),
                         mime          = re.GetString(2),
                         subidoPor     = re.GetString(3),
-                        subidoEn      = re.GetDateTime(4),
+                        subidoEn      = re.GetUtcDateTime(4),
                     });
 
             return Ok(new { entry, seguimientos, evidencias });
@@ -501,12 +502,12 @@ public class MantenimientoController(
         nombreEquipo     = r.IsDBNull(r.GetOrdinal("NombreEquipo"))     ? null : r.GetString(r.GetOrdinal("NombreEquipo")),
         ubicacion        = r.IsDBNull(r.GetOrdinal("Ubicacion"))        ? null : r.GetString(r.GetOrdinal("Ubicacion")),
         tecnicoAsignado  = r.IsDBNull(r.GetOrdinal("TecnicoAsignado"))  ? null : r.GetString(r.GetOrdinal("TecnicoAsignado")),
-        fechaProgramada  = r.GetDateTime(r.GetOrdinal("FechaProgramada")),
-        fechaRealizada   = r.IsDBNull(r.GetOrdinal("FechaRealizada"))   ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("FechaRealizada")),
+        fechaProgramada  = r.GetUtcDateTime("FechaProgramada"),
+        fechaRealizada   = r.GetUtcDateTimeOrNull("FechaRealizada"),
         duracionMinutos  = r.IsDBNull(r.GetOrdinal("DuracionMinutos"))  ? (int?)null : r.GetInt32(r.GetOrdinal("DuracionMinutos")),
         costoEstimado    = r.IsDBNull(r.GetOrdinal("CostoEstimado"))    ? (decimal?)null : r.GetDecimal(r.GetOrdinal("CostoEstimado")),
         costoReal        = r.IsDBNull(r.GetOrdinal("CostoReal"))        ? (decimal?)null : r.GetDecimal(r.GetOrdinal("CostoReal")),
-        creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
+        creadoEn         = r.GetUtcDateTime("CreadoEn"),
     };
 
     private static object MapRowFull(SqlDataReader r) => new {
@@ -522,16 +523,16 @@ public class MantenimientoController(
         ubicacion        = r.IsDBNull(r.GetOrdinal("Ubicacion"))        ? null : r.GetString(r.GetOrdinal("Ubicacion")),
         tecnicoAsignado  = r.IsDBNull(r.GetOrdinal("TecnicoAsignado"))  ? null : r.GetString(r.GetOrdinal("TecnicoAsignado")),
         emailTecnico     = r.IsDBNull(r.GetOrdinal("EmailTecnico"))     ? null : r.GetString(r.GetOrdinal("EmailTecnico")),
-        fechaProgramada  = r.GetDateTime(r.GetOrdinal("FechaProgramada")),
-        fechaRealizada   = r.IsDBNull(r.GetOrdinal("FechaRealizada"))   ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("FechaRealizada")),
+        fechaProgramada  = r.GetUtcDateTime("FechaProgramada"),
+        fechaRealizada   = r.GetUtcDateTimeOrNull("FechaRealizada"),
         duracionMinutos  = r.IsDBNull(r.GetOrdinal("DuracionMinutos"))  ? (int?)null : r.GetInt32(r.GetOrdinal("DuracionMinutos")),
         checklistJson    = r.IsDBNull(r.GetOrdinal("ChecklistJson"))    ? null : r.GetString(r.GetOrdinal("ChecklistJson")),
         notas            = r.IsDBNull(r.GetOrdinal("Notas"))            ? null : r.GetString(r.GetOrdinal("Notas")),
         costoEstimado    = r.IsDBNull(r.GetOrdinal("CostoEstimado"))    ? (decimal?)null : r.GetDecimal(r.GetOrdinal("CostoEstimado")),
         costoReal        = r.IsDBNull(r.GetOrdinal("CostoReal"))        ? (decimal?)null : r.GetDecimal(r.GetOrdinal("CostoReal")),
         creadoPor        = r.GetString(r.GetOrdinal("CreadoPor")),
-        creadoEn         = r.GetDateTime(r.GetOrdinal("CreadoEn")),
-        actualizadoEn    = r.IsDBNull(r.GetOrdinal("ActualizadoEn"))    ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("ActualizadoEn")),
+        creadoEn         = r.GetUtcDateTime("CreadoEn"),
+        actualizadoEn    = r.GetUtcDateTimeOrNull("ActualizadoEn"),
     };
 
     private async Task SendTecnicoEmailAsync(MantenimientoDto dto, string folio, bool isNew)

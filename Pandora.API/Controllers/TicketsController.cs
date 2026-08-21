@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using Pandora.API.Services;
 using System.Security.Claims;
 using System.Text.Json;
@@ -67,8 +68,9 @@ public class TicketsController(
     private static string? Ns(SqlDataReader r, string col) =>
         r.IsDBNull(r.GetOrdinal(col)) ? null : r.GetString(r.GetOrdinal(col));
 
-    private static object? N(SqlDataReader r, string col) =>
-        r.IsDBNull(r.GetOrdinal(col)) ? null : r.GetValue(r.GetOrdinal(col));
+    // Solo se usa para UpdatedAt (DATETIME2) — devuelve en UTC explícito para que
+    // el frontend no interprete la fecha como si ya fuera hora local.
+    private static DateTime? N(SqlDataReader r, string col) => r.GetUtcDateTimeOrNull(col);
 
     private string AttachmentsPath()
     {
@@ -474,7 +476,7 @@ public class TicketsController(
             while (await r.ReadAsync(ct))
             {
                 var tickStatus = r.GetString(r.GetOrdinal("Status"));
-                var tickCreated = r.GetDateTime(r.GetOrdinal("CreatedAt"));
+                var tickCreated = r.GetUtcDateTime("CreatedAt");
                 bool isOverdue = tickStatus is not ("Cerrado" or "Resuelto")
                                  && (DateTime.UtcNow - tickCreated).TotalDays > 3;
                 list.Add(new
@@ -530,7 +532,7 @@ public class TicketsController(
                 submittedByEmail = Ns(r, "SubmittedByEmail"),
                 delayNote        = Ns(r, "DelayNote"),
                 closeNote        = Ns(r, "CloseNote"),
-                createdAt        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                createdAt        = r.GetUtcDateTime("CreatedAt"),
                 updatedAt        = N(r, "UpdatedAt"),
             };
             await r.CloseAsync();
@@ -574,7 +576,7 @@ public class TicketsController(
                     originalName = r3.GetString(r3.GetOrdinal("OriginalName")),
                     contentType  = r3.GetString(r3.GetOrdinal("ContentType")),
                     fileSize     = r3.GetInt64(r3.GetOrdinal("FileSize")),
-                    uploadedAt   = r3.GetDateTime(r3.GetOrdinal("UploadedAt")),
+                    uploadedAt   = r3.GetUtcDateTime("UploadedAt"),
                 });
             await r3.CloseAsync();
 
@@ -594,7 +596,7 @@ public class TicketsController(
                     authorName = r4.GetString(r4.GetOrdinal("AuthorName")),
                     isAdmin    = r4.GetBoolean(r4.GetOrdinal("IsAdmin")),
                     body       = r4.GetString(r4.GetOrdinal("Body")),
-                    createdAt  = r4.GetDateTime(r4.GetOrdinal("CreatedAt")),
+                    createdAt  = r4.GetUtcDateTime("CreatedAt"),
                 });
 
             return Ok(new { ticket, fieldValues, attachments, comments });
@@ -1038,7 +1040,7 @@ public class TicketsController(
                         ["SubmittedByEmail"] = Ns(r, "SubmittedByEmail"),
                         ["DelayNote"]        = Ns(r, "DelayNote"),
                         ["CloseNote"]        = Ns(r, "CloseNote"),
-                        ["CreatedAt"]        = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                        ["CreatedAt"]        = r.GetUtcDateTime("CreatedAt"),
                         ["UpdatedAt"]        = N(r, "UpdatedAt"),
                     });
                 }

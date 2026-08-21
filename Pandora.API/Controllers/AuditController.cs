@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 
 namespace Pandora.API.Controllers;
 
@@ -71,7 +72,7 @@ public class AuditController(IConfiguration config) : ControllerBase
                 entityId  = reader.IsDBNull(4) ? null : reader.GetString(4),
                 details   = reader.IsDBNull(5) ? null : reader.GetString(5),
                 ipAddress = reader.IsDBNull(6) ? null : reader.GetString(6),
-                createdAt = reader.GetDateTime(7),
+                createdAt = reader.GetUtcDateTime(7),
             });
         }
 

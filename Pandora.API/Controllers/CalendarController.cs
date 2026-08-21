@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using MimeKit;
+using Pandora.API.Extensions;
 using System.Globalization;
 using System.Security.Claims;
 using System.Text.Json;
@@ -84,7 +85,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     color       = r.IsDBNull(r.GetOrdinal("Color"))       ? null : r.GetString(r.GetOrdinal("Color")),
                     description = r.IsDBNull(r.GetOrdinal("Description")) ? null : r.GetString(r.GetOrdinal("Description")),
                     isActive    = r.GetBoolean(r.GetOrdinal("IsActive")),
-                    createdAt   = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+                    createdAt   = r.GetUtcDateTime("CreatedAt"),
                 });
             return Ok(list);
         }
@@ -906,7 +907,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     email       = r.GetString(1),
                     descripcion = r.IsDBNull(2) ? null : r.GetString(2),
                     activo      = r.GetBoolean(3),
-                    creadoEn    = r.GetDateTime(4),
+                    creadoEn    = r.GetUtcDateTime(4),
                 });
             return Ok(list);
         }

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 
 namespace Pandora.API.Controllers;
 
@@ -133,7 +134,7 @@ public class SearchController(IConfiguration config) : ControllerBase
                     label    = r.IsDBNull(2) ? "" : r.GetString(2),
                     subtitle = r.IsDBNull(3) ? "" : r.GetString(3),
                     tag      = r.IsDBNull(4) ? "" : r.GetString(4),
-                    date     = r.IsDBNull(5) ? (DateTime?)null : r.GetDateTime(5),
+                    date     = r.GetUtcDateTimeOrNull(5),
                     path,
                 });
             }

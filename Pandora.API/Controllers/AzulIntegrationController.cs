@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 
 namespace Pandora.API.Controllers;
 
@@ -298,7 +299,7 @@ public class AzulIntegrationController(IConfiguration config, ILogger<AzulIntegr
                     Id:       r.GetValue(1)?.ToString() ?? "",
                     Label:    r.IsDBNull(2) ? "" : r.GetString(2),
                     Subtitle: r.IsDBNull(3) ? "" : r.GetString(3),
-                    Date:     r.IsDBNull(4) ? null : r.GetDateTime(4)
+                    Date:     r.GetUtcDateTimeOrNull(4)
                 ));
             }
         }

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -155,7 +156,7 @@ public class ActivosFijosController(
                     fromDept    = mr.IsDBNull(4) ? null : mr.GetString(4),
                     toDept      = mr.IsDBNull(5) ? null : mr.GetString(5),
                     createdBy   = mr.GetString(6),
-                    createdAt   = mr.GetDateTime(7),
+                    createdAt   = mr.GetUtcDateTime(7),
                 });
             return Ok(new { activo, movimientos = movs });
         }
@@ -463,7 +464,7 @@ public class ActivosFijosController(
         responsibleUser    = r.IsDBNull(r.GetOrdinal("ResponsibleUser"))    ? null : r.GetString(r.GetOrdinal("ResponsibleUser")),
         location           = r.IsDBNull(r.GetOrdinal("Location"))           ? null : r.GetString(r.GetOrdinal("Location")),
         status             = r.GetString(r.GetOrdinal("Status")),
-        purchaseDate       = r.IsDBNull(r.GetOrdinal("PurchaseDate"))       ? (DateTime?)null : r.GetDateTime(r.GetOrdinal("PurchaseDate")),
+        purchaseDate       = r.GetUtcDateTimeOrNull("PurchaseDate"),
         purchaseCost       = r.IsDBNull(r.GetOrdinal("PurchaseCost"))       ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("PurchaseCost")),
         usefulLifeYears    = r.IsDBNull(r.GetOrdinal("UsefulLifeYears"))    ? (int?)null      : r.GetInt32(r.GetOrdinal("UsefulLifeYears")),
         depreciationMethod = r.IsDBNull(r.GetOrdinal("DepreciationMethod")) ? null : r.GetString(r.GetOrdinal("DepreciationMethod")),
@@ -472,7 +473,7 @@ public class ActivosFijosController(
         currentValue       = r.IsDBNull(r.GetOrdinal("CurrentValue"))       ? (decimal?)null  : r.GetDecimal(r.GetOrdinal("CurrentValue")),
         notes              = r.IsDBNull(r.GetOrdinal("Notes"))              ? null : r.GetString(r.GetOrdinal("Notes")),
         createdBy          = r.GetString(r.GetOrdinal("CreatedBy")),
-        createdAt          = r.GetDateTime(r.GetOrdinal("CreatedAt")),
+        createdAt          = r.GetUtcDateTime("CreatedAt"),
     };
 }
 

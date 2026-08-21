@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using Pandora.API.Extensions;
 using System.Security.Claims;
 
 namespace Pandora.API.Controllers;
@@ -178,7 +179,7 @@ public class ProcedimientosController(
                 fileContentType = r.GetString(5),
                 fileSize        = r.GetInt64(6),
                 uploadedBy      = r.GetString(7),
-                uploadedAt      = r.GetDateTime(8),
+                uploadedAt      = r.GetUtcDateTime(8),
             });
 
         return Ok(new
@@ -523,7 +524,7 @@ public class ProcedimientosController(
                 contentType   = r.GetString(3),
                 fileSize      = r.GetInt64(4),
                 uploadedBy    = r.IsDBNull(5) ? null : r.GetString(5),
-                uploadedAt    = r.GetDateTime(6),
+                uploadedAt    = r.GetUtcDateTime(6),
             });
         return Ok(list);
     }
