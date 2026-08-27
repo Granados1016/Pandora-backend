@@ -203,11 +203,14 @@ public class MantenimientoController(
             cmd.Parameters.AddWithValue("@CreadoPor",   CurrentUser);
             await cmd.ExecuteNonQueryAsync(ct);
 
+            // Capturar baseUrl antes de entrar al Task.Run (HttpContext no es accesible dentro)
+            var baseUrl = $"{Request.Scheme}://{Request.Host}";
+
             // Enviar email al técnico y al responsable del equipo (si tienen correo)
             if (!string.IsNullOrWhiteSpace(dto.EmailTecnico))
-                _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio, isNew: true), CancellationToken.None);
+                _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio, id, baseUrl, isNew: true), CancellationToken.None);
             if (!string.IsNullOrWhiteSpace(dto.EmailResponsable))
-                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio, isNew: true), CancellationToken.None);
+                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio, id, baseUrl, isNew: true), CancellationToken.None);
             // Push a todos los admins
             _ = Task.Run(() => push.SendToAllAsync(
                 $"🔧 Nuevo mantenimiento {folio}",
@@ -302,10 +305,11 @@ public class MantenimientoController(
                 || !string.Equals(oldResponsable, dto.ResponsableEquipo, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(oldEmailResp,   dto.EmailResponsable,  StringComparison.OrdinalIgnoreCase);
 
+            var baseUrl = $"{Request.Scheme}://{Request.Host}";
             if (tecnicoCambio && !string.IsNullOrWhiteSpace(dto.EmailTecnico))
-                _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio!, isNew: false), CancellationToken.None);
+                _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio!, id, baseUrl, isNew: false), CancellationToken.None);
             if (responsableCambio && !string.IsNullOrWhiteSpace(dto.EmailResponsable))
-                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio!, isNew: false), CancellationToken.None);
+                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio!, id, baseUrl, isNew: false), CancellationToken.None);
 
             return NoContent();
         }
@@ -420,6 +424,50 @@ public class MantenimientoController(
             return NoContent();
         }
         catch (Exception ex) { logger.LogError(ex, "Mantenimiento.DeleteEvidencia"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── GET /api/mantenimiento/{id}/calendar.ics ──────────────────────────────
+    /// <summary>
+    /// Archivo .ics del mantenimiento para "Agregar a mi calendario" (Outlook, Apple
+    /// Calendar, etc.). Sin autenticación porque se abre desde el correo del técnico
+    /// o del responsable del equipo, que pueden no tener cuenta en Pandora — el Id
+    /// (GUID no adivinable) es suficiente control de acceso, igual que el pixel de
+    /// seguimiento de Campañas.
+    /// </summary>
+    [HttpGet("{id:guid}/calendar.ics")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetCalendarIcs(Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT Folio, Titulo, Descripcion, NombreEquipo, Ubicacion, TecnicoAsignado,
+                       FechaProgramada, DuracionMinutos, CreadoEn, ActualizadoEn
+                FROM dbo.Mantenimientos WHERE Id = @Id AND IsDeleted = 0
+                """;
+            cmd.Parameters.AddWithValue("@Id", id);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return NotFound();
+
+            var folio      = r.GetString(0);
+            var titulo     = r.GetString(1);
+            var descripcion= r.IsDBNull(2) ? null : r.GetString(2);
+            var equipo     = r.IsDBNull(3) ? null : r.GetString(3);
+            var ubicacion  = r.IsDBNull(4) ? null : r.GetString(4);
+            var tecnico    = r.IsDBNull(5) ? null : r.GetString(5);
+            var inicio     = r.GetUtcDateTime(6);
+            var duracion   = r.IsDBNull(7) ? 60 : r.GetInt32(7);
+            var creadoEn   = r.GetUtcDateTime(8);
+            var stamp      = r.GetUtcDateTimeOrNull(9) ?? creadoEn;
+            var fin        = inicio.AddMinutes(duracion > 0 ? duracion : 60);
+
+            var ics = BuildIcs(id, folio, titulo, descripcion, equipo, ubicacion, tecnico, inicio, fin, stamp);
+            return File(Encoding.UTF8.GetBytes(ics), "text/calendar", $"mantenimiento_{folio}.ics");
+        }
+        catch (Exception ex) { logger.LogError(ex, "Mantenimiento.GetCalendarIcs {Id}", id); return StatusCode(500, ex.Message); }
     }
 
     // ── GET /api/mantenimiento/stats ──────────────────────────────────────────
@@ -542,6 +590,77 @@ public class MantenimientoController(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>Construye el .ics (RFC 5545) de un mantenimiento.</summary>
+    private static string BuildIcs(Guid id, string folio, string titulo, string? descripcion,
+        string? equipo, string? ubicacion, string? tecnico, DateTime inicioUtc, DateTime finUtc, DateTime stampUtc)
+    {
+        static string Fmt(DateTime d) => d.ToString("yyyyMMdd'T'HHmmss'Z'");
+        static string Esc(string? s) => (s ?? "")
+            .Replace("\\", "\\\\").Replace(";", "\\;").Replace(",", "\\,").Replace("\r\n", "\\n").Replace("\n", "\\n");
+
+        var descLines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(equipo))      descLines.Add($"Equipo: {equipo}");
+        if (!string.IsNullOrWhiteSpace(tecnico))     descLines.Add($"Técnico: {tecnico}");
+        if (!string.IsNullOrWhiteSpace(descripcion)) descLines.Add(descripcion);
+
+        return $"""
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            PRODID:-//Pandora//Mantenimiento//ES
+            CALSCALE:GREGORIAN
+            METHOD:PUBLISH
+            BEGIN:VEVENT
+            UID:mantenimiento-{id}@pandora
+            DTSTAMP:{Fmt(stampUtc)}
+            DTSTART:{Fmt(inicioUtc)}
+            DTEND:{Fmt(finUtc)}
+            SUMMARY:{Esc($"[{folio}] {titulo}")}
+            DESCRIPTION:{Esc(string.Join("\n", descLines))}
+            LOCATION:{Esc(ubicacion)}
+            STATUS:CONFIRMED
+            END:VEVENT
+            END:VCALENDAR
+            """.Replace("\r\n", "\n").Replace("\n", "\r\n");
+    }
+
+    /// <summary>Botones "Agregar a Google Calendar" / "Descargar .ics" para incrustar en los correos.</summary>
+    private static string BuildCalendarButtonsHtml(Guid id, MantenimientoDto dto, string folio, string baseUrl)
+    {
+        var inicio = DateTime.SpecifyKind(dto.FechaProgramada, DateTimeKind.Utc);
+        var fin    = inicio.AddMinutes(dto.DuracionMinutos is > 0 ? dto.DuracionMinutos.Value : 60);
+        static string Fmt(DateTime d) => d.ToString("yyyyMMdd'T'HHmmss'Z'");
+
+        var detalle = string.Join("\n", new[] {
+            $"Folio: {folio}",
+            !string.IsNullOrWhiteSpace(dto.NombreEquipo)    ? $"Equipo: {dto.NombreEquipo}"       : null,
+            !string.IsNullOrWhiteSpace(dto.TecnicoAsignado) ? $"Técnico: {dto.TecnicoAsignado}"   : null,
+            dto.Descripcion,
+        }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+        var googleUrl = "https://calendar.google.com/calendar/render?action=TEMPLATE"
+            + $"&text={Uri.EscapeDataString($"[Pandora] {dto.Titulo} — {folio}")}"
+            + $"&dates={Fmt(inicio)}/{Fmt(fin)}"
+            + $"&details={Uri.EscapeDataString(detalle)}"
+            + $"&location={Uri.EscapeDataString(dto.Ubicacion ?? "")}";
+        var icsUrl = $"{baseUrl}/api/mantenimiento/{id}/calendar.ics";
+
+        return $"""
+            <div style="margin-top:20px;text-align:center">
+              <a href="{googleUrl}" target="_blank"
+                 style="display:inline-block;background:#1a73e8;color:#ffffff;text-decoration:none;
+                        padding:10px 18px;border-radius:6px;font-weight:bold;font-size:13px;margin:4px">
+                 📅 Agregar a Google Calendar
+              </a>
+              <a href="{icsUrl}"
+                 style="display:inline-block;background:#f1f3f4;color:#1565c0;text-decoration:none;
+                        padding:10px 18px;border-radius:6px;font-weight:bold;font-size:13px;margin:4px;border:1px solid #ddd">
+                 ⬇️ Descargar .ics (Outlook / Apple)
+              </a>
+            </div>
+            """;
+    }
+
     private static object MapRow(SqlDataReader r) => new {
         id               = r.GetGuid(r.GetOrdinal("Id")),
         folio            = r.GetString(r.GetOrdinal("Folio")),
@@ -587,7 +706,7 @@ public class MantenimientoController(
         actualizadoEn    = r.GetUtcDateTimeOrNull("ActualizadoEn"),
     };
 
-    private async Task SendTecnicoEmailAsync(MantenimientoDto dto, string folio, bool isNew)
+    private async Task SendTecnicoEmailAsync(MantenimientoDto dto, string folio, Guid id, string baseUrl, bool isNew)
     {
         try
         {
@@ -631,6 +750,7 @@ public class MantenimientoController(
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Fecha programada</td><td style="padding:8px">{fecha}</td></tr>
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Prioridad</td><td style="padding:8px">{dto.Prioridad}</td></tr>
                     </table>
+                    {BuildCalendarButtonsHtml(id, dto, folio, baseUrl)}
                     <p style="margin-top:20px;font-size:12px;color:#888">Pandora — Sistema de Gestión</p>
                   </div>
                 </div>
@@ -642,7 +762,7 @@ public class MantenimientoController(
         catch (Exception ex) { logger.LogWarning(ex, "Mantenimiento email failed for {Folio}", folio); }
     }
 
-    private async Task SendResponsableEmailAsync(MantenimientoDto dto, string folio, bool isNew)
+    private async Task SendResponsableEmailAsync(MantenimientoDto dto, string folio, Guid id, string baseUrl, bool isNew)
     {
         try
         {
@@ -687,6 +807,7 @@ public class MantenimientoController(
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Fecha programada</td><td style="padding:8px">{fecha}</td></tr>
                       <tr><td style="padding:8px;font-weight:bold;color:#555">Prioridad</td><td style="padding:8px">{dto.Prioridad}</td></tr>
                     </table>
+                    {BuildCalendarButtonsHtml(id, dto, folio, baseUrl)}
                     <p style="margin-top:20px;font-size:12px;color:#888">Pandora — Sistema de Gestión</p>
                   </div>
                 </div>
