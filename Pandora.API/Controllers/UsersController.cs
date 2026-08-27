@@ -125,6 +125,44 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         catch (Exception ex) { logger.LogError(ex, "GetAll Users"); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/users/lookup ─────────────────────────────────────────────────
+    /// <summary>
+    /// Directorio ligero de usuarios activos (nombre + correo) para autocompletar
+    /// campos como "Técnico asignado" o "Responsable del equipo" en otros módulos.
+    /// Accesible a cualquier usuario autenticado (no solo Admin) — no expone rol,
+    /// módulos ni ningún dato sensible.
+    /// </summary>
+    [HttpGet("lookup")]
+    public async Task<IActionResult> Lookup(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT Username, FullName, Email, Position
+                FROM dbo.AppUsers
+                WHERE IsActive = 1
+                  AND (@TenantId IS NULL OR TenantId = @TenantId)
+                ORDER BY FullName, Username
+                """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantId.HasValue ? (object)TenantId.Value : DBNull.Value);
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new
+                {
+                    username = r.GetString(r.GetOrdinal("Username")),
+                    fullName = r.IsDBNull(r.GetOrdinal("FullName")) ? null : r.GetString(r.GetOrdinal("FullName")),
+                    email    = r.IsDBNull(r.GetOrdinal("Email"))    ? null : r.GetString(r.GetOrdinal("Email")),
+                    position = r.IsDBNull(r.GetOrdinal("Position")) ? null : r.GetString(r.GetOrdinal("Position")),
+                });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "Users.Lookup"); return StatusCode(500, ex.Message); }
+    }
+
     // ── GET /api/users/me ─────────────────────────────────────────────────────
     [HttpGet("me")]
     public async Task<IActionResult> Me(CancellationToken ct)

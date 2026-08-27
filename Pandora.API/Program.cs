@@ -1504,6 +1504,10 @@ using (var scopeEnc = app.Services.CreateScope())
             CREATE INDEX IX_Mnt_Fecha    ON dbo.Mantenimientos (FechaProgramada);
             CREATE INDEX IX_Mnt_Tecnico  ON dbo.Mantenimientos (TecnicoAsignado);
         END;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Mantenimientos') AND name='ResponsableEquipo')
+            ALTER TABLE dbo.Mantenimientos ADD ResponsableEquipo NVARCHAR(100) NULL;
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Mantenimientos') AND name='EmailResponsable')
+            ALTER TABLE dbo.Mantenimientos ADD EmailResponsable NVARCHAR(150) NULL;
         IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='MantenimientoSeguimientos' AND schema_id=SCHEMA_ID('dbo'))
         BEGIN
             CREATE TABLE dbo.MantenimientoSeguimientos (

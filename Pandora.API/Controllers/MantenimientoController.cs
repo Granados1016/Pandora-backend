@@ -82,6 +82,7 @@ public class MantenimientoController(
             cmd.CommandText = """
                 SELECT Id, Folio, Titulo, Descripcion, TipoMantenimiento, Estado, Prioridad,
                        EquipoId, NombreEquipo, Ubicacion, TecnicoAsignado, EmailTecnico,
+                       ResponsableEquipo, EmailResponsable,
                        FechaProgramada, FechaRealizada, DuracionMinutos,
                        ChecklistJson, Notas, CostoEstimado, CostoReal,
                        CreadoPor, CreadoEn, ActualizadoEn
@@ -165,11 +166,13 @@ public class MantenimientoController(
                 INSERT INTO dbo.Mantenimientos
                     (Id, Folio, Titulo, Descripcion, TipoMantenimiento, Estado, Prioridad,
                      EquipoId, NombreEquipo, Ubicacion, TecnicoAsignado, EmailTecnico,
+                     ResponsableEquipo, EmailResponsable,
                      FechaProgramada, FechaRealizada, DuracionMinutos,
                      ChecklistJson, Notas, CostoEstimado, CostoReal, CreadoPor)
                 VALUES
                     (@Id, @Folio, @Titulo, @Desc, @Tipo, @Estado, @Prio,
                      @EquipoId, @NombreEquipo, @Ubic, @Tecnico, @EmailTec,
+                     @Responsable, @EmailResp,
                      @FechaProg, @FechaReal, @Dur,
                      @Checklist, @Notas, @CostoEst, @CostoReal, @CreadoPor)
                 """;
@@ -185,6 +188,8 @@ public class MantenimientoController(
             cmd.Parameters.AddWithValue("@Ubic",        (object?)dto.Ubicacion      ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Tecnico",     (object?)dto.TecnicoAsignado ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmailTec",    (object?)dto.EmailTecnico   ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Responsable", (object?)dto.ResponsableEquipo ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@EmailResp",   (object?)dto.EmailResponsable  ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@FechaProg",   dto.FechaProgramada);
             cmd.Parameters.AddWithValue("@FechaReal",   (object?)dto.FechaRealizada ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Dur",         (object?)dto.DuracionMinutos ?? DBNull.Value);
@@ -195,9 +200,11 @@ public class MantenimientoController(
             cmd.Parameters.AddWithValue("@CreadoPor",   CurrentUser);
             await cmd.ExecuteNonQueryAsync(ct);
 
-            // Enviar email al técnico si tiene email
+            // Enviar email al técnico y al responsable del equipo (si tienen correo)
             if (!string.IsNullOrWhiteSpace(dto.EmailTecnico))
                 _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio, isNew: true), CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(dto.EmailResponsable))
+                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio, isNew: true), CancellationToken.None);
             // Push a todos los admins
             _ = Task.Run(() => push.SendToAllAsync(
                 $"🔧 Nuevo mantenimiento {folio}",
@@ -217,6 +224,27 @@ public class MantenimientoController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // Estado previo — para saber si hay que re-notificar por correo
+            string? oldTecnico = null, oldEmailTec = null, oldResponsable = null, oldEmailResp = null, folio = null;
+            DateTime oldFecha = default;
+            await using (var cmdOld = conn.CreateCommand())
+            {
+                cmdOld.CommandText = """
+                    SELECT Folio, TecnicoAsignado, EmailTecnico, ResponsableEquipo, EmailResponsable, FechaProgramada
+                    FROM dbo.Mantenimientos WHERE Id = @Id AND IsDeleted = 0
+                    """;
+                cmdOld.Parameters.AddWithValue("@Id", id);
+                await using var r = await cmdOld.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return NotFound();
+                folio          = r.GetString(0);
+                oldTecnico     = r.IsDBNull(1) ? null : r.GetString(1);
+                oldEmailTec    = r.IsDBNull(2) ? null : r.GetString(2);
+                oldResponsable = r.IsDBNull(3) ? null : r.GetString(3);
+                oldEmailResp   = r.IsDBNull(4) ? null : r.GetString(4);
+                oldFecha       = r.GetDateTime(5);
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 UPDATE dbo.Mantenimientos SET
@@ -229,6 +257,8 @@ public class MantenimientoController(
                     Ubicacion         = @Ubic,
                     TecnicoAsignado   = @Tecnico,
                     EmailTecnico      = @EmailTec,
+                    ResponsableEquipo = @Responsable,
+                    EmailResponsable  = @EmailResp,
                     FechaProgramada   = @FechaProg,
                     FechaRealizada    = @FechaReal,
                     DuracionMinutos   = @Dur,
@@ -249,6 +279,8 @@ public class MantenimientoController(
             cmd.Parameters.AddWithValue("@Ubic",        (object?)dto.Ubicacion       ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Tecnico",     (object?)dto.TecnicoAsignado ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EmailTec",    (object?)dto.EmailTecnico    ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Responsable", (object?)dto.ResponsableEquipo ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@EmailResp",   (object?)dto.EmailResponsable  ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@FechaProg",   dto.FechaProgramada);
             cmd.Parameters.AddWithValue("@FechaReal",   (object?)dto.FechaRealizada  ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Dur",         (object?)dto.DuracionMinutos ?? DBNull.Value);
@@ -257,6 +289,21 @@ public class MantenimientoController(
             cmd.Parameters.AddWithValue("@CostoEst",    (object?)dto.CostoEstimado   ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@CostoReal",   (object?)dto.CostoReal       ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
+
+            // Re-notificar por correo si cambió el técnico, el responsable o la fecha programada
+            bool fechaCambio = oldFecha != dto.FechaProgramada;
+            bool tecnicoCambio = fechaCambio
+                || !string.Equals(oldTecnico,  dto.TecnicoAsignado, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(oldEmailTec, dto.EmailTecnico,    StringComparison.OrdinalIgnoreCase);
+            bool responsableCambio = fechaCambio
+                || !string.Equals(oldResponsable, dto.ResponsableEquipo, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(oldEmailResp,   dto.EmailResponsable,  StringComparison.OrdinalIgnoreCase);
+
+            if (tecnicoCambio && !string.IsNullOrWhiteSpace(dto.EmailTecnico))
+                _ = Task.Run(() => SendTecnicoEmailAsync(dto, folio!, isNew: false), CancellationToken.None);
+            if (responsableCambio && !string.IsNullOrWhiteSpace(dto.EmailResponsable))
+                _ = Task.Run(() => SendResponsableEmailAsync(dto, folio!, isNew: false), CancellationToken.None);
+
             return NoContent();
         }
         catch (Exception ex) { logger.LogError(ex, "Mantenimiento.Update {Id}", id); return StatusCode(500, ex.Message); }
@@ -523,6 +570,8 @@ public class MantenimientoController(
         ubicacion        = r.IsDBNull(r.GetOrdinal("Ubicacion"))        ? null : r.GetString(r.GetOrdinal("Ubicacion")),
         tecnicoAsignado  = r.IsDBNull(r.GetOrdinal("TecnicoAsignado"))  ? null : r.GetString(r.GetOrdinal("TecnicoAsignado")),
         emailTecnico     = r.IsDBNull(r.GetOrdinal("EmailTecnico"))     ? null : r.GetString(r.GetOrdinal("EmailTecnico")),
+        responsableEquipo= r.IsDBNull(r.GetOrdinal("ResponsableEquipo"))? null : r.GetString(r.GetOrdinal("ResponsableEquipo")),
+        emailResponsable = r.IsDBNull(r.GetOrdinal("EmailResponsable")) ? null : r.GetString(r.GetOrdinal("EmailResponsable")),
         fechaProgramada  = r.GetUtcDateTime("FechaProgramada"),
         fechaRealizada   = r.GetUtcDateTimeOrNull("FechaRealizada"),
         duracionMinutos  = r.IsDBNull(r.GetOrdinal("DuracionMinutos"))  ? (int?)null : r.GetInt32(r.GetOrdinal("DuracionMinutos")),
@@ -587,6 +636,60 @@ public class MantenimientoController(
         }
         catch (Exception ex) { logger.LogWarning(ex, "Mantenimiento email failed for {Folio}", folio); }
     }
+
+    private async Task SendResponsableEmailAsync(MantenimientoDto dto, string folio, bool isNew)
+    {
+        try
+        {
+            var smtp    = config.GetSection("SmtpSettings");
+            var host    = smtp["Host"] ?? "";
+            var port    = int.TryParse(smtp["Port"], out var p) ? p : 587;
+            var from    = smtp["FromEmail"] ?? "";
+            var pass    = smtp["Password"] ?? "";
+            var fromName= smtp["FromName"] ?? "Pandora";
+            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from)) return;
+
+            using var client = new MailKit.Net.Smtp.SmtpClient();
+            await client.ConnectAsync(host, port, MailKit.Security.SecureSocketOptions.StartTls);
+            await client.AuthenticateAsync(from, pass);
+
+            var msg = new MimeKit.MimeMessage();
+            msg.From.Add(new MimeKit.MailboxAddress(fromName, from));
+            msg.To.Add(new MimeKit.MailboxAddress(dto.ResponsableEquipo ?? "Responsable", dto.EmailResponsable!));
+            msg.Subject = isNew
+                ? $"[Pandora] Mantenimiento programado para tu equipo: {folio}"
+                : $"[Pandora] Mantenimiento de tu equipo actualizado: {folio}";
+
+            var fecha = dto.FechaProgramada.ToString("dd/MM/yyyy HH:mm");
+            msg.Body = new MimeKit.TextPart("html") { Text = $"""
+                <html><body style="font-family:Arial,sans-serif;font-size:14px">
+                <div style="max-width:600px;margin:0 auto">
+                  <div style="background:#1565c0;padding:20px;border-radius:8px 8px 0 0">
+                    <h2 style="color:white;margin:0">🔧 {(isNew ? "Mantenimiento programado" : "Mantenimiento actualizado")}</h2>
+                  </div>
+                  <div style="border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px">
+                    <p>Hola <strong>{dto.ResponsableEquipo}</strong>,</p>
+                    <p>Se {(isNew ? "ha programado" : "ha actualizado")} un mantenimiento para un equipo bajo tu responsabilidad:</p>
+                    <table style="width:100%;border-collapse:collapse">
+                      <tr><td style="padding:8px;font-weight:bold;color:#555;width:40%">Folio</td><td style="padding:8px"><strong>{folio}</strong></td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Título</td><td style="padding:8px">{dto.Titulo}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Tipo</td><td style="padding:8px">{dto.TipoMantenimiento}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Equipo</td><td style="padding:8px">{dto.NombreEquipo ?? "—"}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Ubicación</td><td style="padding:8px">{dto.Ubicacion ?? "—"}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Técnico asignado</td><td style="padding:8px">{dto.TecnicoAsignado ?? "—"}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Fecha programada</td><td style="padding:8px">{fecha}</td></tr>
+                      <tr><td style="padding:8px;font-weight:bold;color:#555">Prioridad</td><td style="padding:8px">{dto.Prioridad}</td></tr>
+                    </table>
+                    <p style="margin-top:20px;font-size:12px;color:#888">Pandora — Sistema de Gestión</p>
+                  </div>
+                </div>
+                </body></html>
+                """ };
+            await client.SendAsync(msg);
+            await client.DisconnectAsync(true);
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "Mantenimiento responsable email failed for {Folio}", folio); }
+    }
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
@@ -601,6 +704,8 @@ public record MantenimientoDto(
     string?   Ubicacion,
     string?   TecnicoAsignado,
     string?   EmailTecnico,
+    string?   ResponsableEquipo,
+    string?   EmailResponsable,
     DateTime  FechaProgramada,
     DateTime? FechaRealizada,
     int?      DuracionMinutos,
