@@ -15,6 +15,9 @@ public class MantenimientoController(
     ILogger<MantenimientoController> logger,
     Pandora.API.Services.PushService push) : ControllerBase
 {
+    private static readonly TimeZoneInfo MxTz = TimeZoneInfo.FindSystemTimeZoneById(
+        OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
+
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name)
                                ?? User.FindFirstValue("name") ?? "sistema";
@@ -519,7 +522,7 @@ public class MantenimientoController(
                 var titulo   = r.GetString(1);
                 var equipo   = r.IsDBNull(2) ? "" : r.GetString(2);
                 var tecnico  = r.IsDBNull(3) ? null : r.GetString(3);
-                var fecha    = r.GetDateTime(4);
+                var fecha    = TimeZoneInfo.ConvertTimeFromUtc(r.GetUtcDateTime(4), MxTz);
                 var id       = r.GetGuid(5);
                 var body     = $"{titulo} — {equipo} · Programado: {fecha:dd/MM HH:mm}";
 
@@ -607,7 +610,9 @@ public class MantenimientoController(
                 ? $"[Pandora] Nuevo mantenimiento asignado: {folio}"
                 : $"[Pandora] Mantenimiento actualizado: {folio}";
 
-            var fecha = dto.FechaProgramada.ToString("dd/MM/yyyy HH:mm");
+            // dto.FechaProgramada llega en UTC (el frontend manda .toISOString()) — convertir a hora de México antes de mostrarla
+            var fecha = TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(dto.FechaProgramada, DateTimeKind.Utc), MxTz).ToString("dd/MM/yyyy HH:mm");
             msg.Body = new MimeKit.TextPart("html") { Text = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px">
                 <div style="max-width:600px;margin:0 auto">
@@ -660,7 +665,9 @@ public class MantenimientoController(
                 ? $"[Pandora] Mantenimiento programado para tu equipo: {folio}"
                 : $"[Pandora] Mantenimiento de tu equipo actualizado: {folio}";
 
-            var fecha = dto.FechaProgramada.ToString("dd/MM/yyyy HH:mm");
+            // dto.FechaProgramada llega en UTC (el frontend manda .toISOString()) — convertir a hora de México antes de mostrarla
+            var fecha = TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.SpecifyKind(dto.FechaProgramada, DateTimeKind.Utc), MxTz).ToString("dd/MM/yyyy HH:mm");
             msg.Body = new MimeKit.TextPart("html") { Text = $"""
                 <html><body style="font-family:Arial,sans-serif;font-size:14px">
                 <div style="max-width:600px;margin:0 auto">
