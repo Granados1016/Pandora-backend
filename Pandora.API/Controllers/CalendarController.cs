@@ -886,18 +886,28 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     // ── Cobertura de foto/video ───────────────────────────────────────────────────
     //
     // Cuando la reserva marca Foto/Video/Ambas, se le manda un correo directo al
-    // líder de Marketing (config CoverageApproval:LeaderEmail) con dos links de
-    // un solo clic (Aprobar/Rechazar), firmados con HMAC para que nadie más pueda
-    // usarlos. Al hacer clic, CoverageResponse actualiza CoberturaEstado en la
-    // reserva y — si aprueba — lo manda a mkt-ops para que él mismo cree ahí la
-    // tarea a Producción Audiovisual con su login normal. Pandora no toca ni
-    // depende del código de mkt-ops en ningún punto de este flujo.
-    private string BuildCoverageToken(Guid reservationId)
+    // líder de Marketing (config CoverageApproval:LeaderEmail) con un link firmado
+    // hacia "El Bunker" (mkt-ops) — es el Bunker quien valida el token, muestra la
+    // página de confirmación y, si se aprueba, crea ahí mismo la tarea ya asignada
+    // (Foto -> Producción Audiovisual, Video -> Community Manager; ver contrato
+    // INTEGRACION_PANDORA.md del equipo de mkt-ops). Pandora solo genera y firma
+    // el token; no depende del código de mkt-ops ni se entera del resultado (el
+    // Bunker no llama de vuelta — pendiente si algún día se agrega ese callback).
+    //
+    // Token: base64url(JSON) + "." + base64url(HMAC_SHA256(base64url(JSON), secreto)).
+    // El secreto (CoverageApproval:Secret) debe ser IDÉNTICO al PANDORA_SHARED_SECRET
+    // configurado en Railway del lado de mkt-ops.
+    private static string Base64UrlEncode(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private string BuildBunkerToken(Dictionary<string, object?> payload)
     {
         var secret = config["CoverageApproval:Secret"] ?? "";
+        var json   = JsonSerializer.Serialize(payload);
+        var body   = Base64UrlEncode(System.Text.Encoding.UTF8.GetBytes(json));
         using var hmac = new HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secret));
-        var hash = hmac.ComputeHash(reservationId.ToByteArray());
-        return Convert.ToHexString(hash);
+        var sig = Base64UrlEncode(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(body)));
+        return $"{body}.{sig}";
     }
 
     private async Task SendCoverageApprovalEmailAsync(ReservationDto dto, Guid reservationId, string roomName)
@@ -905,7 +915,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         try
         {
             var leaderEmail = config["CoverageApproval:LeaderEmail"];
-            var apiBaseUrl  = config["CoverageApproval:ApiBaseUrl"];
+            var bunkerUrl   = config["CoverageApproval:BunkerUrl"] ?? "https://mkt-ops-production.up.railway.app/cobertura";
             var smtp        = config.GetSection("SmtpSettings");
             var host        = smtp["Host"] ?? "";
             var from        = smtp["FromEmail"] ?? "";
@@ -913,20 +923,57 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             var fromName    = smtp["FromName"] ?? "Pandora";
             var port        = int.TryParse(smtp["Port"], out var p) ? p : 587;
 
-            if (string.IsNullOrWhiteSpace(leaderEmail) || string.IsNullOrWhiteSpace(apiBaseUrl) ||
+            if (string.IsNullOrWhiteSpace(leaderEmail) ||
                 string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
             {
                 logger.LogInformation("CoverageApproval no configurado del todo — se omite correo de cobertura para {Id}", reservationId);
                 return;
             }
 
-            var token       = BuildCoverageToken(reservationId);
-            var acceptUrl   = $"{apiBaseUrl.TrimEnd('/')}/api/calendar/coverage-response?reservationId={reservationId}&token={token}&decision=accept";
-            var rejectUrl   = $"{apiBaseUrl.TrimEnd('/')}/api/calendar/coverage-response?reservationId={reservationId}&token={token}&decision=reject";
+            var mxStart = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, MxTz);
+            var mxEnd   = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime,   MxTz);
+            var dateStr = mxStart.ToString("dddd, dd 'de' MMMM 'de' yyyy", new CultureInfo("es-MX"));
+            var shortId = reservationId.ToString()[..8];
+            var exp     = new DateTimeOffset(mxStart.Date.AddDays(7), TimeSpan.Zero).ToUnixTimeSeconds();
 
-            var mxStart  = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, MxTz);
-            var mxEnd    = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime,   MxTz);
-            var dateStr  = mxStart.ToString("dddd, dd 'de' MMMM 'de' yyyy", new CultureInfo("es-MX"));
+            // "Ambas" se manda como dos solicitudes independientes (dos tareas, una
+            // por equipo). Se sufija el rid por tipo para que no choquen entre sí
+            // en el candado de idempotencia del Bunker (mismo reservationId, distinto tipo).
+            var tipos = dto.CoberturaSolicitada!.Equals("Ambas", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "foto", "video" }
+                : new[] { dto.CoberturaSolicitada!.ToLowerInvariant() };
+
+            var sections = new System.Text.StringBuilder();
+            foreach (var tipo in tipos)
+            {
+                var rid = tipos.Length > 1 ? $"{shortId}{tipo[0]}" : shortId;
+                var payload = new Dictionary<string, object?>
+                {
+                    ["rid"]         = rid,
+                    ["tipo"]        = tipo,
+                    ["evento"]      = dto.Title,
+                    ["sala"]        = roomName,
+                    ["fecha"]       = mxStart.ToString("yyyy-MM-dd"),
+                    ["inicio"]      = mxStart.ToString("HH:mm"),
+                    ["fin"]         = mxEnd.ToString("HH:mm"),
+                    ["organizador"] = dto.OrganizerName,
+                    ["exp"]         = exp,
+                };
+                var token     = BuildBunkerToken(payload);
+                var linkBase  = $"{bunkerUrl.TrimEnd('/')}/{token}";
+                var tipoLabel = tipo == "foto" ? "Foto" : "Video";
+
+                sections.Append($"""
+                    <div style="margin-top:16px">
+                      {(tipos.Length > 1 ? $"""<p style="margin:0 0 8px 0;font-weight:bold">Cobertura {tipoLabel}</p>""" : "")}
+                      <p style="text-align:center;margin:0">
+                        <a href="{linkBase}?a=aprobar" style="background:#2e7d32;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;margin-right:8px">✅ Aprobar {tipoLabel}</a>
+                        <a href="{linkBase}?a=rechazar" style="background:#c62828;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">❌ Rechazar {tipoLabel}</a>
+                      </p>
+                    </div>
+                    """);
+            }
+
             var coverageLabel = dto.CoberturaSolicitada == "Ambas" ? "Foto y Video" : dto.CoberturaSolicitada;
 
             var html = $"""
@@ -944,11 +991,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                       <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Horario</td><td style="padding:8px">{mxStart:HH:mm} – {mxEnd:HH:mm} hrs</td></tr>
                       <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Organizador</td><td style="padding:8px">{dto.OrganizerName ?? "—"}</td></tr>
                     </table>
-                    <p style="text-align:center;margin-top:24px">
-                      <a href="{acceptUrl}" style="background:#2e7d32;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;margin-right:8px">✅ Aprobar</a>
-                      <a href="{rejectUrl}" style="background:#c62828;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">❌ Rechazar</a>
-                    </p>
-                    <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora · Solicitud automática de cobertura · Reservación #{reservationId.ToString()[..8]}</p>
+                    {sections}
+                    <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora · Solicitud automática de cobertura · Reservación #{shortId}</p>
                   </div>
                 </div>
                 </body></html>
@@ -965,119 +1009,11 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await smtpClient.SendAsync(msg);
             await smtpClient.DisconnectAsync(true);
 
-            logger.LogInformation("Correo de cobertura enviado para reserva {Id}", reservationId);
+            logger.LogInformation("Correo de cobertura enviado para reserva {Id} ({Tipos})", reservationId, string.Join(",", tipos));
         }
         catch (Exception ex)
         {
             logger.LogWarning("No se pudo enviar correo de cobertura para {Id}: {Msg}", reservationId, ex.Message);
-        }
-    }
-
-    [HttpGet("coverage-response")]
-    [AllowAnonymous]
-    public async Task<IActionResult> CoverageResponse(Guid reservationId, string token, string decision, CancellationToken ct)
-    {
-        string Page(string title, string message, string? extraHtml = null) => $"""
-            <html><body style="font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333">
-              <h2>{title}</h2>
-              <p style="font-size:16px">{message}</p>
-              {extraHtml ?? ""}
-            </body></html>
-            """;
-
-        if (decision != "accept" && decision != "reject")
-            return Content(Page("Link inválido", "La acción solicitada no es válida."), "text/html");
-
-        if (token != BuildCoverageToken(reservationId))
-            return Content(Page("Link inválido", "Este link no es válido o fue alterado."), "text/html");
-
-        try
-        {
-            await using var conn = Conn();
-            await conn.OpenAsync(ct);
-            await EnsureCoverageColumnAsync(conn, ct);
-
-            string? title = null, organizerEmail = null, organizerName = null, currentEstado = null;
-            using (var readCmd = conn.CreateCommand())
-            {
-                readCmd.CommandText = "SELECT Title, OrganizerEmail, OrganizerName, CoberturaEstado FROM dbo.Reservations WHERE Id = @Id";
-                readCmd.Parameters.AddWithValue("@Id", reservationId);
-                await using var r = await readCmd.ExecuteReaderAsync(ct);
-                if (!await r.ReadAsync(ct))
-                    return Content(Page("No encontrada", "Esta reservación ya no existe."), "text/html");
-                title           = r.GetString(0);
-                organizerEmail  = r.IsDBNull(1) ? null : r.GetString(1);
-                organizerName   = r.IsDBNull(2) ? null : r.GetString(2);
-                currentEstado   = r.IsDBNull(3) ? null : r.GetString(3);
-            }
-
-            if (!string.Equals(currentEstado, "Pendiente", StringComparison.OrdinalIgnoreCase))
-                return Content(Page("Ya procesada", $"Esta solicitud ya fue marcada como <strong>{currentEstado ?? "atendida"}</strong> anteriormente."), "text/html");
-
-            var nuevoEstado = decision == "accept" ? "Aprobada" : "Rechazada";
-            using (var updCmd = conn.CreateCommand())
-            {
-                updCmd.CommandText = "UPDATE dbo.Reservations SET CoberturaEstado = @Estado WHERE Id = @Id";
-                updCmd.Parameters.AddWithValue("@Estado", nuevoEstado);
-                updCmd.Parameters.AddWithValue("@Id", reservationId);
-                await updCmd.ExecuteNonQueryAsync(ct);
-            }
-
-            if (!string.IsNullOrWhiteSpace(organizerEmail))
-                _ = Task.Run(() => NotifyOrganizerCoverageDecisionAsync(organizerEmail!, organizerName, title!, nuevoEstado), CancellationToken.None);
-
-            var extra = decision == "accept"
-                ? """<p><a href="https://mkt-ops-production.up.railway.app" style="background:#1a237e;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Crear tarea en mkt-ops →</a></p>"""
-                : null;
-
-            return Content(Page(
-                decision == "accept" ? "✅ Cobertura aprobada" : "❌ Cobertura rechazada",
-                decision == "accept"
-                    ? "Gracias. Ahora entra a mkt-ops y crea la tarea para Producción Audiovisual."
-                    : "Se avisará al organizador que la cobertura no fue posible.",
-                extra), "text/html");
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "CoverageResponse {Id}", reservationId);
-            return Content(Page("Error", "Ocurrió un error al procesar tu respuesta. Intenta de nuevo más tarde."), "text/html");
-        }
-    }
-
-    private async Task NotifyOrganizerCoverageDecisionAsync(string organizerEmail, string? organizerName, string title, string estado)
-    {
-        try
-        {
-            var smtp = config.GetSection("SmtpSettings");
-            var host = smtp["Host"] ?? "";
-            var from = smtp["FromEmail"] ?? "";
-            var pass = smtp["Password"] ?? "";
-            var fromName = smtp["FromName"] ?? "Pandora";
-            var port = int.TryParse(smtp["Port"], out var p) ? p : 587;
-            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass)) return;
-
-            var estadoTexto = estado == "Aprobada" ? "fue aprobada ✅" : "fue rechazada ❌";
-            var html = $"""
-                <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
-                  <p>Hola {organizerName ?? ""},</p>
-                  <p>Tu solicitud de cobertura de foto/video para <strong>{title}</strong> {estadoTexto} por Marketing.</p>
-                </body></html>
-                """;
-
-            using var smtpClient = new SmtpClient();
-            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
-            await smtpClient.AuthenticateAsync(from, pass);
-            var msg = new MimeMessage();
-            msg.From.Add(new MailboxAddress(fromName, from));
-            msg.To.Add(new MailboxAddress(organizerName ?? "Organizador", organizerEmail));
-            msg.Subject = $"[Pandora] Cobertura {estado.ToLower()}: {title}";
-            msg.Body = new TextPart("html") { Text = html };
-            await smtpClient.SendAsync(msg);
-            await smtpClient.DisconnectAsync(true);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning("No se pudo notificar al organizador: {Msg}", ex.Message);
         }
     }
 
