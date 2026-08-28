@@ -7,6 +7,7 @@ using MimeKit;
 using Pandora.API.Extensions;
 using System.Globalization;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace Pandora.API.Controllers;
@@ -53,6 +54,26 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 SELECT 1 FROM sys.columns
                 WHERE object_id = OBJECT_ID('dbo.Reservations') AND name = 'AttendeesJson')
             ALTER TABLE dbo.Reservations ADD AttendeesJson NVARCHAR(MAX) NULL
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // CoberturaSolicitada: Ninguna | Foto | Video | Ambas — se pide al reservar.
+    // CoberturaEstado: Pendiente | Aprobada | Rechazada — resultado de la aprobación
+    // del líder de Marketing (correo con link de un solo clic, ver más abajo).
+    private async Task EnsureCoverageColumnAsync(SqlConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.Reservations') AND name = 'CoberturaSolicitada')
+            ALTER TABLE dbo.Reservations ADD CoberturaSolicitada NVARCHAR(20) NULL;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.columns
+                WHERE object_id = OBJECT_ID('dbo.Reservations') AND name = 'CoberturaEstado')
+            ALTER TABLE dbo.Reservations ADD CoberturaEstado NVARCHAR(20) NULL
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -184,6 +205,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await EnsureAttendeesColumnAsync(conn, ct);
+            await EnsureCoverageColumnAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
 
             var sql = """
@@ -191,7 +213,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                        r.StartTime, r.EndTime,
                        r.OrganizerName, r.OrganizerEmail, r.MeetLink,
                        r.IsRecurring, r.RecurrenceRule, r.ParentReservationId,
-                       r.CreatedAt, r.AttendeesJson,
+                       r.CreatedAt, r.AttendeesJson, r.CoberturaSolicitada, r.CoberturaEstado,
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
@@ -251,13 +273,14 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await EnsureAttendeesColumnAsync(conn, ct);
+            await EnsureCoverageColumnAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT r.Id, r.Title, r.Description, r.RoomId,
                        r.StartTime, r.EndTime,
                        r.OrganizerName, r.OrganizerEmail, r.MeetLink,
                        r.IsRecurring, r.RecurrenceRule, r.ParentReservationId,
-                       r.CreatedAt, r.AttendeesJson,
+                       r.CreatedAt, r.AttendeesJson, r.CoberturaSolicitada, r.CoberturaEstado,
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
@@ -285,6 +308,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await EnsureAttendeesColumnAsync(conn, ct);
+            await EnsureCoverageColumnAsync(conn, ct);
 
             // Paso 1 — nombre de sala
             string roomName;
@@ -318,16 +342,21 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 ? JsonSerializer.Serialize(dto.Attendees)
                 : null;
 
+            var requiresCoverage = !string.IsNullOrWhiteSpace(dto.CoberturaSolicitada) &&
+                !dto.CoberturaSolicitada.Equals("Ninguna", StringComparison.OrdinalIgnoreCase);
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.Reservations
                     (Id, Title, Description, RoomId, StartTime, EndTime,
                      OrganizerName, OrganizerEmail, MeetLink,
-                     IsRecurring, RecurrenceRule, ParentReservationId, AttendeesJson, CreatedAt)
+                     IsRecurring, RecurrenceRule, ParentReservationId, AttendeesJson,
+                     CoberturaSolicitada, CoberturaEstado, CreatedAt)
                 VALUES
                     (@Id, @Title, @Desc, @RoomId, @Start, @End,
                      @OrgName, @OrgEmail, @MeetLink,
-                     @IsRecurring, @RRule, @ParentId, @AttendeesJson, GETUTCDATE())
+                     @IsRecurring, @RRule, @ParentId, @AttendeesJson,
+                     @Cobertura, @CoberturaEstado, GETUTCDATE())
                 """;
             cmd.Parameters.AddWithValue("@Id",            id);
             cmd.Parameters.AddWithValue("@Title",         dto.Title.Trim());
@@ -342,6 +371,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             cmd.Parameters.AddWithValue("@RRule",         (object?)dto.RecurrenceRule      ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@ParentId",      (object?)dto.ParentReservationId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AttendeesJson", (object?)attendeesJson           ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Cobertura",     (object?)dto.CoberturaSolicitada ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@CoberturaEstado", requiresCoverage ? "Pendiente" : (object)DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
             _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername), CancellationToken.None);
@@ -349,6 +380,11 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 $"📅 Nueva reserva de sala: {roomName}",
                 $"{dto.Title} — {dto.StartTime:dd/MM HH:mm} a {dto.EndTime:HH:mm}",
                 $"/calendar"), CancellationToken.None);
+
+            if (requiresCoverage)
+            {
+                _ = Task.Run(() => SendCoverageApprovalEmailAsync(dto, id, roomName), CancellationToken.None);
+            }
 
             return Ok(new { id });
         }
@@ -366,6 +402,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await EnsureAttendeesColumnAsync(conn, ct);
+            await EnsureCoverageColumnAsync(conn, ct);
 
             // Paso 1 — nombre de sala
             string roomName;
@@ -376,6 +413,16 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 var nameObj = await roomCmd.ExecuteScalarAsync(ct);
                 if (nameObj is null || nameObj is DBNull) return BadRequest("Sala no encontrada o inactiva.");
                 roomName = (string)nameObj;
+            }
+
+            // Cobertura previa — para no reenviar la solicitud a mkt-ops si no cambió
+            string? previousCobertura = null;
+            using (var covCmd = conn.CreateCommand())
+            {
+                covCmd.CommandText = "SELECT CoberturaSolicitada FROM dbo.Reservations WHERE Id = @Id";
+                covCmd.Parameters.AddWithValue("@Id", id);
+                var covObj = await covCmd.ExecuteScalarAsync(ct);
+                previousCobertura = covObj is null or DBNull ? null : (string)covObj;
             }
 
             // Paso 2 — verificar conflicto excluyendo la reservación actual
@@ -414,6 +461,12 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     IsRecurring       = @IsRecurring,
                     RecurrenceRule    = @RRule,
                     AttendeesJson     = @AttendeesJson,
+                    CoberturaSolicitada = @Cobertura,
+                    CoberturaEstado   = CASE
+                        WHEN @Cobertura IS NULL OR @Cobertura = 'Ninguna' THEN NULL
+                        WHEN @Cobertura <> ISNULL(CoberturaSolicitada, '') THEN 'Pendiente'
+                        ELSE CoberturaEstado
+                    END,
                     UpdatedAt         = GETUTCDATE()
                 WHERE Id = @Id
                 """;
@@ -429,10 +482,19 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             cmd.Parameters.AddWithValue("@IsRecurring",   dto.IsRecurring);
             cmd.Parameters.AddWithValue("@RRule",         (object?)dto.RecurrenceRule ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@AttendeesJson", (object?)attendeesJson      ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@Cobertura",     (object?)dto.CoberturaSolicitada ?? DBNull.Value);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Reservación no encontrada.");
 
             _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true, CurrentUsername), CancellationToken.None);
+
+            var coberturaCambio = !string.Equals(previousCobertura, dto.CoberturaSolicitada, StringComparison.OrdinalIgnoreCase);
+            if (coberturaCambio &&
+                !string.IsNullOrWhiteSpace(dto.CoberturaSolicitada) &&
+                !dto.CoberturaSolicitada.Equals("Ninguna", StringComparison.OrdinalIgnoreCase))
+            {
+                _ = Task.Run(() => SendCoverageApprovalEmailAsync(dto, id, roomName), CancellationToken.None);
+            }
 
             return Ok(new { id });
         }
@@ -695,6 +757,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             recurrenceRule      = r.IsDBNull(r.GetOrdinal("RecurrenceRule"))     ? null : r.GetString(r.GetOrdinal("RecurrenceRule")),
             parentReservationId = r.IsDBNull(r.GetOrdinal("ParentReservationId"))? (Guid?)null : r.GetGuid(r.GetOrdinal("ParentReservationId")),
             createdAt           = DateTime.SpecifyKind(r.GetDateTime(r.GetOrdinal("CreatedAt")), DateTimeKind.Utc),
+            coberturaSolicitada = r.IsDBNull(r.GetOrdinal("CoberturaSolicitada")) ? null : r.GetString(r.GetOrdinal("CoberturaSolicitada")),
+            coberturaEstado     = r.IsDBNull(r.GetOrdinal("CoberturaEstado"))     ? null : r.GetString(r.GetOrdinal("CoberturaEstado")),
             roomName            = r.IsDBNull(r.GetOrdinal("RoomName"))           ? null : r.GetString(r.GetOrdinal("RoomName")),
             roomColor           = r.IsDBNull(r.GetOrdinal("RoomColor"))          ? null : r.GetString(r.GetOrdinal("RoomColor")),
             roomCapacity        = r.IsDBNull(r.GetOrdinal("RoomCapacity"))       ? 0    : r.GetInt32(r.GetOrdinal("RoomCapacity")),
@@ -816,6 +880,204 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
         catch (Exception ex)
         {
             logger.LogWarning("Reservation email failed for {Id}: {Msg}", reservationId, ex.Message);
+        }
+    }
+
+    // ── Cobertura de foto/video ───────────────────────────────────────────────────
+    //
+    // Cuando la reserva marca Foto/Video/Ambas, se le manda un correo directo al
+    // líder de Marketing (config CoverageApproval:LeaderEmail) con dos links de
+    // un solo clic (Aprobar/Rechazar), firmados con HMAC para que nadie más pueda
+    // usarlos. Al hacer clic, CoverageResponse actualiza CoberturaEstado en la
+    // reserva y — si aprueba — lo manda a mkt-ops para que él mismo cree ahí la
+    // tarea a Producción Audiovisual con su login normal. Pandora no toca ni
+    // depende del código de mkt-ops en ningún punto de este flujo.
+    private string BuildCoverageToken(Guid reservationId)
+    {
+        var secret = config["CoverageApproval:Secret"] ?? "";
+        using var hmac = new HMACSHA256(System.Text.Encoding.UTF8.GetBytes(secret));
+        var hash = hmac.ComputeHash(reservationId.ToByteArray());
+        return Convert.ToHexString(hash);
+    }
+
+    private async Task SendCoverageApprovalEmailAsync(ReservationDto dto, Guid reservationId, string roomName)
+    {
+        try
+        {
+            var leaderEmail = config["CoverageApproval:LeaderEmail"];
+            var apiBaseUrl  = config["CoverageApproval:ApiBaseUrl"];
+            var smtp        = config.GetSection("SmtpSettings");
+            var host        = smtp["Host"] ?? "";
+            var from        = smtp["FromEmail"] ?? "";
+            var pass        = smtp["Password"] ?? "";
+            var fromName    = smtp["FromName"] ?? "Pandora";
+            var port        = int.TryParse(smtp["Port"], out var p) ? p : 587;
+
+            if (string.IsNullOrWhiteSpace(leaderEmail) || string.IsNullOrWhiteSpace(apiBaseUrl) ||
+                string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass))
+            {
+                logger.LogInformation("CoverageApproval no configurado del todo — se omite correo de cobertura para {Id}", reservationId);
+                return;
+            }
+
+            var token       = BuildCoverageToken(reservationId);
+            var acceptUrl   = $"{apiBaseUrl.TrimEnd('/')}/api/calendar/coverage-response?reservationId={reservationId}&token={token}&decision=accept";
+            var rejectUrl   = $"{apiBaseUrl.TrimEnd('/')}/api/calendar/coverage-response?reservationId={reservationId}&token={token}&decision=reject";
+
+            var mxStart  = TimeZoneInfo.ConvertTimeFromUtc(dto.StartTime, MxTz);
+            var mxEnd    = TimeZoneInfo.ConvertTimeFromUtc(dto.EndTime,   MxTz);
+            var dateStr  = mxStart.ToString("dddd, dd 'de' MMMM 'de' yyyy", new CultureInfo("es-MX"));
+            var coverageLabel = dto.CoberturaSolicitada == "Ambas" ? "Foto y Video" : dto.CoberturaSolicitada;
+
+            var html = $"""
+                <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
+                <div style="max-width:600px;margin:0 auto">
+                  <div style="background:#1a237e;padding:20px;border-radius:8px 8px 0 0">
+                    <h2 style="color:white;margin:0">📸 Solicitud de cobertura {coverageLabel}</h2>
+                  </div>
+                  <div style="border:1px solid #ddd;padding:24px;border-radius:0 0 8px 8px">
+                    <p>Se reservó una sala en Pandora que requiere cobertura de <strong>{coverageLabel}</strong>:</p>
+                    <table style="width:100%;border-collapse:collapse">
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555;width:40%">Evento</td><td style="padding:8px"><strong>{dto.Title}</strong></td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Sala</td><td style="padding:8px">{roomName}</td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Fecha</td><td style="padding:8px">{dateStr}</td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Horario</td><td style="padding:8px">{mxStart:HH:mm} – {mxEnd:HH:mm} hrs</td></tr>
+                      <tr style="border-bottom:1px solid #eee"><td style="padding:8px;font-weight:bold;color:#555">Organizador</td><td style="padding:8px">{dto.OrganizerName ?? "—"}</td></tr>
+                    </table>
+                    <p style="text-align:center;margin-top:24px">
+                      <a href="{acceptUrl}" style="background:#2e7d32;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;margin-right:8px">✅ Aprobar</a>
+                      <a href="{rejectUrl}" style="background:#c62828;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block">❌ Rechazar</a>
+                    </p>
+                    <p style="margin-top:20px;font-size:12px;color:#999;text-align:center">Pandora · Solicitud automática de cobertura · Reservación #{reservationId.ToString()[..8]}</p>
+                  </div>
+                </div>
+                </body></html>
+                """;
+
+            using var smtpClient = new SmtpClient();
+            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
+            await smtpClient.AuthenticateAsync(from, pass);
+            var msg = new MimeMessage();
+            msg.From.Add(new MailboxAddress(fromName, from));
+            msg.To.Add(new MailboxAddress("Marketing", leaderEmail));
+            msg.Subject = $"[Pandora] Cobertura {coverageLabel} solicitada: {dto.Title}";
+            msg.Body    = new TextPart("html") { Text = html };
+            await smtpClient.SendAsync(msg);
+            await smtpClient.DisconnectAsync(true);
+
+            logger.LogInformation("Correo de cobertura enviado para reserva {Id}", reservationId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("No se pudo enviar correo de cobertura para {Id}: {Msg}", reservationId, ex.Message);
+        }
+    }
+
+    [HttpGet("coverage-response")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CoverageResponse(Guid reservationId, string token, string decision, CancellationToken ct)
+    {
+        string Page(string title, string message, string? extraHtml = null) => $"""
+            <html><body style="font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333">
+              <h2>{title}</h2>
+              <p style="font-size:16px">{message}</p>
+              {extraHtml ?? ""}
+            </body></html>
+            """;
+
+        if (decision != "accept" && decision != "reject")
+            return Content(Page("Link inválido", "La acción solicitada no es válida."), "text/html");
+
+        if (token != BuildCoverageToken(reservationId))
+            return Content(Page("Link inválido", "Este link no es válido o fue alterado."), "text/html");
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await EnsureCoverageColumnAsync(conn, ct);
+
+            string? title = null, organizerEmail = null, organizerName = null, currentEstado = null;
+            using (var readCmd = conn.CreateCommand())
+            {
+                readCmd.CommandText = "SELECT Title, OrganizerEmail, OrganizerName, CoberturaEstado FROM dbo.Reservations WHERE Id = @Id";
+                readCmd.Parameters.AddWithValue("@Id", reservationId);
+                await using var r = await readCmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct))
+                    return Content(Page("No encontrada", "Esta reservación ya no existe."), "text/html");
+                title           = r.GetString(0);
+                organizerEmail  = r.IsDBNull(1) ? null : r.GetString(1);
+                organizerName   = r.IsDBNull(2) ? null : r.GetString(2);
+                currentEstado   = r.IsDBNull(3) ? null : r.GetString(3);
+            }
+
+            if (!string.Equals(currentEstado, "Pendiente", StringComparison.OrdinalIgnoreCase))
+                return Content(Page("Ya procesada", $"Esta solicitud ya fue marcada como <strong>{currentEstado ?? "atendida"}</strong> anteriormente."), "text/html");
+
+            var nuevoEstado = decision == "accept" ? "Aprobada" : "Rechazada";
+            using (var updCmd = conn.CreateCommand())
+            {
+                updCmd.CommandText = "UPDATE dbo.Reservations SET CoberturaEstado = @Estado WHERE Id = @Id";
+                updCmd.Parameters.AddWithValue("@Estado", nuevoEstado);
+                updCmd.Parameters.AddWithValue("@Id", reservationId);
+                await updCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            if (!string.IsNullOrWhiteSpace(organizerEmail))
+                _ = Task.Run(() => NotifyOrganizerCoverageDecisionAsync(organizerEmail!, organizerName, title!, nuevoEstado), CancellationToken.None);
+
+            var extra = decision == "accept"
+                ? """<p><a href="https://mkt-ops-production.up.railway.app" style="background:#1a237e;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">Crear tarea en mkt-ops →</a></p>"""
+                : null;
+
+            return Content(Page(
+                decision == "accept" ? "✅ Cobertura aprobada" : "❌ Cobertura rechazada",
+                decision == "accept"
+                    ? "Gracias. Ahora entra a mkt-ops y crea la tarea para Producción Audiovisual."
+                    : "Se avisará al organizador que la cobertura no fue posible.",
+                extra), "text/html");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "CoverageResponse {Id}", reservationId);
+            return Content(Page("Error", "Ocurrió un error al procesar tu respuesta. Intenta de nuevo más tarde."), "text/html");
+        }
+    }
+
+    private async Task NotifyOrganizerCoverageDecisionAsync(string organizerEmail, string? organizerName, string title, string estado)
+    {
+        try
+        {
+            var smtp = config.GetSection("SmtpSettings");
+            var host = smtp["Host"] ?? "";
+            var from = smtp["FromEmail"] ?? "";
+            var pass = smtp["Password"] ?? "";
+            var fromName = smtp["FromName"] ?? "Pandora";
+            var port = int.TryParse(smtp["Port"], out var p) ? p : 587;
+            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(pass)) return;
+
+            var estadoTexto = estado == "Aprobada" ? "fue aprobada ✅" : "fue rechazada ❌";
+            var html = $"""
+                <html><body style="font-family:Arial,sans-serif;font-size:14px;color:#333">
+                  <p>Hola {organizerName ?? ""},</p>
+                  <p>Tu solicitud de cobertura de foto/video para <strong>{title}</strong> {estadoTexto} por Marketing.</p>
+                </body></html>
+                """;
+
+            using var smtpClient = new SmtpClient();
+            await smtpClient.ConnectAsync(host, port, SecureSocketOptions.StartTls);
+            await smtpClient.AuthenticateAsync(from, pass);
+            var msg = new MimeMessage();
+            msg.From.Add(new MailboxAddress(fromName, from));
+            msg.To.Add(new MailboxAddress(organizerName ?? "Organizador", organizerEmail));
+            msg.Subject = $"[Pandora] Cobertura {estado.ToLower()}: {title}";
+            msg.Body = new TextPart("html") { Text = html };
+            await smtpClient.SendAsync(msg);
+            await smtpClient.DisconnectAsync(true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("No se pudo notificar al organizador: {Msg}", ex.Message);
         }
     }
 
@@ -1007,5 +1269,6 @@ public record ReservationDto(
     bool                IsRecurring,
     string?             RecurrenceRule,
     Guid?               ParentReservationId,
-    List<AttendeeDto>?  Attendees
+    List<AttendeeDto>?  Attendees,
+    string?             CoberturaSolicitada = null // Ninguna | Foto | Video | Ambas
 );
