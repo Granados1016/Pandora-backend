@@ -1712,6 +1712,10 @@ using (var scopeEnc = app.Services.CreateScope())
 
         IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Reservations') AND name='TenantId')
             ALTER TABLE dbo.Reservations ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        -- P3 aislamiento por tenant: módulos adicionales
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Comunicados') AND name='TenantId')
+            ALTER TABLE dbo.Comunicados ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1736,6 +1740,12 @@ using (var scopeEnc = app.Services.CreateScope())
         JOIN dbo.AppUsers u ON cr.UserId = CAST(u.Id AS NVARCHAR(100))
         WHERE cr.TenantId IS NULL AND u.TenantId IS NOT NULL;
 
+        -- Comunicados: por autor; el resto cae al tenant por defecto abajo
+        UPDATE c SET c.TenantId = u.TenantId
+        FROM dbo.Comunicados c
+        JOIN dbo.AppUsers u ON LOWER(c.Author) = LOWER(u.Username)
+        WHERE c.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
         -- Poblar Rooms y Reservations con el primer tenant activo (son recursos globales del sistema)
         DECLARE @DefaultTid UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
         IF @DefaultTid IS NOT NULL
@@ -1743,6 +1753,7 @@ using (var scopeEnc = app.Services.CreateScope())
             UPDATE dbo.Rooms        SET TenantId = @DefaultTid WHERE TenantId IS NULL;
             UPDATE dbo.Reservations SET TenantId = @DefaultTid WHERE TenantId IS NULL;
             UPDATE dbo.TicketAreaConfigs SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            UPDATE dbo.Comunicados  SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();
