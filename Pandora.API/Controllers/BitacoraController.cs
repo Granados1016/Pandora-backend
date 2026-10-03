@@ -12,11 +12,15 @@ namespace Pandora.API.Controllers;
 public class BitacoraController(
     IConfiguration config,
     ILogger<BitacoraController> logger,
-    Pandora.API.Services.PushService push) : ControllerBase
+    Pandora.API.Services.PushService push,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private bool IsAdmin => User.IsInRole("Admin");
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name) ?? "Desconocido";
+
+    // Tenant del usuario (fail-closed: si el token no trae tenant, DBNull no empareja).
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── GET /api/bitacora ─────────────────────────────────────────────────────
     [HttpGet]
@@ -34,7 +38,7 @@ public class BitacoraController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
 
-            var where = new List<string> { "IsDeleted = 0" };
+            var where = new List<string> { "IsDeleted = 0", "TenantId = @TenantId" };
             if (!string.IsNullOrWhiteSpace(search))
                 where.Add("(Titulo LIKE @Q OR Descripcion LIKE @Q OR SistemaAfectado LIKE @Q OR UsuarioAfectado LIKE @Q OR Folio LIKE @Q)");
             if (!string.IsNullOrWhiteSpace(categoria))  where.Add("Categoria  = @Categoria");
@@ -53,6 +57,7 @@ public class BitacoraController(
                 ORDER BY CreadoEn DESC
                 """;
 
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(search))    cmd.Parameters.AddWithValue("@Q",         $"%{search}%");
             if (!string.IsNullOrWhiteSpace(categoria))  cmd.Parameters.AddWithValue("@Categoria",  categoria);
             if (!string.IsNullOrWhiteSpace(estado))     cmd.Parameters.AddWithValue("@Estado",     estado);
@@ -83,9 +88,10 @@ public class BitacoraController(
                 SELECT Id, Folio, Titulo, Descripcion, Categoria, Prioridad, Estado, Impacto,
                        SistemaAfectado, UsuarioAfectado, ReportadoPor, AsignadoA,
                        FechaIncidencia, FechaResolucion, TiempoResolucion, Resolucion, CreadoEn
-                FROM dbo.Bitacora WHERE Id = @Id AND IsDeleted = 0
+                FROM dbo.Bitacora WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Entrada no encontrada.");
             var entry = MapRowDetail(r);
@@ -135,9 +141,10 @@ public class BitacoraController(
                 fc.CommandText = """
                     SELECT ISNULL(MAX(CAST(SUBSTRING(Folio, 10, 4) AS INT)), 0) + 1
                     FROM dbo.Bitacora
-                    WHERE Folio LIKE @Prefix
+                    WHERE Folio LIKE @Prefix AND TenantId = @TenantId
                     """;
                 fc.Parameters.AddWithValue("@Prefix", $"BIT-{DateTime.UtcNow.Year}-%");
+                fc.Parameters.AddWithValue("@TenantId", TenantParam);
                 var seq = (int)(await fc.ExecuteScalarAsync(ct) ?? 1);
                 folio = $"BIT-{DateTime.UtcNow.Year}-{seq:D4}";
             }
@@ -148,12 +155,13 @@ public class BitacoraController(
                 INSERT INTO dbo.Bitacora
                     (Id, Folio, Titulo, Descripcion, Categoria, Prioridad, Estado, Impacto,
                      SistemaAfectado, UsuarioAfectado, ReportadoPor, AsignadoA,
-                     FechaIncidencia, FechaResolucion, Resolucion, CreadoEn)
+                     FechaIncidencia, FechaResolucion, Resolucion, CreadoEn, TenantId)
                 VALUES
                     (@Id, @Folio, @Titulo, @Desc, @Cat, @Prio, @Estado, @Impacto,
                      @Sistema, @Usuario, @ReportadoPor, @Asignado,
-                     @FechaInc, @FechaRes, @Resolucion, GETUTCDATE())
+                     @FechaInc, @FechaRes, @Resolucion, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",     TenantParam);
             cmd.Parameters.AddWithValue("@Id",           newId);
             cmd.Parameters.AddWithValue("@Folio",        folio);
             cmd.Parameters.AddWithValue("@Titulo",       dto.Titulo.Trim());
@@ -208,8 +216,9 @@ public class BitacoraController(
                     FechaResolucion = @FechaRes,
                     Resolucion      = @Resolucion,
                     ActualizadoEn   = GETUTCDATE()
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
             cmd.Parameters.AddWithValue("@Id",        id);
             cmd.Parameters.AddWithValue("@Titulo",    dto.Titulo.Trim());
             cmd.Parameters.AddWithValue("@Desc",      dto.Descripcion?.Trim() ?? "");
@@ -248,8 +257,9 @@ public class BitacoraController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.Bitacora SET IsDeleted=1, ActualizadoEn=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0";
+            cmd.CommandText = "UPDATE dbo.Bitacora SET IsDeleted=1, ActualizadoEn=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return NoContent();
@@ -266,6 +276,15 @@ public class BitacoraController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // Verificar que la entrada padre pertenece al tenant del usuario
+            await using (var guard = conn.CreateCommand())
+            {
+                guard.CommandText = "SELECT 1 FROM dbo.Bitacora WHERE Id=@BitId AND IsDeleted=0 AND TenantId=@TenantId";
+                guard.Parameters.AddWithValue("@BitId", id);
+                guard.Parameters.AddWithValue("@TenantId", TenantParam);
+                if (await guard.ExecuteScalarAsync(ct) is null) return NotFound("Entrada no encontrada.");
+            }
 
             var newId = Guid.NewGuid();
             await using var cmd = conn.CreateCommand();
@@ -307,12 +326,13 @@ public class BitacoraController(
                     ISNULL(SUM(CASE WHEN MONTH(FechaIncidencia)=MONTH(GETUTCDATE())
                                      AND YEAR(FechaIncidencia)=YEAR(GETUTCDATE())
                                     THEN 1 ELSE 0 END), 0)                             AS EsteMes
-                FROM dbo.Bitacora WHERE IsDeleted=0;
+                FROM dbo.Bitacora WHERE IsDeleted=0 AND TenantId=@TenantId;
 
                 SELECT TOP 5 Categoria, COUNT(*) AS Total
-                FROM dbo.Bitacora WHERE IsDeleted=0
+                FROM dbo.Bitacora WHERE IsDeleted=0 AND TenantId=@TenantId
                 GROUP BY Categoria ORDER BY Total DESC;
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             await using var r = await cmd.ExecuteReaderAsync(ct);
             object summary = new {};
@@ -352,7 +372,7 @@ public class BitacoraController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
 
-            var where = new List<string> { "IsDeleted=0" };
+            var where = new List<string> { "IsDeleted=0", "TenantId=@TenantId" };
             if (!string.IsNullOrWhiteSpace(estado))    where.Add("Estado=@Estado");
             if (!string.IsNullOrWhiteSpace(categoria)) where.Add("Categoria=@Categoria");
             if (!string.IsNullOrWhiteSpace(desde))     where.Add("FechaIncidencia>=@Desde");
@@ -366,6 +386,7 @@ public class BitacoraController(
                 FROM dbo.Bitacora WHERE {string.Join(" AND ", where)}
                 ORDER BY FechaIncidencia DESC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(estado))    cmd.Parameters.AddWithValue("@Estado",    estado);
             if (!string.IsNullOrWhiteSpace(categoria)) cmd.Parameters.AddWithValue("@Categoria", categoria);
             if (!string.IsNullOrWhiteSpace(desde))     cmd.Parameters.AddWithValue("@Desde",     desde);
