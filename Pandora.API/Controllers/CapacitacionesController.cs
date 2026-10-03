@@ -14,11 +14,13 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class CapacitacionesController(
     IConfiguration config,
-    ILogger<CapacitacionesController> logger) : ControllerBase
+    ILogger<CapacitacionesController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private bool IsAdmin => User.IsInRole("Admin");
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name) ?? "Desconocido";
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── Ensure tables exist ───────────────────────────────────────────────────
     private static async Task EnsureTablesAsync(SqlConnection conn, CancellationToken ct)
@@ -59,6 +61,8 @@ public class CapacitacionesController(
                     CreatedAt       DATETIME2        NOT NULL DEFAULT GETUTCDATE()
                 )
             END;
+            IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
+                ALTER TABLE dbo.Capacitaciones ADD TenantId UNIQUEIDENTIFIER NULL;
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -77,7 +81,7 @@ public class CapacitacionesController(
             await conn.OpenAsync(ct);
             await EnsureTablesAsync(conn, ct);
 
-            var where = new List<string> { "c.IsDeleted = 0" };
+            var where = new List<string> { "c.IsDeleted = 0", "c.TenantId = @TenantId" };
             if (!string.IsNullOrWhiteSpace(status))   where.Add("c.Status = @Status");
             if (!string.IsNullOrWhiteSpace(category)) where.Add("c.Category = @Category");
             if (!string.IsNullOrWhiteSpace(search))   where.Add("(c.Title LIKE @Q OR c.Instructor LIKE @Q OR c.Description LIKE @Q)");
@@ -93,6 +97,7 @@ public class CapacitacionesController(
                 WHERE {string.Join(" AND ", where)}
                 ORDER BY c.StartDate DESC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(status))   cmd.Parameters.AddWithValue("@Status",   status);
             if (!string.IsNullOrWhiteSpace(category)) cmd.Parameters.AddWithValue("@Category", category);
             if (!string.IsNullOrWhiteSpace(search))   cmd.Parameters.AddWithValue("@Q", $"%{search}%");
@@ -122,9 +127,10 @@ public class CapacitacionesController(
                        (SELECT COUNT(*) FROM dbo.CapacitacionParticipantes p
                         WHERE p.CapacitacionId = c.Id AND p.Status != 'Cancelado') AS EnrolledCount
                 FROM dbo.Capacitaciones c
-                WHERE c.Id = @Id AND c.IsDeleted = 0
+                WHERE c.Id = @Id AND c.IsDeleted = 0 AND c.TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             var cap = Map(r);
@@ -173,10 +179,11 @@ public class CapacitacionesController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.Capacitaciones
-                    (Id, Title, Description, Category, Instructor, StartDate, EndDate, Duration, Status, Modality, MaxParticipants, CreatedBy, CreatedAt)
+                    (Id, Title, Description, Category, Instructor, StartDate, EndDate, Duration, Status, Modality, MaxParticipants, CreatedBy, CreatedAt, TenantId)
                 VALUES
-                    (@Id, @Title, @Desc, @Cat, @Instr, @Start, @End, @Dur, @Status, @Mod, @Max, @CreatedBy, GETUTCDATE())
+                    (@Id, @Title, @Desc, @Cat, @Instr, @Start, @End, @Dur, @Status, @Mod, @Max, @CreatedBy, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
             cmd.Parameters.AddWithValue("@Id",        newId);
             cmd.Parameters.AddWithValue("@Title",     dto.Title.Trim());
             cmd.Parameters.AddWithValue("@Desc",      string.IsNullOrWhiteSpace(dto.Description)  ? DBNull.Value : (object)dto.Description);
@@ -211,8 +218,9 @@ public class CapacitacionesController(
                     Title = @Title, Description = @Desc, Category = @Cat, Instructor = @Instr,
                     StartDate = @Start, EndDate = @End, Duration = @Dur, Status = @Status,
                     Modality = @Mod, MaxParticipants = @Max, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",    id);
             cmd.Parameters.AddWithValue("@Title", dto.Title.Trim());
             cmd.Parameters.AddWithValue("@Desc",  string.IsNullOrWhiteSpace(dto.Description)  ? DBNull.Value : (object)dto.Description);
@@ -241,8 +249,9 @@ public class CapacitacionesController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.Capacitaciones SET IsDeleted=1, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0";
+            cmd.CommandText = "UPDATE dbo.Capacitaciones SET IsDeleted=1, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return NoContent();
@@ -262,7 +271,8 @@ public class CapacitacionesController(
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                IF NOT EXISTS (SELECT 1 FROM dbo.CapacitacionParticipantes
+                IF EXISTS (SELECT 1 FROM dbo.Capacitaciones WHERE Id=@CapId AND IsDeleted=0 AND TenantId=@TenantId)
+                AND NOT EXISTS (SELECT 1 FROM dbo.CapacitacionParticipantes
                                WHERE CapacitacionId=@CapId AND Username=@User AND Status!='Cancelado')
                 BEGIN
                   INSERT INTO dbo.CapacitacionParticipantes
@@ -270,6 +280,7 @@ public class CapacitacionesController(
                   VALUES (NEWID(), @CapId, @User, @FN, 'Inscrito', GETUTCDATE())
                 END
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@CapId", id);
             cmd.Parameters.AddWithValue("@User",  dto.Username.Trim().ToLower());
             cmd.Parameters.AddWithValue("@FN",    string.IsNullOrWhiteSpace(dto.FullName) ? DBNull.Value : (object)dto.FullName);
@@ -290,13 +301,16 @@ public class CapacitacionesController(
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                UPDATE dbo.CapacitacionParticipantes
-                SET Status=@Status, Score=@Score, Notes=@Notes,
-                    CompletedAt = CASE WHEN @Status='Completado' THEN GETUTCDATE() ELSE CompletedAt END
-                WHERE Id=@Id AND CapacitacionId=@CapId
+                UPDATE p
+                SET p.Status=@Status, p.Score=@Score, p.Notes=@Notes,
+                    p.CompletedAt = CASE WHEN @Status='Completado' THEN GETUTCDATE() ELSE p.CompletedAt END
+                FROM dbo.CapacitacionParticipantes p
+                JOIN dbo.Capacitaciones c ON c.Id = p.CapacitacionId
+                WHERE p.Id=@Id AND p.CapacitacionId=@CapId AND c.TenantId=@TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id",     partId);
             cmd.Parameters.AddWithValue("@CapId",  id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Status", dto.Status ?? "Inscrito");
             cmd.Parameters.AddWithValue("@Score",  dto.Score.HasValue ? (object)dto.Score.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@Notes",  string.IsNullOrWhiteSpace(dto.Notes) ? DBNull.Value : (object)dto.Notes);
@@ -317,7 +331,8 @@ public class CapacitacionesController(
             await conn.OpenAsync(ct);
             await EnsureTablesAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT DISTINCT Category FROM dbo.Capacitaciones WHERE IsDeleted=0 AND Category IS NOT NULL ORDER BY Category";
+            cmd.CommandText = "SELECT DISTINCT Category FROM dbo.Capacitaciones WHERE IsDeleted=0 AND Category IS NOT NULL AND TenantId=@TenantId ORDER BY Category";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<string>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) list.Add(r.GetString(0));
