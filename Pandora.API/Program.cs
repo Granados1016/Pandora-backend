@@ -88,18 +88,29 @@ builder.Services.AddSwaggerGen(c =>
 // ── CORS ─────────────────────────────────────────────────────────────────────
 string[] allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>()
                           ?? ["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"];
+// Prefijos de proyectos propios permitidos en plataformas públicas (vercel.app / railway.app).
+// Antes se confiaba en CUALQUIER subdominio de esas plataformas — donde cualquiera puede
+// desplegar un sitio — lo que permitía a una página de un tercero (p.ej. evil-xyz.vercel.app)
+// hacer peticiones autenticadas contra la API. Ahora solo se aceptan despliegues cuyo host
+// empieza con uno de estos prefijos (configurable por entorno vía AllowedPlatformPrefixes).
+string[] allowedPlatformPrefixes = builder.Configuration.GetSection("AllowedPlatformPrefixes").Get<string[]>()
+                          ?? ["pandora", "azul"];
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("PandoraPolicy", p =>
         p.SetIsOriginAllowed(origin =>
         {
             if (string.IsNullOrEmpty(origin)) return false;
-            var uri = new Uri(origin);
-            // Permitir cualquier subdominio de vercel.app y railway.app
-            if (uri.Host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)) return true;
-            if (uri.Host.EndsWith(".railway.app", StringComparison.OrdinalIgnoreCase)) return true;
-            // Permitir orígenes explícitos configurados (localhost, etc.)
-            return allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase);
+            // 1) Orígenes explícitos (localhost en dev, dominios propios en prod)
+            if (allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) return true;
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
+            var host = uri.Host;
+            // 2) Plataformas públicas: SOLO despliegues propios (por prefijo), nunca de terceros.
+            bool isPublicPlatform = host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)
+                                 || host.EndsWith(".railway.app", StringComparison.OrdinalIgnoreCase);
+            if (isPublicPlatform)
+                return allowedPlatformPrefixes.Any(pre => host.StartsWith(pre, StringComparison.OrdinalIgnoreCase));
+            return false;
         })
          .AllowAnyHeader()
          .AllowAnyMethod()
@@ -131,6 +142,7 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
                 if (path.StartsWithSegments("/hubs") ||
                     path.StartsWithSegments("/api/inventory/excel") ||
                     path.StartsWithSegments("/api/procedimientos") ||
+                    path.StartsWithSegments("/api/campaigns") ||
                     (path.Value?.Contains("/visualizar") == true))
                 {
                     context.Token = accessToken;
@@ -228,9 +240,12 @@ Directory.CreateDirectory(Path.Combine(storageRoot, "libros"));
 Directory.CreateDirectory(Path.Combine(storageRoot, "portadas"));
 Directory.CreateDirectory(Path.Combine(storageRoot, "vacaciones-docs"));
 
-// ── Swagger ───────────────────────────────────────────────────────────────
-app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pandora v1"));
+// ── Swagger (solo en desarrollo — no exponer la superficie de la API en prod) ─
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pandora v1"));
+}
 
 // ── Archivos estáticos ────────────────────────────────────────────────────
 app.UseDefaultFiles();

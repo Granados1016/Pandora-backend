@@ -609,8 +609,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
     }
 
     // ── Excel Export (simple CSV) ─────────────────────────────────────────────
+    // Requiere JWT. El token puede venir por query (?access_token=) para la
+    // descarga directa del navegador — Program.cs lo promueve a Bearer para
+    // la ruta /api/inventory/excel antes de validar.
     [HttpGet("excel/export")]
-    [AllowAnonymous]
+    [Authorize]
     public async Task<IActionResult> Export([FromQuery] string? access_token, CancellationToken ct)
     {
         try
@@ -647,7 +650,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 
     // ── Excel Template ────────────────────────────────────────────────────────
     [HttpGet("excel/template")]
-    [AllowAnonymous]
+    [Authorize]
     public IActionResult Template([FromQuery] string? access_token)
     {
         using var wb = new XLWorkbook();

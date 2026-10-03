@@ -671,18 +671,14 @@ public class CampaignsController(
     }
 
     // ── GET /api/campaigns/{id}/export ────────────────────────────────────────
+    // Requiere JWT. El token puede venir por query (?access_token=) para la
+    // descarga directa del navegador — Program.cs lo promueve a Bearer para la
+    // ruta /api/campaigns antes de validar, de modo que el endpoint queda
+    // protegido por el middleware de autenticación (ya no [AllowAnonymous]).
     [HttpGet("{id:guid}/export")]
-    [AllowAnonymous]
+    [Authorize]
     public async Task<IActionResult> Export(Guid id, [FromQuery] string? access_token, CancellationToken ct)
     {
-        // Validar token de acceso via query string
-        if (!string.IsNullOrWhiteSpace(access_token))
-        {
-            var token = HttpContext.Request.Headers.Authorization.FirstOrDefault();
-            if (string.IsNullOrWhiteSpace(token))
-                HttpContext.Request.Headers.Append("Authorization", $"Bearer {access_token}");
-        }
-
         try
         {
             await using var conn = Conn();

@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Google.Apis.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -189,6 +190,131 @@ public class AuthController(
         if (tenantId.HasValue)
             dict["tenantId"] = JsonSerializer.SerializeToElement(tenantId.Value.ToString());
         return Ok(dict);
+    }
+
+    // ── POST /api/auth/google ─────────────────────────────────────────────────
+    /// <summary>
+    /// Login con cuenta institucional de Google (OpenID Connect).
+    /// El frontend obtiene un id_token con Google Identity Services y lo envía aquí.
+    /// El acceso lo controla el administrador: el usuario DEBE existir ya en Pandora
+    /// (vinculado por correo). No se auto-crea ninguna cuenta.
+    /// El proveedor de identidad (Google Workspace) es la autoridad de autenticación,
+    /// por lo que este flujo NO exige el OTP propio de Pandora (2FA de la app).
+    /// </summary>
+    [EnableRateLimiting("login-policy")]
+    [HttpPost("google")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GoogleLogin([FromBody] GoogleLoginRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.IdToken))
+            return BadRequest("Token de Google requerido.");
+
+        // ── 1) Validar el id_token con Google (firma, expiración, emisor, audiencia) ──
+        string[] clientIds = config.GetSection("GoogleAuth:ClientIds").Get<string[]>()
+                             ?? (string.IsNullOrWhiteSpace(config["GoogleAuth:ClientId"])
+                                    ? Array.Empty<string>()
+                                    : new[] { config["GoogleAuth:ClientId"]! });
+        if (clientIds.Length == 0)
+        {
+            logger.LogError("GoogleLogin: GoogleAuth:ClientId no está configurado.");
+            return StatusCode(500, new { error = "google_not_configured", message = "El inicio de sesión con Google no está configurado." });
+        }
+
+        GoogleJsonWebSignature.Payload payload;
+        try
+        {
+            payload = await GoogleJsonWebSignature.ValidateAsync(req.IdToken,
+                new GoogleJsonWebSignature.ValidationSettings { Audience = clientIds });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "GoogleLogin: id_token inválido");
+            return Unauthorized("No se pudo validar la cuenta de Google.");
+        }
+
+        if (payload.EmailVerified != true || string.IsNullOrWhiteSpace(payload.Email))
+            return Unauthorized("La cuenta de Google no tiene un correo verificado.");
+
+        var email = payload.Email.Trim();
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // ── 2) El usuario debe existir y estar activo (lo da de alta el admin) ──
+            Guid userId; string username; string fullName; string role; int modules; Guid? tenantId; bool isActive;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT Id, Username, FullName, Role, Modules, TenantId, ISNULL(IsActive, 0)
+                    FROM dbo.AppUsers WHERE LOWER(Email) = LOWER(@Email)
+                    """;
+                cmd.Parameters.AddWithValue("@Email", email);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct))
+                    return StatusCode(403, new { error = "not_provisioned", message = "Tu cuenta aún no tiene acceso a Pandora. Contacta al administrador." });
+
+                userId   = r.GetGuid(0);
+                username = r.IsDBNull(1) ? email : r.GetString(1);
+                fullName = r.IsDBNull(2) ? username : r.GetString(2);
+                role     = r.IsDBNull(3) ? "User" : r.GetString(3);
+                modules  = r.GetInt32(4);
+                tenantId = r.IsDBNull(5) ? null : r.GetGuid(5);
+                isActive = !r.IsDBNull(6) && r.GetBoolean(6);
+            }
+
+            if (!isActive)
+                return StatusCode(403, new { error = "user_disabled", message = "Tu cuenta está desactivada. Contacta al administrador." });
+
+            // ── 3) Verificar licencia del tenant (igual que el login por contraseña) ──
+            if (tenantId.HasValue)
+            {
+                await using var cmdLic = conn.CreateCommand();
+                cmdLic.CommandText = "SELECT ISNULL(IsActive,1), ExpiresAt, Name FROM dbo.Tenants WHERE Id = @T";
+                cmdLic.Parameters.AddWithValue("@T", tenantId.Value);
+                await using var rLic = await cmdLic.ExecuteReaderAsync(ct);
+                if (await rLic.ReadAsync(ct))
+                {
+                    var tActive = rLic.GetBoolean(0);
+                    var tExp    = rLic.IsDBNull(1) ? (DateTime?)null : rLic.GetDateTime(1);
+                    var tName   = rLic.IsDBNull(2) ? "tu organización" : rLic.GetString(2);
+                    if (!tActive)
+                        return StatusCode(403, new { error = "license_suspended", message = "El acceso de su organización ha sido suspendido. Contacte al proveedor." });
+                    if (tExp.HasValue && tExp.Value < DateTime.UtcNow)
+                        return StatusCode(403, new { error = "license_expired", message = $"La licencia de {tName} venció el {tExp.Value:dd/MM/yyyy}. Contacte al proveedor para renovar." });
+                }
+            }
+
+            // ── 4) Emitir JWT + refresh token (misma mecánica que el login normal) ──
+            string token       = BuildJwt(username, role, fullName, modules, userId, tenantId);
+            string refreshToken = NewRefreshToken();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DELETE FROM dbo.RefreshTokens WHERE Username = @Username;
+                    INSERT INTO dbo.RefreshTokens (Token, Username, ExpiresAt, CreatedAt)
+                    VALUES (@Token, @Username, @ExpiresAt, GETUTCDATE());
+                    """;
+                cmd.Parameters.AddWithValue("@Token",     refreshToken);
+                cmd.Parameters.AddWithValue("@Username",  username.ToLower().Trim());
+                cmd.Parameters.AddWithValue("@ExpiresAt", DateTime.UtcNow.AddDays(7));
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            logger.LogInformation("GoogleLogin OK para {Email} (usuario {Username})", email, username);
+            return Ok(new
+            {
+                token,
+                refreshToken,
+                tenantId = tenantId?.ToString(),
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GoogleLogin error for {Email}", email);
+            return StatusCode(500, "Error al iniciar sesión con Google.");
+        }
     }
 
     // ── POST /api/auth/refresh ────────────────────────────────────────────────
@@ -421,6 +547,8 @@ public class AuthController(
     }
 
     // ── POST /api/auth/send-otp ──────────────────────────────────────────────
+    // Rate-limited: evita spam de correos OTP a la cuenta del usuario.
+    [EnableRateLimiting("login-policy")]
     [HttpPost("send-otp")]
     [AllowAnonymous]
     public async Task<IActionResult> SendOtp([FromBody] OtpRequest req, CancellationToken ct)
@@ -467,6 +595,8 @@ public class AuthController(
     }
 
     // ── POST /api/auth/verify-otp ────────────────────────────────────────────
+    // Rate-limited: evita fuerza bruta del código OTP de 6 dígitos.
+    [EnableRateLimiting("login-policy")]
     [HttpPost("verify-otp")]
     [AllowAnonymous]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest req, CancellationToken ct)
@@ -616,6 +746,7 @@ public class AuthController(
 
 // ── DTOs locales ──────────────────────────────────────────────────────────────
 public record RefreshRequest(string RefreshToken);
+public record GoogleLoginRequest(string IdToken);
 public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Token, string NewPassword);
 public record OtpRequest(string Username);
