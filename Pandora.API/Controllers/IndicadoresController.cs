@@ -10,9 +10,11 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class IndicadoresController(
     IConfiguration config,
-    ILogger<IndicadoresController> logger) : ControllerBase
+    ILogger<IndicadoresController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── GET /api/indicadores ──────────────────────────────────────────────────
     /// <summary>
@@ -28,7 +30,8 @@ public class IndicadoresController(
         int usersTotal = 0, usersActive = 0;
         await using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = "SELECT COUNT(*), SUM(CASE WHEN IsActive = 1 THEN 1 ELSE 0 END) FROM dbo.AppUsers";
+            cmd.CommandText = "SELECT COUNT(*), SUM(CASE WHEN IsActive = 1 THEN 1 ELSE 0 END) FROM dbo.AppUsers WHERE TenantId = @TenantId";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (await r.ReadAsync(ct)) { usersTotal = r.IsDBNull(0) ? 0 : r.GetInt32(0); usersActive = r.IsDBNull(1) ? 0 : r.GetInt32(1); }
         }
@@ -47,8 +50,10 @@ public class IndicadoresController(
                         SUM(CASE WHEN MONTH(SentAt) = MONTH(GETUTCDATE()) AND YEAR(SentAt) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisMonth
                     FROM dbo.EmailCampaigns
                     WHERE IsDeleted = 0
+                      AND TenantId = @TenantId
                       AND Status IN ('Completado', 'Completado con errores')
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (await r.ReadAsync(ct))
                 {
@@ -66,12 +71,14 @@ public class IndicadoresController(
                         COUNT(*) AS Cnt
                     FROM dbo.EmailCampaigns
                     WHERE IsDeleted = 0
+                      AND TenantId = @TenantId
                       AND Status IN ('Completado', 'Completado con errores')
                       AND SentAt >= DATEADD(MONTH, -5, DATEFROMPARTS(YEAR(GETUTCDATE()), MONTH(GETUTCDATE()), 1))
                     GROUP BY FORMAT(SentAt, 'MMM yy', 'es-MX'),
                              YEAR(SentAt) * 100 + MONTH(SentAt)
                     ORDER BY YEAR(SentAt) * 100 + MONTH(SentAt)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     mailMonthly.Add(new { month = r.GetString(0), count = r.GetInt32(1) });
@@ -87,12 +94,14 @@ public class IndicadoresController(
         {
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems";
+                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems WHERE TenantId = @TenantId";
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 invItems = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryTypes WHERE IsActive = 1";
+                cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryTypes WHERE IsActive = 1 AND TenantId = @TenantId";
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 invTypes = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
             await using (var cmd = conn.CreateCommand())
@@ -100,11 +109,12 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT TOP 8 t.Name, COUNT(i.Id) AS Cnt
                     FROM dbo.InventoryTypes t
-                    LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
-                    WHERE t.IsActive = 1
+                    LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id AND i.TenantId = t.TenantId
+                    WHERE t.IsActive = 1 AND t.TenantId = @TenantId
                     GROUP BY t.Id, t.Name
                     ORDER BY Cnt DESC
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     invByType.Add(new { typeName = r.GetString(0), count = r.GetInt32(1) });
@@ -123,8 +133,10 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT Status, COUNT(*) AS Cnt
                     FROM dbo.Tickets
+                    WHERE TenantId = @TenantId
                     GROUP BY Status
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                 {
@@ -150,8 +162,10 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT Estado, COUNT(*) AS Cnt
                     FROM dbo.Licencias
+                    WHERE TenantId = @TenantId
                     GROUP BY Estado
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                 {
@@ -166,10 +180,12 @@ public class IndicadoresController(
                 cmd.CommandText = """
                     SELECT COUNT(*) FROM dbo.Licencias
                     WHERE Estado = 'Activa'
+                      AND TenantId = @TenantId
                       AND ProximoPago IS NOT NULL
                       AND ProximoPago <= DATEADD(DAY, 30, CAST(GETDATE() AS DATE))
                       AND ProximoPago >= CAST(GETDATE() AS DATE)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 licExpiringSoon = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
             }
         }
@@ -187,7 +203,9 @@ public class IndicadoresController(
                         ISNULL(SUM(CASE WHEN MONTH(StartTime) = MONTH(GETUTCDATE()) AND YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END), 0),
                         ISNULL(SUM(CASE WHEN StartTime >= GETUTCDATE() THEN 1 ELSE 0 END), 0)
                     FROM dbo.Reservations
+                    WHERE TenantId = @TenantId
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (await r.ReadAsync(ct))
                 {
