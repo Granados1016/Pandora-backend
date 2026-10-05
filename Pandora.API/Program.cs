@@ -1751,6 +1751,16 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
             ALTER TABLE dbo.RoomRequests ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+            ALTER TABLE dbo.VacationRequests ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.VacationHolidays') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationHolidays') AND name='TenantId')
+            ALTER TABLE dbo.VacationHolidays ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+            ALTER TABLE dbo.VacationPolicies ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1810,6 +1820,20 @@ using (var scopeEnc = app.Services.CreateScope())
             JOIN dbo.AppUsers u ON LOWER(af.CreatedBy) = LOWER(u.Username)
             WHERE af.TenantId IS NULL AND u.TenantId IS NOT NULL;
 
+        -- VacationRequests/Policies: por su Username; el resto al tenant por defecto
+        IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+            UPDATE vr SET vr.TenantId = u.TenantId
+            FROM dbo.VacationRequests vr
+            JOIN dbo.AppUsers u ON LOWER(vr.Username) = LOWER(u.Username)
+            WHERE vr.TenantId IS NULL AND u.TenantId IS NOT NULL;
+        IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+            UPDATE vp SET vp.TenantId = u.TenantId
+            FROM dbo.VacationPolicies vp
+            JOIN dbo.AppUsers u ON LOWER(vp.Username) = LOWER(u.Username)
+            WHERE vp.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
         -- Poblar Rooms y Reservations con el primer tenant activo (son recursos globales del sistema)
         DECLARE @DefaultTid UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
         IF @DefaultTid IS NOT NULL
@@ -1841,6 +1865,15 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
                 UPDATE dbo.RoomRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+                UPDATE dbo.VacationRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationHolidays') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationHolidays') AND name='TenantId')
+                UPDATE dbo.VacationHolidays SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+                UPDATE dbo.VacationPolicies SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();

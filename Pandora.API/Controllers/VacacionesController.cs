@@ -18,9 +18,11 @@ public class VacacionesController(
     IConfiguration config,
     IWebHostEnvironment env,
     ILogger<VacacionesController> logger,
-    IHubContext<NotificationsHub> hub) : ControllerBase
+    IHubContext<NotificationsHub> hub,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     private string CurrentUser =>
         User.FindFirstValue(ClaimTypes.Name) ??
@@ -59,8 +61,10 @@ public class VacacionesController(
         cmd.CommandText = """
             SELECT HolidayDate, IsRecurring FROM dbo.VacationHolidays
             WHERE IsDeleted = 0
+              AND TenantId = @TenantId
               AND (YEAR(HolidayDate) = @Year OR IsRecurring = 1)
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year", year);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -98,9 +102,11 @@ public class VacacionesController(
             FROM dbo.VacationRequests
             WHERE Username = @Username
               AND IsDeleted = 0
+              AND TenantId = @TenantId
               AND (YEAR(StartDate) = @Year OR YEAR(EndDate) = @Year)
             """;
         cmd.Parameters.AddWithValue("@Username", username);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year", year);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -137,10 +143,11 @@ public class VacacionesController(
         {
             pol.CommandText = """
                 SELECT TotalDays FROM dbo.VacationPolicies
-                WHERE Username = @Username AND Year = @Year
+                WHERE Username = @Username AND Year = @Year AND TenantId = @TenantId
                 """;
             pol.Parameters.AddWithValue("@Username", username);
             pol.Parameters.AddWithValue("@Year", year);
+            pol.Parameters.AddWithValue("@TenantId", TenantParam);
             var val = await pol.ExecuteScalarAsync(ct);
             if (val != null) totalDays = (int)val;
         }
@@ -156,9 +163,11 @@ public class VacacionesController(
                   AND YEAR(StartDate) = @Year
                   AND Status = 'Aprobado'
                   AND IsDeleted = 0
+                  AND TenantId = @TenantId
                 """;
             used.Parameters.AddWithValue("@Username", username);
             used.Parameters.AddWithValue("@Year", year);
+            used.Parameters.AddWithValue("@TenantId", TenantParam);
             usedDays = (int)(await used.ExecuteScalarAsync(ct) ?? 0);
         }
 
@@ -173,9 +182,11 @@ public class VacacionesController(
                   AND YEAR(StartDate) = @Year
                   AND Status = 'Pendiente'
                   AND IsDeleted = 0
+                  AND TenantId = @TenantId
                 """;
             pend.Parameters.AddWithValue("@Username", username);
             pend.Parameters.AddWithValue("@Year", year);
+            pend.Parameters.AddWithValue("@TenantId", TenantParam);
             pendingDays = (int)(await pend.ExecuteScalarAsync(ct) ?? 0);
         }
 
@@ -214,10 +225,12 @@ public class VacacionesController(
             SELECT COUNT(*) FROM dbo.VacationRequests
             WHERE Username = @Username
               AND IsDeleted = 0
+              AND TenantId = @TenantId
               AND Status IN ('Pendiente','Aprobado')
               AND StartDate <= @End AND EndDate >= @Start
             """;
         checkCmd.Parameters.AddWithValue("@Username", username);
+        checkCmd.Parameters.AddWithValue("@TenantId", TenantParam);
         checkCmd.Parameters.AddWithValue("@Start", dto.StartDate.ToDateTime(TimeOnly.MinValue));
         checkCmd.Parameters.AddWithValue("@End",   dto.EndDate.ToDateTime(TimeOnly.MinValue));
         int overlap = (int)(await checkCmd.ExecuteScalarAsync(ct) ?? 0);
@@ -229,10 +242,11 @@ public class VacacionesController(
         await using var ins = conn.CreateCommand();
         ins.CommandText = """
             INSERT INTO dbo.VacationRequests
-                (Username, FullName, StartDate, EndDate, TotalDays, Type, Notes, Status, CreatedAt, IsDeleted)
+                (Username, FullName, StartDate, EndDate, TotalDays, Type, Notes, Status, CreatedAt, IsDeleted, TenantId)
             OUTPUT INSERTED.Id
-            VALUES (@Username, @FullName, @Start, @End, @TotalDays, @Type, @Notes, 'Pendiente', GETUTCDATE(), 0)
+            VALUES (@Username, @FullName, @Start, @End, @TotalDays, @Type, @Notes, 'Pendiente', GETUTCDATE(), 0, @TenantId)
             """;
+        ins.Parameters.AddWithValue("@TenantId", TenantParam);
         ins.Parameters.AddWithValue("@Username", username);
         ins.Parameters.AddWithValue("@FullName", fullName);
         ins.Parameters.AddWithValue("@Start",    dto.StartDate.ToDateTime(TimeOnly.MinValue));
@@ -269,10 +283,11 @@ public class VacacionesController(
             UPDATE dbo.VacationRequests
             SET Status = 'Cancelado'
             WHERE Id = @Id AND Username = @Username
-              AND Status = 'Pendiente' AND IsDeleted = 0
+              AND Status = 'Pendiente' AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id",       id);
         cmd.Parameters.AddWithValue("@Username", username);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0 ? NoContent() : NotFound();
     }
@@ -290,10 +305,11 @@ public class VacacionesController(
                    CASE WHEN DocumentPath IS NOT NULL THEN 1 ELSE 0 END AS HasDocument,
                    ReviewedBy, ReviewedAt
             FROM dbo.VacationRequests
-            WHERE Username = @Username AND IsDeleted = 0
+            WHERE Username = @Username AND IsDeleted = 0 AND TenantId = @TenantId
             ORDER BY CreatedAt DESC
             """;
         cmd.Parameters.AddWithValue("@Username", username);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -335,9 +351,11 @@ public class VacacionesController(
                    JefeReviewedBy, JefeReviewedAt, JefeNotes
             FROM dbo.VacationRequests
             WHERE IsDeleted = 0
+              AND TenantId = @TenantId
               AND (@Status IS NULL OR Status = @Status)
             ORDER BY CreatedAt DESC
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Status", (object?)status ?? DBNull.Value);
         var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -386,9 +404,10 @@ public class VacacionesController(
                        vr.StartDate, vr.EndDate, vr.TotalDays
                 FROM dbo.VacationRequests vr
                 LEFT JOIN dbo.AppUsers au ON LOWER(au.Username)=LOWER(vr.Username)
-                WHERE vr.Id=@Id AND vr.IsDeleted=0
+                WHERE vr.Id=@Id AND vr.IsDeleted=0 AND vr.TenantId=@TenantId
                 """;
             sel.Parameters.AddWithValue("@Id", id);
+            sel.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await sel.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             reqUsername = r.GetString(0);
@@ -409,9 +428,10 @@ public class VacacionesController(
                 JefeReviewedBy  = @JefeBy,
                 JefeReviewedAt  = GETUTCDATE(),
                 JefeNotes       = @JefeNotes
-            WHERE Id=@Id AND ApprovalStage='PendienteJefe' AND IsDeleted=0
+            WHERE Id=@Id AND ApprovalStage='PendienteJefe' AND IsDeleted=0 AND TenantId=@TenantId
             """;
         cmd.Parameters.AddWithValue("@Id",       id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Stage",    dto.Status == "Rechazado" ? "Rechazado" : "PendienteRRHH");
         cmd.Parameters.AddWithValue("@Status",   finalStatus);
         cmd.Parameters.AddWithValue("@JefeBy",   reviewer);
@@ -467,9 +487,10 @@ public class VacacionesController(
                        ISNULL(au.Email, ''), vr.StartDate, vr.EndDate, vr.TotalDays
                 FROM   dbo.VacationRequests vr
                 LEFT JOIN dbo.AppUsers au ON LOWER(au.Username) = LOWER(vr.Username)
-                WHERE  vr.Id = @Id AND vr.IsDeleted = 0
+                WHERE  vr.Id = @Id AND vr.IsDeleted = 0 AND vr.TenantId = @TenantId
                 """;
             sel.Parameters.AddWithValue("@Id", id);
+            sel.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await sel.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             reqUsername = r.GetString(0);
@@ -485,8 +506,9 @@ public class VacacionesController(
             UPDATE dbo.VacationRequests
             SET Status = @Status, ApprovalStage = @Stage,
                 ReviewedBy = @ReviewedBy, ReviewedAt = GETUTCDATE(), ReviewNotes = @ReviewNotes
-            WHERE Id = @Id AND ApprovalStage = 'PendienteRRHH' AND IsDeleted = 0
+            WHERE Id = @Id AND ApprovalStage = 'PendienteRRHH' AND IsDeleted = 0 AND TenantId = @TenantId
             """;
+        cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
         cmd.Parameters.AddWithValue("@Id",          id);
         cmd.Parameters.AddWithValue("@Status",      dto.Status);
         cmd.Parameters.AddWithValue("@Stage",       dto.Status);
@@ -526,9 +548,11 @@ public class VacacionesController(
             SELECT Id, HolidayDate, Name, IsRecurring
             FROM dbo.VacationHolidays
             WHERE IsDeleted = 0
+              AND TenantId = @TenantId
               AND (YEAR(HolidayDate) = @Year OR IsRecurring = 1)
             ORDER BY MONTH(HolidayDate), DAY(HolidayDate)
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year", year);
         var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -551,10 +575,11 @@ public class VacacionesController(
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO dbo.VacationHolidays (HolidayDate, Name, IsRecurring)
+            INSERT INTO dbo.VacationHolidays (HolidayDate, Name, IsRecurring, TenantId)
             OUTPUT INSERTED.Id
-            VALUES (@Date, @Name, @IsRecurring)
+            VALUES (@Date, @Name, @IsRecurring, @TenantId)
             """;
+        cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
         cmd.Parameters.AddWithValue("@Date",        dto.HolidayDate.ToDateTime(TimeOnly.MinValue));
         cmd.Parameters.AddWithValue("@Name",        dto.Name);
         cmd.Parameters.AddWithValue("@IsRecurring", dto.IsRecurring);
@@ -570,8 +595,9 @@ public class VacacionesController(
         await using var conn = Conn();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE dbo.VacationHolidays SET IsDeleted=1 WHERE Id=@Id AND IsDeleted=0";
+        cmd.CommandText = "UPDATE dbo.VacationHolidays SET IsDeleted=1 WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId";
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows > 0 ? NoContent() : NotFound();
     }
@@ -598,17 +624,19 @@ public class VacacionesController(
                         WHERE r.Username = u.Username
                           AND YEAR(r.StartDate) = @Year
                           AND r.Status = 'Aprobado'
-                          AND r.IsDeleted = 0), 0) AS UsedDays
+                          AND r.IsDeleted = 0
+                          AND r.TenantId = @TenantId), 0) AS UsedDays
             FROM dbo.AppUsers u
             LEFT JOIN dbo.VacationPolicies p
-                ON p.Username = u.Username AND p.Year = @Year
+                ON p.Username = u.Username AND p.Year = @Year AND p.TenantId = @TenantId
             LEFT JOIN dbo.Employees e
                 ON LOWER(e.Email) = LOWER(u.Email) OR LOWER(e.FullName) = LOWER(u.FullName)
             LEFT JOIN dbo.Departments d
                 ON d.Id = e.DepartmentId
-            WHERE u.IsActive = 1
+            WHERE u.IsActive = 1 AND u.TenantId = @TenantId
             ORDER BY u.FullName
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year", y);
         var items = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -642,14 +670,16 @@ public class VacacionesController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             MERGE dbo.VacationPolicies AS target
-            USING (SELECT @Username AS Username, @Year AS Year) AS source
+            USING (SELECT @Username AS Username, @Year AS Year, @TenantId AS TenantId) AS source
                 ON target.Username = source.Username AND target.Year = source.Year
+                   AND target.TenantId = source.TenantId
             WHEN MATCHED THEN
                 UPDATE SET TotalDays = @TotalDays
             WHEN NOT MATCHED THEN
-                INSERT (Username, Year, TotalDays)
-                VALUES (@Username, @Year, @TotalDays);
+                INSERT (Username, Year, TotalDays, TenantId)
+                VALUES (@Username, @Year, @TotalDays, @TenantId);
             """;
+        cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
         cmd.Parameters.AddWithValue("@Username",  dto.Username);
         cmd.Parameters.AddWithValue("@Year",      dto.Year);
         cmd.Parameters.AddWithValue("@TotalDays", dto.TotalDays);
@@ -684,9 +714,10 @@ public class VacacionesController(
             sel.CommandText = """
                 SELECT Username, DocumentPath
                 FROM dbo.VacationRequests
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
             sel.Parameters.AddWithValue("@Id", id);
+            sel.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var rr = await sel.ExecuteReaderAsync(ct);
             if (!await rr.ReadAsync(ct)) return NotFound();
             owner   = rr.GetString(0);
@@ -711,10 +742,11 @@ public class VacacionesController(
         upd.CommandText = """
             UPDATE dbo.VacationRequests
             SET DocumentPath = @Path
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         upd.Parameters.AddWithValue("@Path", filePath);
         upd.Parameters.AddWithValue("@Id",   id);
+        upd.Parameters.AddWithValue("@TenantId", TenantParam);
         await upd.ExecuteNonQueryAsync(ct);
 
         logger.LogInformation("Documento subido para solicitud #{Id} por {User}", id, username);
@@ -734,9 +766,10 @@ public class VacacionesController(
         cmd.CommandText = """
             SELECT Username, DocumentPath
             FROM dbo.VacationRequests
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         if (!await r.ReadAsync(ct)) return NotFound();
 
@@ -779,10 +812,12 @@ public class VacacionesController(
             FROM dbo.VacationRequests r
             JOIN dbo.AppUsers u ON u.Username = r.Username
             WHERE r.IsDeleted = 0
+              AND r.TenantId = @TenantId
               AND (YEAR(r.StartDate) = @Year OR YEAR(r.EndDate) = @Year)
               {(string.IsNullOrWhiteSpace(status) ? "" : "AND r.Status = @Status")}
             ORDER BY r.CreatedAt DESC
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year", y);
         if (!string.IsNullOrWhiteSpace(status)) cmd.Parameters.AddWithValue("@Status", status);
 
@@ -880,6 +915,7 @@ public class VacacionesController(
             FROM dbo.VacationRequests r
             JOIN dbo.AppUsers u ON u.Username = r.Username
             WHERE r.IsDeleted = 0
+              AND r.TenantId = @TenantId
               AND r.Status = 'Aprobada'
               AND (
                   (YEAR(r.StartDate) = @Year AND MONTH(r.StartDate) = @Month)
@@ -889,6 +925,7 @@ public class VacacionesController(
               )
             ORDER BY r.StartDate, u.FullName
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year",  year);
         cmd.Parameters.AddWithValue("@Month", month);
 
@@ -933,6 +970,7 @@ public class VacacionesController(
             LEFT JOIN dbo.Employees e ON LOWER(e.Email)=LOWER(u.Email)
             LEFT JOIN dbo.Departments d ON d.Id = e.DepartmentId
             WHERE r.IsDeleted=0
+              AND r.TenantId=@TenantId
               AND r.Status='Aprobado'
               AND (
                 (YEAR(r.StartDate)=@Year AND MONTH(r.StartDate)=@Month)
@@ -942,6 +980,7 @@ public class VacacionesController(
               )
             ORDER BY d.Name, u.FullName
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Year",  year);
         cmd.Parameters.AddWithValue("@Month", month);
 
