@@ -34,7 +34,7 @@ public class AuthController(
     /// Centraliza la lógica compartida entre /refresh y /verify-otp.
     /// </summary>
     private string BuildJwt(string username, string role, string fullName, int modules, Guid userId,
-                            Guid? tenantId = null)
+                            Guid? tenantId = null, string? impersonatedBy = null)
     {
         string jwtKey   = config["JwtSettings:Key"]!;
         string issuer   = config["JwtSettings:Issuer"]!;
@@ -53,6 +53,10 @@ public class AuthController(
 
         if (tenantId.HasValue)
             claims.Add(new Claim("tenantId", tenantId.Value.ToString()));
+
+        // Marca de impersonación: el SuperAdmin está actuando como Admin de este tenant.
+        if (!string.IsNullOrWhiteSpace(impersonatedBy))
+            claims.Add(new Claim("impersonatedBy", impersonatedBy));
 
         var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
         var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -314,6 +318,51 @@ public class AuthController(
         {
             logger.LogError(ex, "GoogleLogin error for {Email}", email);
             return StatusCode(500, "Error al iniciar sesión con Google.");
+        }
+    }
+
+    // ── POST /api/auth/impersonate/{tenantId} ─────────────────────────────────
+    /// <summary>
+    /// "Entrar como" un cliente: el SuperAdmin obtiene un token de Admin scoped
+    /// al tenant indicado. Con ese token actúa como administrador de ESE cliente
+    /// y todo el aislamiento por tenant + los [Authorize(Roles="Admin")] aplican
+    /// igual. El token lleva el claim "impersonatedBy" para auditoría. No se
+    /// persiste refresh token (no debe sobrescribir la sesión real del SuperAdmin);
+    /// al expirar, el SuperAdmin vuelve a "entrar como".
+    /// </summary>
+    [HttpPost("impersonate/{tenantId:guid}")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<IActionResult> Impersonate(Guid tenantId, CancellationToken ct)
+    {
+        var saUser     = User.FindFirstValue(ClaimTypes.Name) ?? "";
+        var saUserId   = Guid.TryParse(User.FindFirstValue(JwtRegisteredClaimNames.Sub), out var g) ? g : Guid.Empty;
+        var saFullName = User.FindFirstValue("fullName") ?? saUser;
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            string tenantName;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Name FROM dbo.Tenants WHERE Id = @T";
+                cmd.Parameters.AddWithValue("@T", tenantId);
+                var nameObj = await cmd.ExecuteScalarAsync(ct);
+                if (nameObj is null or DBNull) return NotFound(new { error = "tenant_not_found", message = "Cliente no encontrado." });
+                tenantName = (string)nameObj;
+            }
+
+            // Token de Admin scoped al tenant, actuando como el SuperAdmin (auditoría)
+            var token = BuildJwt(saUser, "Admin", saFullName, modules: -1, userId: saUserId,
+                                 tenantId: tenantId, impersonatedBy: saUser);
+
+            logger.LogInformation("SuperAdmin {User} impersona al tenant {Tenant} ({Id})", saUser, tenantName, tenantId);
+            return Ok(new { token, tenantId = tenantId.ToString(), tenantName });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Impersonate tenant {Id}", tenantId);
+            return StatusCode(500, "Error al entrar como el cliente.");
         }
     }
 

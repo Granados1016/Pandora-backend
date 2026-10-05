@@ -349,11 +349,29 @@ using (var scope = app.Services.CreateScope())
             FullName     = "Administrador Pandora",
             Email        = builder.Configuration["AdminUser:Email"] ?? "admin@pandora.local",
             PasswordHash = UserService.HashPassword(adminPassword),
-            Role         = "Admin",
+            Role         = "SuperAdmin",   // el primer usuario del sistema es el Super Admin del proveedor
             Modules      = ModuleAccess.All,
             IsActive     = true
         });
         await db.SaveChangesAsync();
+    }
+
+    // ── Promover al Super Admin del proveedor (idempotente, cada arranque) ──────
+    // El usuario configurado en SuperAdmin:Username (por defecto el AdminUser) tiene
+    // rol "SuperAdmin": gestiona TODOS los clientes/tenants. Un Admin normal solo
+    // administra su propio tenant. Esto corre también en BDs existentes.
+    {
+        var superUser = (builder.Configuration["SuperAdmin:Username"]
+                         ?? builder.Configuration["AdminUser:Username"]
+                         ?? "admin").ToLower();
+        await using var connSa = new Microsoft.Data.SqlClient.SqlConnection(
+            builder.Configuration.GetConnectionString("PandoraDb"));
+        await connSa.OpenAsync();
+        await using var cmdSa = connSa.CreateCommand();
+        cmdSa.CommandText = "UPDATE dbo.AppUsers SET Role = 'SuperAdmin' WHERE LOWER(Username) = @U AND Role <> 'SuperAdmin'";
+        cmdSa.Parameters.AddWithValue("@U", superUser);
+        var promoted = await cmdSa.ExecuteNonQueryAsync();
+        if (promoted > 0) Console.WriteLine($"[SuperAdmin] Usuario '{superUser}' promovido a SuperAdmin.");
     }
 
     // ── Biblioteca — seed inicial de categorías y libros ─────────────────

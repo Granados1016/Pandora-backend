@@ -19,11 +19,12 @@ public class TenantsController(IConfiguration config, ILogger<TenantsController>
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
-    // Cualquier Admin puede gestionar tenants — en producción se puede restringir
-    // a un username específico via config["SuperAdmin:Username"] si se desea
-    private bool IsSuperAdmin => User.IsInRole("Admin") ||
+    // Solo el Super Admin del proveedor (rol "SuperAdmin") gestiona tenants/clientes.
+    // Un Admin normal administra únicamente SU propio tenant; NO puede ver ni crear
+    // otros clientes (esto cierra la fuga previa donde cualquier Admin gestionaba tenants).
+    private bool IsSuperAdmin => User.IsInRole("SuperAdmin") ||
         User.Claims.Any(c => c.Type.EndsWith("role", StringComparison.OrdinalIgnoreCase) &&
-                             c.Value.Equals("Admin", StringComparison.OrdinalIgnoreCase));
+                             c.Value.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase));
 
     // ── GET /api/tenants ──────────────────────────────────────────────────────
     [HttpGet]
