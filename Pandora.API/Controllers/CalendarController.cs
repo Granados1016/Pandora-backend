@@ -15,12 +15,13 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/calendar")]
 [Authorize]
-public class CalendarController(IConfiguration config, ILogger<CalendarController> logger, Pandora.API.Services.PushService push) : ControllerBase
+public class CalendarController(IConfiguration config, ILogger<CalendarController> logger, Pandora.API.Services.PushService push, Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private static readonly TimeZoneInfo MxTz = TimeZoneInfo.FindSystemTimeZoneById(
         OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
 
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     private string? CurrentUsername =>
         User.FindFirstValue(ClaimTypes.Name) ??
@@ -92,8 +93,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, Name, Capacity, Location, Color, Description, IsActive, CreatedAt
-                FROM dbo.Rooms ORDER BY Name
+                FROM dbo.Rooms WHERE TenantId = @TenantId ORDER BY Name
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -124,9 +126,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO dbo.Rooms (Id, Name, Capacity, Location, Color, Description, IsActive, CreatedAt)
-                VALUES (@Id, @Name, @Capacity, @Location, @Color, @Desc, @IsActive, GETUTCDATE())
+                INSERT INTO dbo.Rooms (Id, Name, Capacity, Location, Color, Description, IsActive, CreatedAt, TenantId)
+                VALUES (@Id, @Name, @Capacity, @Location, @Color, @Desc, @IsActive, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Capacity", dto.Capacity);
@@ -153,8 +156,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 UPDATE dbo.Rooms
                 SET Name = @Name, Capacity = @Capacity, Location = @Location,
                     Color = @Color, Description = @Desc, IsActive = @IsActive, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Capacity", dto.Capacity);
@@ -177,8 +181,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.Rooms SET IsActive = 0, UpdatedAt = GETUTCDATE() WHERE Id = @Id";
+            cmd.CommandText = "UPDATE dbo.Rooms SET IsActive = 0, UpdatedAt = GETUTCDATE() WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Sala no encontrada.");
             return NoContent();
@@ -217,12 +222,13 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
-                WHERE r.StartTime < @End AND r.EndTime > @Start
+                WHERE r.TenantId = @TenantId AND r.StartTime < @End AND r.EndTime > @Start
                 """;
             if (roomId.HasValue) sql += " AND r.RoomId = @RoomId";
             sql += " ORDER BY r.StartTime";
 
             cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Start", start);
             cmd.Parameters.AddWithValue("@End",   end);
             if (roomId.HasValue) cmd.Parameters.AddWithValue("@RoomId", roomId.Value);
@@ -251,10 +257,11 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var cmd = conn.CreateCommand();
             var sql = """
                 SELECT COUNT(1) FROM dbo.Reservations
-                WHERE RoomId = @RoomId AND StartTime < @End AND EndTime > @Start
+                WHERE TenantId = @TenantId AND RoomId = @RoomId AND StartTime < @End AND EndTime > @Start
                 """;
             if (excludeId.HasValue) sql += " AND Id <> @ExcludeId";
             cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@RoomId", roomId);
             cmd.Parameters.AddWithValue("@Start",  start);
             cmd.Parameters.AddWithValue("@End",    end);
@@ -284,9 +291,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                        rm.Name AS RoomName, rm.Color AS RoomColor, rm.Capacity AS RoomCapacity
                 FROM dbo.Reservations r
                 INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
-                WHERE r.Id = @Id
+                WHERE r.Id = @Id AND r.TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Reservación no encontrada.");
             return Ok(ReadReservation(r));
@@ -314,8 +322,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             string roomName;
             using (var roomCmd = conn.CreateCommand())
             {
-                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @Id AND IsActive = 1";
+                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @Id AND IsActive = 1 AND TenantId = @TenantId";
                 roomCmd.Parameters.AddWithValue("@Id", dto.RoomId);
+                roomCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 var nameObj = await roomCmd.ExecuteScalarAsync(ct);
                 if (nameObj is null || nameObj is DBNull) return BadRequest("Sala no encontrada o inactiva.");
                 roomName = (string)nameObj;
@@ -327,8 +336,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             {
                 conflictCmd.CommandText = """
                     SELECT COUNT(1) FROM dbo.Reservations
-                    WHERE RoomId = @RoomId AND StartTime < @End AND EndTime > @Start
+                    WHERE TenantId = @TenantId AND RoomId = @RoomId AND StartTime < @End AND EndTime > @Start
                     """;
+                conflictCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 conflictCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
                 conflictCmd.Parameters.AddWithValue("@Start",  dto.StartTime);
                 conflictCmd.Parameters.AddWithValue("@End",    dto.EndTime);
@@ -351,13 +361,14 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     (Id, Title, Description, RoomId, StartTime, EndTime,
                      OrganizerName, OrganizerEmail, MeetLink,
                      IsRecurring, RecurrenceRule, ParentReservationId, AttendeesJson,
-                     CoberturaSolicitada, CoberturaEstado, CreatedAt)
+                     CoberturaSolicitada, CoberturaEstado, CreatedAt, TenantId)
                 VALUES
                     (@Id, @Title, @Desc, @RoomId, @Start, @End,
                      @OrgName, @OrgEmail, @MeetLink,
                      @IsRecurring, @RRule, @ParentId, @AttendeesJson,
-                     @Cobertura, @CoberturaEstado, GETUTCDATE())
+                     @Cobertura, @CoberturaEstado, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",      TenantParam);
             cmd.Parameters.AddWithValue("@Id",            id);
             cmd.Parameters.AddWithValue("@Title",         dto.Title.Trim());
             cmd.Parameters.AddWithValue("@Desc",          (object?)dto.Description         ?? DBNull.Value);
@@ -375,7 +386,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             cmd.Parameters.AddWithValue("@CoberturaEstado", requiresCoverage ? "Pendiente" : (object)DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
-            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername), CancellationToken.None);
+            var tenantIdForEmail = tenant.TenantId;
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: false, CurrentUsername, tenantIdForEmail), CancellationToken.None);
             _ = Task.Run(() => push.SendToAllAsync(
                 $"📅 Nueva reserva de sala: {roomName}",
                 $"{dto.Title} — {dto.StartTime:dd/MM HH:mm} a {dto.EndTime:HH:mm}",
@@ -408,8 +420,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             string roomName;
             using (var roomCmd = conn.CreateCommand())
             {
-                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @RoomId AND IsActive = 1";
+                roomCmd.CommandText = "SELECT Name FROM dbo.Rooms WHERE Id = @RoomId AND IsActive = 1 AND TenantId = @TenantId";
                 roomCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
+                roomCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 var nameObj = await roomCmd.ExecuteScalarAsync(ct);
                 if (nameObj is null || nameObj is DBNull) return BadRequest("Sala no encontrada o inactiva.");
                 roomName = (string)nameObj;
@@ -419,8 +432,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             string? previousCobertura = null;
             using (var covCmd = conn.CreateCommand())
             {
-                covCmd.CommandText = "SELECT CoberturaSolicitada FROM dbo.Reservations WHERE Id = @Id";
+                covCmd.CommandText = "SELECT CoberturaSolicitada FROM dbo.Reservations WHERE Id = @Id AND TenantId = @TenantId";
                 covCmd.Parameters.AddWithValue("@Id", id);
+                covCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 var covObj = await covCmd.ExecuteScalarAsync(ct);
                 previousCobertura = covObj is null or DBNull ? null : (string)covObj;
             }
@@ -431,8 +445,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             {
                 conflictCmd.CommandText = """
                     SELECT COUNT(1) FROM dbo.Reservations
-                    WHERE RoomId = @RoomId AND StartTime < @End AND EndTime > @Start AND Id <> @Id
+                    WHERE TenantId = @TenantId AND RoomId = @RoomId AND StartTime < @End AND EndTime > @Start AND Id <> @Id
                     """;
+                conflictCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 conflictCmd.Parameters.AddWithValue("@RoomId", dto.RoomId);
                 conflictCmd.Parameters.AddWithValue("@Start",  dto.StartTime);
                 conflictCmd.Parameters.AddWithValue("@End",    dto.EndTime);
@@ -468,8 +483,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                         ELSE CoberturaEstado
                     END,
                     UpdatedAt         = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",      TenantParam);
             cmd.Parameters.AddWithValue("@Id",            id);
             cmd.Parameters.AddWithValue("@Title",         dto.Title.Trim());
             cmd.Parameters.AddWithValue("@Desc",          (object?)dto.Description    ?? DBNull.Value);
@@ -486,7 +502,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Reservación no encontrada.");
 
-            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true, CurrentUsername), CancellationToken.None);
+            var tenantIdForEmail = tenant.TenantId;
+            _ = Task.Run(() => SendReservationEmailsAsync(dto, id, roomName, isUpdate: true, CurrentUsername, tenantIdForEmail), CancellationToken.None);
 
             var coberturaCambio = !string.Equals(previousCobertura, dto.CoberturaSolicitada, StringComparison.OrdinalIgnoreCase);
             if (coberturaCambio &&
@@ -525,7 +542,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                       SUM(CASE WHEN YEAR(StartTime) = YEAR(GETUTCDATE()) THEN 1 ELSE 0 END) AS ThisYear,
                       COUNT(1) AS Total
                     FROM dbo.Reservations
+                    WHERE TenantId = @TenantId
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 await r.ReadAsync(ct);
                 summary = new
@@ -548,11 +567,13 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                            YEAR(StartTime)  AS Yr,
                            COUNT(1) AS Cnt
                     FROM dbo.Reservations
-                    WHERE StartTime >= DATEADD(month, -11,
+                    WHERE TenantId = @TenantId
+                      AND StartTime >= DATEADD(month, -11,
                           DATEFROMPARTS(YEAR(GETUTCDATE()), MONTH(GETUTCDATE()), 1))
                     GROUP BY FORMAT(StartTime, 'yyyy-MM'), MONTH(StartTime), YEAR(StartTime)
                     ORDER BY MonthKey
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 string[] names = { "", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
                                        "Jul", "Ago", "Sep", "Oct", "Nov", "Dic" };
@@ -572,9 +593,11 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     SELECT rm.Name, rm.Color, COUNT(1) AS Cnt
                     FROM dbo.Reservations r
                     INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    WHERE r.TenantId = @TenantId
                     GROUP BY rm.Name, rm.Color
                     ORDER BY Cnt DESC
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     byRoom.Add(new
@@ -592,8 +615,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 cmd.CommandText = """
                     SELECT DATEPART(weekday, StartTime) AS DayNum, COUNT(1) AS Cnt
                     FROM dbo.Reservations
+                    WHERE TenantId = @TenantId
                     GROUP BY DATEPART(weekday, StartTime)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     dayCounts[r.GetInt32(0)] = r.GetInt32(1);
@@ -615,8 +640,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                         rm.Name AS RoomName, rm.Color AS RoomColor
                     FROM dbo.Reservations r
                     INNER JOIN dbo.Rooms rm ON r.RoomId = rm.Id
+                    WHERE r.TenantId = @TenantId
                     ORDER BY r.StartTime DESC
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     history.Add(new
@@ -650,14 +677,15 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             {
                 cmd.CommandText = """
                     DELETE FROM dbo.Reservations
-                    WHERE Id = @Id OR ParentReservationId = @Id
+                    WHERE (Id = @Id OR ParentReservationId = @Id) AND TenantId = @TenantId
                     """;
             }
             else
             {
-                cmd.CommandText = "DELETE FROM dbo.Reservations WHERE Id = @Id";
+                cmd.CommandText = "DELETE FROM dbo.Reservations WHERE Id = @Id AND TenantId = @TenantId";
             }
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Reservación no encontrada.");
             return NoContent();
@@ -682,17 +710,18 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                     SELECT r.Id, r.Title, r.StartTime, r.EndTime, r.Description, rm.Name AS RoomName
                     FROM dbo.Reservations r
                     LEFT JOIN dbo.Rooms rm ON rm.Id = r.RoomId
-                    WHERE r.Status != 'Rechazada'
+                    WHERE r.Status != 'Rechazada' AND r.TenantId = @TenantId
                     ORDER BY r.StartTime
                   """
                 : """
                     SELECT r.Id, r.Title, r.StartTime, r.EndTime, r.Description, rm.Name AS RoomName
                     FROM dbo.Reservations r
                     LEFT JOIN dbo.Rooms rm ON rm.Id = r.RoomId
-                    WHERE r.Status != 'Rechazada'
+                    WHERE r.Status != 'Rechazada' AND r.TenantId = @TenantId
                       AND LOWER(r.CreatedBy) = LOWER(@User)
                     ORDER BY r.StartTime
                   """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!isAdminRole) cmd.Parameters.AddWithValue("@User", username);
 
             var sb = new System.Text.StringBuilder();
@@ -767,7 +796,7 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
     }
 
     private async Task SendReservationEmailsAsync(
-        ReservationDto dto, Guid reservationId, string roomName, bool isUpdate, string? username = null)
+        ReservationDto dto, Guid reservationId, string roomName, bool isUpdate, string? username = null, Guid? tenantId = null)
     {
         try
         {
@@ -819,8 +848,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
                 await using var notifCmd = notifConn.CreateCommand();
                 notifCmd.CommandText = """
                     SELECT Email, Descripcion FROM dbo.CalendarNotificationEmails
-                    WHERE Activo = 1
+                    WHERE Activo = 1 AND TenantId = @TenantId
                     """;
+                notifCmd.Parameters.AddWithValue("@TenantId", (object?)tenantId ?? DBNull.Value);
                 await using var notifReader = await notifCmd.ExecuteReaderAsync();
                 while (await notifReader.ReadAsync())
                 {
@@ -1096,7 +1126,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Id, Email, Descripcion, Activo, CreadoEn FROM dbo.CalendarNotificationEmails ORDER BY CreadoEn";
+            cmd.CommandText = "SELECT Id, Email, Descripcion, Activo, CreadoEn FROM dbo.CalendarNotificationEmails WHERE TenantId = @TenantId ORDER BY CreadoEn";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -1125,9 +1156,10 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var cmd = conn.CreateCommand();
             var id = Guid.NewGuid();
             cmd.CommandText = """
-                INSERT INTO dbo.CalendarNotificationEmails (Id, Email, Descripcion, Activo)
-                VALUES (@Id, @Email, @Desc, 1)
+                INSERT INTO dbo.CalendarNotificationEmails (Id, Email, Descripcion, Activo, TenantId)
+                VALUES (@Id, @Email, @Desc, 1, @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",    id);
             cmd.Parameters.AddWithValue("@Email", dto.Email.Trim().ToLower());
             cmd.Parameters.AddWithValue("@Desc",  string.IsNullOrWhiteSpace(dto.Descripcion) ? DBNull.Value : dto.Descripcion.Trim());
@@ -1148,8 +1180,9 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.CalendarNotificationEmails SET Activo = ~Activo WHERE Id = @Id";
+            cmd.CommandText = "UPDATE dbo.CalendarNotificationEmails SET Activo = ~Activo WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return Ok();
@@ -1167,7 +1200,8 @@ public class CalendarController(IConfiguration config, ILogger<CalendarControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.CalendarNotificationEmails WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.CalendarNotificationEmails WHERE Id = @Id AND TenantId = @TenantId";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id", id);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();

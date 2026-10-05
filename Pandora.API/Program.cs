@@ -1743,6 +1743,14 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.CheckadorSitios') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorSitios') AND name='TenantId')
             ALTER TABLE dbo.CheckadorSitios ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.CalendarNotificationEmails') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CalendarNotificationEmails') AND name='TenantId')
+            ALTER TABLE dbo.CalendarNotificationEmails ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
+            ALTER TABLE dbo.RoomRequests ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1827,6 +1835,12 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.CheckadorSitios') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorSitios') AND name='TenantId')
                 UPDATE dbo.CheckadorSitios SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.CalendarNotificationEmails') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CalendarNotificationEmails') AND name='TenantId')
+                UPDATE dbo.CalendarNotificationEmails SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
+                UPDATE dbo.RoomRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();
