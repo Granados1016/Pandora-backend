@@ -13,9 +13,11 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class CheckadorController(
     IConfiguration config,
-    ILogger<CheckadorController> logger) : ControllerBase
+    ILogger<CheckadorController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
     private string CurrentUser   => User.FindFirstValue(ClaimTypes.Name) ?? "sistema";
     private string CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier)
                                  ?? User.FindFirstValue("sub") ?? CurrentUser;
@@ -66,7 +68,8 @@ public class CheckadorController(
             if (dto.Lat.HasValue && dto.Lng.HasValue)
             {
                 await using var cmdSitios = conn.CreateCommand();
-                cmdSitios.CommandText = "SELECT Id, Lat, Lng, RadioMetros FROM dbo.CheckadorSitios WHERE Activo = 1";
+                cmdSitios.CommandText = "SELECT Id, Lat, Lng, RadioMetros FROM dbo.CheckadorSitios WHERE Activo = 1 AND TenantId = @TenantId";
+                cmdSitios.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var rs = await cmdSitios.ExecuteReaderAsync(ct);
                 esDentroDeZona = false;
                 while (await rs.ReadAsync(ct))
@@ -84,10 +87,11 @@ public class CheckadorController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.CheckadorRegistros
-                    (Id, UserId, UserName, Tipo, Lat, Lng, Precision, SitioId, EsDentroDeZona, Notas)
+                    (Id, UserId, UserName, Tipo, Lat, Lng, Precision, SitioId, EsDentroDeZona, Notas, TenantId)
                 VALUES
-                    (@Id, @UserId, @UserName, @Tipo, @Lat, @Lng, @Precision, @SitioId, @EsDentro, @Notas)
+                    (@Id, @UserId, @UserName, @Tipo, @Lat, @Lng, @Precision, @SitioId, @EsDentro, @Notas, @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
             cmd.Parameters.AddWithValue("@Id",        id);
             cmd.Parameters.AddWithValue("@UserId",    CurrentUserId);
             cmd.Parameters.AddWithValue("@UserName",  CurrentUser);
@@ -142,7 +146,8 @@ public class CheckadorController(
             if (lat.HasValue && lng.HasValue)
             {
                 await using var cmdSitios = conn.CreateCommand();
-                cmdSitios.CommandText = "SELECT Id, Lat, Lng, RadioMetros FROM dbo.CheckadorSitios WHERE Activo=1";
+                cmdSitios.CommandText = "SELECT Id, Lat, Lng, RadioMetros FROM dbo.CheckadorSitios WHERE Activo=1 AND TenantId=@TenantId";
+                cmdSitios.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var rs = await cmdSitios.ExecuteReaderAsync(ct);
                 esDentroDeZona = false;
                 while (await rs.ReadAsync(ct))
@@ -164,9 +169,10 @@ public class CheckadorController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.CheckadorRegistros
-                    (Id, UserId, UserName, Tipo, Lat, Lng, Precision, SitioId, EsDentroDeZona, FotoData, FotoMime, Notas)
-                VALUES (@Id,@UserId,@UserName,@Tipo,@Lat,@Lng,@Prec,@SitioId,@EsDentro,@FotoData,@FotoMime,@Notas)
+                    (Id, UserId, UserName, Tipo, Lat, Lng, Precision, SitioId, EsDentroDeZona, FotoData, FotoMime, Notas, TenantId)
+                VALUES (@Id,@UserId,@UserName,@Tipo,@Lat,@Lng,@Prec,@SitioId,@EsDentro,@FotoData,@FotoMime,@Notas,@TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@UserId",   CurrentUserId);
             cmd.Parameters.AddWithValue("@UserName", CurrentUser);
@@ -199,10 +205,12 @@ public class CheckadorController(
             cmd.CommandText = """
                 SELECT Id, Tipo, Lat, Lng, Precision, EsDentroDeZona, Notas, Timestamp
                 FROM dbo.CheckadorRegistros
-                WHERE UserId = @UserId AND CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)
+                WHERE UserId = @UserId AND TenantId = @TenantId
+                  AND CAST(CONVERT(datetime2,TODATETIMEOFFSET(Timestamp,0) AT TIME ZONE 'Central Standard Time') AS DATE)
                   = CAST(CONVERT(datetime2,TODATETIMEOFFSET(GETUTCDATE(),0) AT TIME ZONE 'Central Standard Time') AS DATE)
                 ORDER BY Timestamp ASC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@UserId", CurrentUserId);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -230,7 +238,8 @@ public class CheckadorController(
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
 
-            var where = new List<string> { "1=1" };
+            var where = new List<string> { "TenantId = @TenantId" };
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(userId)) { where.Add("(UserId = @Uid OR UserName LIKE @UidL)"); cmd.Parameters.AddWithValue("@Uid", userId); cmd.Parameters.AddWithValue("@UidL", $"%{userId}%"); }
             if (!string.IsNullOrWhiteSpace(tipo))   { where.Add("Tipo = @Tipo"); cmd.Parameters.AddWithValue("@Tipo", tipo); }
             if (desde.HasValue) { where.Add("Timestamp >= @Desde"); cmd.Parameters.AddWithValue("@Desde", desde.Value); }
@@ -274,9 +283,10 @@ public class CheckadorController(
             await using var cmd = conn.CreateCommand();
             // Admin ve cualquier foto; usuario normal solo la suya
             cmd.CommandText = IsAdmin
-                ? "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND FotoData IS NOT NULL"
-                : "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND UserId=@UserId AND FotoData IS NOT NULL";
+                ? "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND TenantId=@TenantId AND FotoData IS NOT NULL"
+                : "SELECT FotoData, FotoMime FROM dbo.CheckadorRegistros WHERE Id=@Id AND UserId=@UserId AND TenantId=@TenantId AND FotoData IS NOT NULL";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!IsAdmin) cmd.Parameters.AddWithValue("@UserId", CurrentUserId);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
@@ -302,8 +312,9 @@ public class CheckadorController(
                     ISNULL(SUM(CASE WHEN MONTH(Timestamp)=MONTH(GETUTCDATE()) AND YEAR(Timestamp)=YEAR(GETUTCDATE()) THEN 1 ELSE 0 END),0) AS EsteMes,
                     ISNULL(SUM(CASE WHEN EsDentroDeZona=0 THEN 1 ELSE 0 END),0) AS FueraDeZona,
                     COUNT(DISTINCT UserId) AS UsuariosRegistrados
-                FROM dbo.CheckadorRegistros
+                FROM dbo.CheckadorRegistros WHERE TenantId=@TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return Ok(new {});
             return Ok(new {
@@ -330,7 +341,8 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            var where = new List<string> { "1=1" };
+            var where = new List<string> { "TenantId = @TenantId" };
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (desde.HasValue) { where.Add("Timestamp >= @Desde"); cmd.Parameters.AddWithValue("@Desde", desde.Value); }
             if (hasta.HasValue) { where.Add("Timestamp <= @Hasta"); cmd.Parameters.AddWithValue("@Hasta", hasta.Value.AddDays(1)); }
             cmd.CommandText = $"""
@@ -388,7 +400,8 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Id,Nombre,Descripcion,Lat,Lng,RadioMetros,Activo,CreadoEn FROM dbo.CheckadorSitios ORDER BY Nombre";
+            cmd.CommandText = "SELECT Id,Nombre,Descripcion,Lat,Lng,RadioMetros,Activo,CreadoEn FROM dbo.CheckadorSitios WHERE TenantId=@TenantId ORDER BY Nombre";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -414,7 +427,8 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO dbo.CheckadorSitios (Id,Nombre,Descripcion,Lat,Lng,RadioMetros) VALUES (@Id,@N,@D,@Lat,@Lng,@R)";
+            cmd.CommandText = "INSERT INTO dbo.CheckadorSitios (Id,Nombre,Descripcion,Lat,Lng,RadioMetros,TenantId) VALUES (@Id,@N,@D,@Lat,@Lng,@R,@TenantId)";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",  id);
             cmd.Parameters.AddWithValue("@N",   dto.Nombre);
             cmd.Parameters.AddWithValue("@D",   (object?)dto.Descripcion ?? DBNull.Value);
@@ -436,7 +450,8 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.CheckadorSitios SET Nombre=@N,Descripcion=@D,Lat=@Lat,Lng=@Lng,RadioMetros=@R,Activo=@A WHERE Id=@Id";
+            cmd.CommandText = "UPDATE dbo.CheckadorSitios SET Nombre=@N,Descripcion=@D,Lat=@Lat,Lng=@Lng,RadioMetros=@R,Activo=@A WHERE Id=@Id AND TenantId=@TenantId";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",  id);
             cmd.Parameters.AddWithValue("@N",   dto.Nombre);
             cmd.Parameters.AddWithValue("@D",   (object?)dto.Descripcion ?? DBNull.Value);
@@ -459,7 +474,8 @@ public class CheckadorController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.CheckadorSitios WHERE Id=@Id";
+            cmd.CommandText = "DELETE FROM dbo.CheckadorSitios WHERE Id=@Id AND TenantId=@TenantId";
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id", id);
             await cmd.ExecuteNonQueryAsync(ct);
             return NoContent();
