@@ -1272,6 +1272,24 @@ using (var scopeGwp = app.Services.CreateScope())
         END
         """;
     await cmdSS.ExecuteNonQueryAsync();
+
+    // ── Migración ÚNICA: promover TODOS los Admin existentes a SuperAdmin ────────
+    // Por decisión del proveedor, al introducir el modelo de roles todos los Admin
+    // actuales pasan a SuperAdmin para no perder acceso; luego se corrigen a mano.
+    // Guardada con marcador en SystemSettings para que NO vuelva a ejecutarse (así
+    // las correcciones manuales posteriores — demover a Admin — persisten).
+    await using var cmdBootstrap = connSS.CreateCommand();
+    cmdBootstrap.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM dbo.SystemSettings WHERE SettingKey = 'bootstrap_promote_admins_to_superadmin_v1')
+        BEGIN
+            UPDATE dbo.AppUsers SET Role = 'SuperAdmin' WHERE Role = 'Admin';
+            INSERT INTO dbo.SystemSettings (SettingKey, SettingValue)
+            VALUES ('bootstrap_promote_admins_to_superadmin_v1', CONVERT(NVARCHAR(30), GETUTCDATE(), 126));
+        END
+        """;
+    var bootstrapAffected = await cmdBootstrap.ExecuteNonQueryAsync();
+    if (bootstrapAffected > 0)
+        Console.WriteLine("[SuperAdmin] Migración única: Admin existentes promovidos a SuperAdmin.");
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────

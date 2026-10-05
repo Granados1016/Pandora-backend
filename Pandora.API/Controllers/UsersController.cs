@@ -189,10 +189,18 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     }
 
     // ── POST /api/users  (Admin) ──────────────────────────────────────────────
+    // Solo el proveedor (rol SuperAdmin) es SuperAdmin. NUNCA se asigna desde la
+    // gestión de usuarios de un cliente — evita escalada de privilegios.
+    private bool IsCallerSuperAdmin => User.IsInRole("SuperAdmin");
+    private static bool IsSuperAdminRole(string? role) =>
+        string.Equals(role?.Trim(), "SuperAdmin", StringComparison.OrdinalIgnoreCase);
+
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] UserCreateDto dto, CancellationToken ct)
     {
         if (!IsAdmin) return Forbid();
+        if (IsSuperAdminRole(dto.Role) && !IsCallerSuperAdmin)
+            return BadRequest("El rol SuperAdmin no puede asignarse desde la gestión de usuarios.");
         if (string.IsNullOrWhiteSpace(dto.Username)) return BadRequest("Usuario requerido.");
         if (string.IsNullOrWhiteSpace(dto.Password)) return BadRequest("Contraseña requerida.");
 
@@ -237,10 +245,22 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
     public async Task<IActionResult> Update(Guid id, [FromBody] UserUpdateDto dto, CancellationToken ct)
     {
         if (!IsAdmin) return Forbid();
+        if (IsSuperAdminRole(dto.Role) && !IsCallerSuperAdmin)
+            return BadRequest("El rol SuperAdmin no puede asignarse desde la gestión de usuarios.");
         try
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // Un Admin de cliente no puede editar a un SuperAdmin del proveedor.
+            if (!IsCallerSuperAdmin)
+            {
+                await using var chk = conn.CreateCommand();
+                chk.CommandText = "SELECT Role FROM dbo.AppUsers WHERE Id = @Id";
+                chk.Parameters.AddWithValue("@Id", id);
+                if (IsSuperAdminRole(await chk.ExecuteScalarAsync(ct) as string)) return Forbid();
+            }
+
             await using var cmd = conn.CreateCommand();
 
             // Construir SET dinámico para contraseña opcional
@@ -289,8 +309,14 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.AppUsers WHERE Id = @Id";
+            // Un Admin de cliente solo borra usuarios de SU tenant y NUNCA a un SuperAdmin.
+            // (Un SuperAdmin del proveedor gestiona usuarios entrando como el cliente.)
+            cmd.CommandText = IsCallerSuperAdmin
+                ? "DELETE FROM dbo.AppUsers WHERE Id = @Id"
+                : "DELETE FROM dbo.AppUsers WHERE Id = @Id AND TenantId = @TenantId AND Role <> 'SuperAdmin'";
             cmd.Parameters.AddWithValue("@Id", id);
+            if (!IsCallerSuperAdmin)
+                cmd.Parameters.AddWithValue("@TenantId", TenantId.HasValue ? (object)TenantId.Value : DBNull.Value);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Usuario no encontrado.");
             return NoContent();
@@ -581,7 +607,8 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
                     cmd.Parameters.AddWithValue("@Email",    string.IsNullOrWhiteSpace(u.Email)      ? DBNull.Value : (object)u.Email.Trim());
                     cmd.Parameters.AddWithValue("@Position", string.IsNullOrWhiteSpace(u.Position)   ? DBNull.Value : (object)u.Position.Trim());
                     cmd.Parameters.AddWithValue("@Hash",     HashPassword(u.Password));
-                    cmd.Parameters.AddWithValue("@Role",     string.IsNullOrWhiteSpace(u.Role) ? "User" : u.Role.Trim());
+                    // Nunca permitir SuperAdmin vía import CSV (anti-escalada).
+                    cmd.Parameters.AddWithValue("@Role",     (string.IsNullOrWhiteSpace(u.Role) || IsSuperAdminRole(u.Role)) ? "User" : u.Role.Trim());
                     cmd.Parameters.AddWithValue("@Modules",  u.Modules ?? 0);
                     int rows = await cmd.ExecuteNonQueryAsync(ct);
                     if (rows > 0) created++; else skipped++;
