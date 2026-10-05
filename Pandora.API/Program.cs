@@ -1765,6 +1765,19 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
             ALTER TABLE dbo.EmailCampaigns ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryItems') AND name='TenantId')
+            ALTER TABLE dbo.InventoryItems ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.InventoryTypes') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryTypes') AND name='TenantId')
+            ALTER TABLE dbo.InventoryTypes ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.Departments') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Departments') AND name='TenantId')
+            ALTER TABLE dbo.Departments ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.Employees') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Employees') AND name='TenantId')
+            ALTER TABLE dbo.Employees ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1881,6 +1894,18 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
                 UPDATE dbo.EmailCampaigns SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryItems') AND name='TenantId')
+                UPDATE dbo.InventoryItems SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.InventoryTypes') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryTypes') AND name='TenantId')
+                UPDATE dbo.InventoryTypes SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Departments') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Departments') AND name='TenantId')
+                UPDATE dbo.Departments SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Employees') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Employees') AND name='TenantId')
+                UPDATE dbo.Employees SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();
