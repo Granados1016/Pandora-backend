@@ -14,11 +14,13 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class ActivosFijosController(
     IConfiguration config,
-    ILogger<ActivosFijosController> logger) : ControllerBase
+    ILogger<ActivosFijosController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private bool IsAdmin => User.IsInRole("Admin");
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name) ?? "Desconocido";
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // Tables are created at startup in Program.cs; this flag skips the check after the first request
     private static volatile bool _tablesEnsured;
@@ -71,6 +73,8 @@ public class ActivosFijosController(
                     CreatedAt   DATETIME2        NOT NULL DEFAULT GETUTCDATE()
                 )
             END;
+            IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+                ALTER TABLE dbo.ActivosFijos ADD TenantId UNIQUEIDENTIFIER NULL;
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -90,7 +94,7 @@ public class ActivosFijosController(
             await conn.OpenAsync(ct);
             if (!_tablesEnsured) { await EnsureTablesAsync(conn, ct); _tablesEnsured = true; }
 
-            var where = new List<string> { "IsDeleted = 0" };
+            var where = new List<string> { "IsDeleted = 0", "TenantId = @TenantId" };
             if (!string.IsNullOrWhiteSpace(status))     where.Add("Status = @Status");
             if (!string.IsNullOrWhiteSpace(category))   where.Add("Category = @Category");
             if (!string.IsNullOrWhiteSpace(department)) where.Add("Department = @Department");
@@ -106,6 +110,7 @@ public class ActivosFijosController(
                 WHERE {string.Join(" AND ", where)}
                 ORDER BY Name
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(status))     cmd.Parameters.AddWithValue("@Status",     status);
             if (!string.IsNullOrWhiteSpace(category))   cmd.Parameters.AddWithValue("@Category",   category);
             if (!string.IsNullOrWhiteSpace(department)) cmd.Parameters.AddWithValue("@Department", department);
@@ -133,9 +138,10 @@ public class ActivosFijosController(
                        Department, ResponsibleUser, Location, Status, PurchaseDate,
                        PurchaseCost, UsefulLifeYears, DepreciationMethod, ResidualValue,
                        AccumulatedDeprec, CurrentValue, Notes, CreatedBy, CreatedAt
-                FROM dbo.ActivosFijos WHERE Id=@Id AND IsDeleted=0
+                FROM dbo.ActivosFijos WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             var activo = MapActivo(r);
@@ -184,12 +190,13 @@ public class ActivosFijosController(
                 INSERT INTO dbo.ActivosFijos
                     (Id, AssetNumber, Name, Description, Category, Brand, Model, SerialNumber,
                      Department, ResponsibleUser, Location, Status, PurchaseDate, PurchaseCost,
-                     UsefulLifeYears, DepreciationMethod, ResidualValue, Notes, CreatedBy, CreatedAt)
+                     UsefulLifeYears, DepreciationMethod, ResidualValue, Notes, CreatedBy, CreatedAt, TenantId)
                 VALUES
                     (@Id, @AN, @Name, @Desc, @Cat, @Brand, @Model, @SN,
                      @Dept, @Resp, @Loc, @Status, @PDate, @PCost,
-                     @Life, @Method, @Resid, @Notes, @CreatedBy, GETUTCDATE())
+                     @Life, @Method, @Resid, @Notes, @CreatedBy, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
             cmd.Parameters.AddWithValue("@Id",        newId);
             cmd.Parameters.AddWithValue("@AN",        assetNumber);
             cmd.Parameters.AddWithValue("@Name",      dto.Name.Trim());
@@ -246,8 +253,9 @@ public class ActivosFijosController(
                     Status=@Status, PurchaseDate=@PDate, PurchaseCost=@PCost,
                     UsefulLifeYears=@Life, DepreciationMethod=@Method, ResidualValue=@Resid,
                     Notes=@Notes, UpdatedAt=GETUTCDATE()
-                WHERE Id=@Id AND IsDeleted=0
+                WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",     id);
             cmd.Parameters.AddWithValue("@Name",   dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Desc",   Nv(dto.Description));
@@ -282,8 +290,9 @@ public class ActivosFijosController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.ActivosFijos SET IsDeleted=1, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0";
+            cmd.CommandText = "UPDATE dbo.ActivosFijos SET IsDeleted=1, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND IsDeleted=0 AND TenantId=@TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return NoContent();
@@ -300,6 +309,16 @@ public class ActivosFijosController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // El activo padre debe pertenecer al tenant del usuario
+            await using (var guard = conn.CreateCommand())
+            {
+                guard.CommandText = "SELECT 1 FROM dbo.ActivosFijos WHERE Id=@AId AND IsDeleted=0 AND TenantId=@TenantId";
+                guard.Parameters.AddWithValue("@AId", id);
+                guard.Parameters.AddWithValue("@TenantId", TenantParam);
+                if (await guard.ExecuteScalarAsync(ct) is null) return NotFound();
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.ActivoMovimientos (Id, ActivoId, Type, Description, Amount, FromDept, ToDept, CreatedBy, CreatedAt)
@@ -320,24 +339,27 @@ public class ActivosFijosController(
             if (dto.Type == "Transferencia" && !string.IsNullOrWhiteSpace(dto.ToDept))
             {
                 await using var upd = conn.CreateCommand();
-                upd.CommandText = "UPDATE dbo.ActivosFijos SET Department=@Dept, UpdatedAt=GETUTCDATE() WHERE Id=@Id";
+                upd.CommandText = "UPDATE dbo.ActivosFijos SET Department=@Dept, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND TenantId=@TenantId";
                 upd.Parameters.AddWithValue("@Dept", dto.ToDept);
                 upd.Parameters.AddWithValue("@Id",   id);
+                upd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await upd.ExecuteNonQueryAsync(ct);
             }
             else if (dto.Type == "Depreciacion" && dto.Amount.HasValue)
             {
                 await using var upd = conn.CreateCommand();
-                upd.CommandText = "UPDATE dbo.ActivosFijos SET AccumulatedDeprec=AccumulatedDeprec+@Amt, UpdatedAt=GETUTCDATE() WHERE Id=@Id";
+                upd.CommandText = "UPDATE dbo.ActivosFijos SET AccumulatedDeprec=AccumulatedDeprec+@Amt, UpdatedAt=GETUTCDATE() WHERE Id=@Id AND TenantId=@TenantId";
                 upd.Parameters.AddWithValue("@Amt", dto.Amount.Value);
                 upd.Parameters.AddWithValue("@Id",  id);
+                upd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await upd.ExecuteNonQueryAsync(ct);
             }
             else if (dto.Type == "Baja")
             {
                 await using var upd = conn.CreateCommand();
-                upd.CommandText = "UPDATE dbo.ActivosFijos SET Status='Dado de Baja', UpdatedAt=GETUTCDATE() WHERE Id=@Id";
+                upd.CommandText = "UPDATE dbo.ActivosFijos SET Status='Dado de Baja', UpdatedAt=GETUTCDATE() WHERE Id=@Id AND TenantId=@TenantId";
                 upd.Parameters.AddWithValue("@Id", id);
+                upd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await upd.ExecuteNonQueryAsync(ct);
             }
             return Ok(new { added = true });
@@ -365,8 +387,9 @@ public class ActivosFijosController(
                     ISNULL(SUM(PurchaseCost), 0)                    AS TotalCosto,
                     ISNULL(SUM(AccumulatedDeprec), 0)               AS TotalDepreciacion,
                     ISNULL(SUM(CurrentValue), 0)                    AS TotalValorActual
-                FROM dbo.ActivosFijos WHERE IsDeleted=0
+                FROM dbo.ActivosFijos WHERE IsDeleted=0 AND TenantId=@TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return Ok(new {});
             return Ok(new {
@@ -396,7 +419,8 @@ public class ActivosFijosController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            var where = new List<string> { "IsDeleted=0" };
+            var where = new List<string> { "IsDeleted=0", "TenantId=@TenantId" };
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(status))     { where.Add("Status=@Status");         cmd.Parameters.AddWithValue("@Status",     status); }
             if (!string.IsNullOrWhiteSpace(category))   { where.Add("Category=@Category");     cmd.Parameters.AddWithValue("@Category",   category); }
             if (!string.IsNullOrWhiteSpace(department)) { where.Add("Department=@Department"); cmd.Parameters.AddWithValue("@Department", department); }

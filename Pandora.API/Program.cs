@@ -1731,6 +1731,10 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.Capacitaciones') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
             ALTER TABLE dbo.Capacitaciones ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+            ALTER TABLE dbo.ActivosFijos ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1782,6 +1786,14 @@ using (var scopeEnc = app.Services.CreateScope())
             JOIN dbo.AppUsers u ON LOWER(cap.CreatedBy) = LOWER(u.Username)
             WHERE cap.TenantId IS NULL AND u.TenantId IS NOT NULL;
 
+        -- ActivosFijos: por quien lo creó; el resto cae al tenant por defecto abajo
+        IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+            UPDATE af SET af.TenantId = u.TenantId
+            FROM dbo.ActivosFijos af
+            JOIN dbo.AppUsers u ON LOWER(af.CreatedBy) = LOWER(u.Username)
+            WHERE af.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
         -- Poblar Rooms y Reservations con el primer tenant activo (son recursos globales del sistema)
         DECLARE @DefaultTid UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
         IF @DefaultTid IS NOT NULL
@@ -1798,6 +1810,9 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.Capacitaciones') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
                 UPDATE dbo.Capacitaciones SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+                UPDATE dbo.ActivosFijos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();
