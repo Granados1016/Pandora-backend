@@ -1735,6 +1735,10 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
             ALTER TABLE dbo.ActivosFijos ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.Licencias') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Licencias') AND name='TenantId')
+            ALTER TABLE dbo.Licencias ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1813,6 +1817,9 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
                 UPDATE dbo.ActivosFijos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Licencias') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Licencias') AND name='TenantId')
+                UPDATE dbo.Licencias SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();

@@ -11,9 +11,11 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/licencias")]
 [Authorize]
-public class LicenciasController(IConfiguration config, ILogger<LicenciasController> logger) : ControllerBase
+public class LicenciasController(IConfiguration config, ILogger<LicenciasController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     private bool IsAdmin =>
         User.FindFirstValue(ClaimTypes.Role) == "Admin" ||
@@ -48,10 +50,12 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                         FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
                         ORDER BY P.FechaPago DESC) AS UltimoPago
                 FROM dbo.Licencias L
-                WHERE (@Area   IS NULL OR L.Area   = @Area)
+                WHERE L.TenantId = @TenantId
+                  AND (@Area   IS NULL OR L.Area   = @Area)
                   AND (@Estado IS NULL OR L.Estado = @Estado)
                 ORDER BY L.Numero
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Area",   (object?)area   ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Estado", (object?)estado ?? DBNull.Value);
 
@@ -98,7 +102,9 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                             ELSE 0 END
                     ELSE 0 END), 0)                                                  AS TotalMensualMXN
                 FROM dbo.Licencias
+                WHERE TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
@@ -125,10 +131,11 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                            WHEN 'Anual'      THEN CostoMXN
                            ELSE 0 END), 0) AS CostoAnual
                 FROM dbo.Licencias
-                WHERE Estado != 'Cancelada'
+                WHERE Estado != 'Cancelada' AND TenantId = @TenantId
                 GROUP BY Area
                 ORDER BY CostoAnual DESC
                 """;
+            cmd2.Parameters.AddWithValue("@TenantId", TenantParam);
             var areas = new List<object>();
             await using var r2 = await cmd2.ExecuteReaderAsync(ct);
             while (await r2.ReadAsync(ct))
@@ -170,10 +177,12 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                         FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
                         ORDER BY P.FechaPago DESC) AS UltimoPago
                 FROM dbo.Licencias L
-                WHERE L.Estado NOT IN ('Cancelada')
+                WHERE L.TenantId = @TenantId
+                  AND L.Estado NOT IN ('Cancelada')
                   AND DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago) <= 10
                 ORDER BY DATEDIFF(day, CAST(GETDATE() AS DATE), L.ProximoPago)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -209,9 +218,10 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                        (SELECT TOP 1 CONVERT(NVARCHAR(10), P.FechaPago, 120)
                         FROM dbo.LicenciaPagos P WHERE P.LicenciaId = L.Id
                         ORDER BY P.FechaPago DESC) AS UltimoPago
-                FROM dbo.Licencias L WHERE L.Id = @Id
+                FROM dbo.Licencias L WHERE L.Id = @Id AND L.TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             return Ok(MapRow(r));
@@ -231,11 +241,12 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.Licencias
-                    (Numero,Plataforma,Area,Responsable,FrecuenciaPago,FechaInicio,ProximoPago,CostoMXN,Estado,Notas)
+                    (Numero,Plataforma,Area,Responsable,FrecuenciaPago,FechaInicio,ProximoPago,CostoMXN,Estado,Notas,TenantId)
                 OUTPUT INSERTED.Id
-                VALUES (@Numero,@Plataforma,@Area,@Responsable,@FrecuenciaPago,@FechaInicio,@ProximoPago,@CostoMXN,@Estado,@Notas)
+                VALUES (@Numero,@Plataforma,@Area,@Responsable,@FrecuenciaPago,@FechaInicio,@ProximoPago,@CostoMXN,@Estado,@Notas,@TenantId)
                 """;
             AddParams(cmd, req);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var newId = (int)(await cmd.ExecuteScalarAsync(ct))!;
             return Ok(new { id = newId });
         }
@@ -258,10 +269,11 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                     FrecuenciaPago=@FrecuenciaPago, FechaInicio=@FechaInicio, ProximoPago=@ProximoPago,
                     CostoMXN=@CostoMXN, Estado=@Estado, Notas=@Notas,
                     ActualizadoEn=GETUTCDATE()
-                WHERE Id=@Id
+                WHERE Id=@Id AND TenantId=@TenantId
                 """;
             AddParams(cmd, req);
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return Ok();
@@ -279,8 +291,9 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.Licencias WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.Licencias WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound();
             return Ok();
@@ -307,8 +320,9 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                         ELSE 'Activa'
                     END,
                     ActualizadoEn = GETUTCDATE()
-                WHERE Estado != 'Cancelada'
+                WHERE Estado != 'Cancelada' AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             return Ok(new { actualizadas = rows });
         }
@@ -338,8 +352,10 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                        END AS CostoAnualMXN,
                        Estado, Notas
                 FROM dbo.Licencias
+                WHERE TenantId = @TenantId
                 ORDER BY Numero
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             var rows = new List<LicenciaRow>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -377,8 +393,9 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
 
             // Obtener frecuencia y próximo pago actual
             await using var cmdGet = conn.CreateCommand();
-            cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago FROM dbo.Licencias WHERE Id = @Id";
+            cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago FROM dbo.Licencias WHERE Id = @Id AND TenantId = @TenantId";
             cmdGet.Parameters.AddWithValue("@Id", id);
+            cmdGet.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmdGet.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             string   frecuencia  = r.GetString(0);
@@ -422,10 +439,11 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                 SET ProximoPago   = @NuevoProximoPago,
                     Estado        = 'Activa',
                     ActualizadoEn = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
             cmdUpd.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
             cmdUpd.Parameters.AddWithValue("@Id", id);
+            cmdUpd.Parameters.AddWithValue("@TenantId", TenantParam);
             await cmdUpd.ExecuteNonQueryAsync(ct);
 
             return Ok(new { nuevoProximoPago = nuevoProxPago.ToString("yyyy-MM-dd"), estado = "Activa" });
@@ -453,8 +471,9 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             foreach (int id in req.Ids)
             {
                 await using var cmdGet = conn.CreateCommand();
-                cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago, CostoMXN FROM dbo.Licencias WHERE Id = @Id";
+                cmdGet.CommandText = "SELECT FrecuenciaPago, ProximoPago, CostoMXN FROM dbo.Licencias WHERE Id = @Id AND TenantId = @TenantId";
                 cmdGet.Parameters.AddWithValue("@Id", id);
+                cmdGet.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmdGet.ExecuteReaderAsync(ct);
                 if (!await r.ReadAsync(ct)) continue;
                 string   frecuencia  = r.GetString(0);
@@ -492,10 +511,11 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                     SET ProximoPago   = @NuevoProximoPago,
                         Estado        = 'Activa',
                         ActualizadoEn = GETUTCDATE()
-                    WHERE Id = @Id
+                    WHERE Id = @Id AND TenantId = @TenantId
                     """;
                 cmdUpd.Parameters.AddWithValue("@NuevoProximoPago", nuevoProxPago.ToString("yyyy-MM-dd"));
                 cmdUpd.Parameters.AddWithValue("@Id", id);
+                cmdUpd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await cmdUpd.ExecuteNonQueryAsync(ct);
                 actualizadas++;
             }
@@ -515,12 +535,14 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT Id, LicenciaId, FechaPago, Monto, NuevoProximoPago, Notas, RegistradoPor, CreadoEn
-                FROM dbo.LicenciaPagos
-                WHERE LicenciaId = @Id
-                ORDER BY FechaPago DESC, CreadoEn DESC
+                SELECT P.Id, P.LicenciaId, P.FechaPago, P.Monto, P.NuevoProximoPago, P.Notas, P.RegistradoPor, P.CreadoEn
+                FROM dbo.LicenciaPagos P
+                WHERE P.LicenciaId = @Id
+                  AND EXISTS (SELECT 1 FROM dbo.Licencias L WHERE L.Id = P.LicenciaId AND L.TenantId = @TenantId)
+                ORDER BY P.FechaPago DESC, P.CreadoEn DESC
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
