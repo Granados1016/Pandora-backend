@@ -165,16 +165,22 @@ public class AuthController(
 
         // Regenerar JWT con tenantId incluido
         var tenantId = await GetUserTenantIdAsync(req.Username, ct);
+
+        // Extraer el token original de la respuesta de jwtService. La clave puede
+        // venir como "token" o "Token" según la serialización — se busca sin
+        // importar mayúsculas para no perderlo.
+        var json0  = JsonSerializer.Serialize(response);
+        var dict0  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
+        var tokKey = dict0.Keys.FirstOrDefault(k => k.Equals("token", StringComparison.OrdinalIgnoreCase));
+        string? origToken = tokKey != null ? dict0[tokKey].GetString() : null;
+
         string? newToken = null;
         try
         {
-            // Extraer datos del JWT generado por jwtService para regenerarlo con tenantId
-            var json0 = JsonSerializer.Serialize(response);
-            var dict0 = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
-            if (dict0.TryGetValue("token", out var tokenElem))
+            if (!string.IsNullOrWhiteSpace(origToken))
             {
                 var handler   = new JwtSecurityTokenHandler();
-                var parsed    = handler.ReadJwtToken(tokenElem.GetString());
+                var parsed    = handler.ReadJwtToken(origToken);
                 var username2 = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Name || c.Type == "unique_name")?.Value ?? req.Username;
                 var role2     = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Role || c.Type == "role")?.Value ?? "User";
                 var fullName2 = parsed.Claims.FirstOrDefault(c => c.Type == "fullName")?.Value ?? username2;
@@ -185,12 +191,15 @@ public class AuthController(
         }
         catch (Exception ex) { logger.LogWarning(ex, "No se pudo regenerar JWT con tenantId"); }
 
-        // Añadir refreshToken y token enriquecido a la respuesta
-        var json = JsonSerializer.Serialize(response);
-        var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!;
+        // Construir la respuesta final. Se GARANTIZA una clave "token" en minúscula
+        // (el frontend lee data.token); se usa el token enriquecido con tenantId si
+        // se pudo regenerar, si no el original. Se elimina cualquier clave "Token"
+        // en otra capitalización para no dejar duplicados confusos.
+        var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
+        foreach (var dup in dict.Keys.Where(k => k.Equals("token", StringComparison.OrdinalIgnoreCase) && k != "token").ToList())
+            dict.Remove(dup);
         dict["refreshToken"] = JsonSerializer.SerializeToElement(refreshToken);
-        if (newToken != null)
-            dict["token"] = JsonSerializer.SerializeToElement(newToken);
+        dict["token"]        = JsonSerializer.SerializeToElement(newToken ?? origToken ?? "");
         if (tenantId.HasValue)
             dict["tenantId"] = JsonSerializer.SerializeToElement(tenantId.Value.ToString());
         return Ok(dict);
