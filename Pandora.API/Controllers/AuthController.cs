@@ -250,6 +250,27 @@ public class AuthController(
 
         var email = payload.Email.Trim();
 
+        // ── Candado de dominio institucional ──────────────────────────────────
+        // Si GoogleAuth:AllowedDomains está configurado, SOLO se aceptan correos
+        // (y hosted domain de Workspace) de esos dominios. Vacío = sin restricción.
+        var allowedDomains = config.GetSection("GoogleAuth:AllowedDomains").Get<string[]>()
+                             ?? Array.Empty<string>();
+        if (allowedDomains.Length > 0)
+        {
+            var atIdx       = email.IndexOf('@');
+            var emailDomain = atIdx >= 0 ? email[(atIdx + 1)..].ToLowerInvariant() : "";
+            var hostedDom   = (payload.HostedDomain ?? "").ToLowerInvariant();
+            bool emailOk  = allowedDomains.Any(d => string.Equals(d.Trim(), emailDomain, StringComparison.OrdinalIgnoreCase));
+            // Si Google reporta hosted domain (cuenta Workspace), también debe coincidir.
+            bool hostedOk = string.IsNullOrEmpty(hostedDom)
+                          || allowedDomains.Any(d => string.Equals(d.Trim(), hostedDom, StringComparison.OrdinalIgnoreCase));
+            if (!emailOk || !hostedOk)
+            {
+                logger.LogWarning("GoogleLogin: dominio no permitido {Email} (hd={Hd})", email, hostedDom);
+                return StatusCode(403, new { error = "domain_not_allowed", message = "Solo se permite el acceso con tu correo institucional." });
+            }
+        }
+
         try
         {
             await using var conn = Conn();
