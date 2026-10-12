@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using Pandora.API.Extensions;
+using Pandora.Application.Features.Users;
 
 namespace Pandora.API.Controllers;
 
@@ -55,6 +56,56 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
         catch (Exception ex) { logger.LogError(ex, "SuperAdmin.GetAllUsers"); return StatusCode(500, ex.Message); }
     }
 
+    // ── POST /api/superadmin/users ────────────────────────────────────────────
+    /// <summary>Crea un usuario en cualquier cliente, con el rol indicado.</summary>
+    [HttpPost("users")]
+    public async Task<IActionResult> CreateUser([FromBody] SaCreateUserDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Username)) return BadRequest("Usuario requerido.");
+        if (string.IsNullOrWhiteSpace(dto.Password) || dto.Password.Length < 6)
+            return BadRequest("La contraseña debe tener al menos 6 caracteres.");
+
+        var role = (dto.Role ?? "User").Trim();
+        var canon = ValidRoles.FirstOrDefault(v => v.Equals(role, StringComparison.OrdinalIgnoreCase)) ?? "User";
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO dbo.AppUsers
+                    (Id, Username, FullName, Email, PasswordHash, Role, Modules, ModulesViewOnly,
+                     IsActive, Position, TenantId, CreatedAt)
+                VALUES
+                    (NEWID(), @Username, @FullName, @Email, @Hash, @Role, @Modules, 0,
+                     @IsActive, @Position, @TenantId, GETUTCDATE())
+                """;
+            var uname = dto.Username.Trim().ToLower();
+            // FullName es NOT NULL en la BD → si no se captura nombre, usamos el usuario.
+            var fullName = string.IsNullOrWhiteSpace(dto.FullName) ? uname : dto.FullName.Trim();
+            cmd.Parameters.AddWithValue("@Username", uname);
+            cmd.Parameters.AddWithValue("@FullName", fullName);
+            // Email es NOT NULL en la BD (sin índice único) → cadena vacía si no se captura.
+            cmd.Parameters.AddWithValue("@Email",    (object?)dto.Email?.Trim()    ?? string.Empty);
+            cmd.Parameters.AddWithValue("@Hash",     UserService.HashPassword(dto.Password));
+            cmd.Parameters.AddWithValue("@Role",     canon);
+            cmd.Parameters.AddWithValue("@Modules",  dto.Modules ?? 0);
+            cmd.Parameters.AddWithValue("@IsActive", dto.IsActive);
+            cmd.Parameters.AddWithValue("@Position", (object?)dto.Position?.Trim() ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@TenantId", dto.TenantId.HasValue ? (object)dto.TenantId.Value : DBNull.Value);
+            await cmd.ExecuteNonQueryAsync(ct);
+            logger.LogInformation("SuperAdmin {By} creó usuario {User} ({Role}) en tenant {Tenant}",
+                User.Identity?.Name, uname, canon, dto.TenantId);
+            return Ok(new { username = uname, role = canon });
+        }
+        catch (SqlException ex) when (ex.Number is 2627 or 2601)
+        {
+            return Conflict("El nombre de usuario ya existe.");
+        }
+        catch (Exception ex) { logger.LogError(ex, "SuperAdmin.CreateUser"); return StatusCode(500, ex.Message); }
+    }
+
     // ── PUT /api/superadmin/users/{id}/role ───────────────────────────────────
     /// <summary>Cambia el rol de cualquier usuario (SuperAdmin / Admin / Inventarista / User).</summary>
     [HttpPut("users/{id:guid}/role")]
@@ -102,3 +153,13 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
 }
 
 public record SetRoleDto(string? Role);
+public record SaCreateUserDto(
+    string  Username,
+    string? FullName,
+    string? Email,
+    string  Password,
+    string? Role,
+    Guid?   TenantId,
+    int?    Modules,
+    string? Position,
+    bool    IsActive = true);
