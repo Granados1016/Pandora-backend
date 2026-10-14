@@ -19,6 +19,49 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         User.FindFirstValue(ClaimTypes.Role) == "Admin" ||
         User.FindFirst(c => c.Type.EndsWith("role", StringComparison.OrdinalIgnoreCase))?.Value == "Admin";
 
+    /// <summary>Expresión SQL del estado según la fecha de próximo pago (misma regla que las alertas).</summary>
+    private static string EstadoSql(string fecha) => $"""
+        CASE
+            WHEN DATEDIFF(day, CAST(GETDATE() AS DATE), {fecha}) < 0   THEN 'Vencida'
+            WHEN DATEDIFF(day, CAST(GETDATE() AS DATE), {fecha}) <= 10 THEN 'Por vencer'
+            ELSE 'Activa'
+        END
+        """;
+
+    /// <summary>
+    /// Recalcula el Estado guardado de las licencias no canceladas para que coincida con su
+    /// ProximoPago. Se ejecuta antes de cada lectura para que tabla, dashboard y alertas cuadren.
+    /// </summary>
+    private static async Task SincronizarEstadosAsync(SqlConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            UPDATE dbo.Licencias
+            SET Estado = {EstadoSql("ProximoPago")}, ActualizadoEn = GETUTCDATE()
+            WHERE Estado NOT IN ('Cancelada','Dado de baja')
+              AND Estado <> {EstadoSql("ProximoPago")}
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Avanza el próximo pago los periodos necesarios (manteniendo el día de cobro)
+    /// hasta quedar después de la fecha en que se pagó.
+    /// </summary>
+    private static DateTime CalcularNuevoProximoPago(DateTime proximoPago, string frecuencia, DateTime fechaPago)
+    {
+        int meses = frecuencia switch {
+            "Mensual"    => 1,
+            "Trimestral" => 3,
+            "Semestral"  => 6,
+            "Anual"      => 12,
+            _            => 1,
+        };
+        int periodos = 1;
+        while (proximoPago.AddMonths(meses * periodos).Date <= fechaPago.Date) periodos++;
+        return proximoPago.AddMonths(meses * periodos);
+    }
+
     // ── GET /api/licencias ───────────────────────────────────────────────────
     [HttpGet]
     public async Task<IActionResult> GetAll(
@@ -30,6 +73,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await SincronizarEstadosAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
@@ -72,6 +116,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await SincronizarEstadosAsync(conn, ct);
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
@@ -152,6 +197,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await SincronizarEstadosAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
@@ -192,6 +238,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await SincronizarEstadosAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT L.Id, L.Numero, L.Plataforma, L.Area, L.Responsable, L.FrecuenciaPago,
@@ -323,6 +370,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await SincronizarEstadosAsync(conn, ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Numero, Plataforma, Area, FrecuenciaPago,
@@ -385,15 +433,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             DateTime proximoPago = r.GetDateTime(1);
             await r.CloseAsync();
 
-            // Calcular nuevo ProximoPago
-            int meses = frecuencia switch {
-                "Mensual"    => 1,
-                "Trimestral" => 3,
-                "Semestral"  => 6,
-                "Anual"      => 12,
-                _            => 1,
-            };
-            DateTime nuevoProxPago = proximoPago.AddMonths(meses);
+            DateTime nuevoProxPago = CalcularNuevoProximoPago(proximoPago, frecuencia, req.FechaPago);
 
             string usuario = User.FindFirstValue(ClaimTypes.Name)
                           ?? User.FindFirstValue("sub")
@@ -415,12 +455,12 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             cmdIns.Parameters.AddWithValue("@RegistradoPor",    usuario);
             await cmdIns.ExecuteNonQueryAsync(ct);
 
-            // Actualizar licencia: nuevo ProximoPago + Estado Activa
+            // Actualizar licencia: nuevo ProximoPago + Estado según esa fecha
             await using var cmdUpd = conn.CreateCommand();
-            cmdUpd.CommandText = """
+            cmdUpd.CommandText = $"""
                 UPDATE dbo.Licencias
                 SET ProximoPago   = @NuevoProximoPago,
-                    Estado        = 'Activa',
+                    Estado        = {EstadoSql("CAST(@NuevoProximoPago AS DATE)")},
                     ActualizadoEn = GETUTCDATE()
                 WHERE Id = @Id
                 """;
@@ -428,7 +468,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
             cmdUpd.Parameters.AddWithValue("@Id", id);
             await cmdUpd.ExecuteNonQueryAsync(ct);
 
-            return Ok(new { nuevoProximoPago = nuevoProxPago.ToString("yyyy-MM-dd"), estado = "Activa" });
+            return Ok(new { nuevoProximoPago = nuevoProxPago.ToString("yyyy-MM-dd") });
         }
         catch (Exception ex) { logger.LogError(ex, "RegistrarPago licencia {Id}", id); return StatusCode(500, ex.Message); }
     }
@@ -462,14 +502,7 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                 decimal  costo       = r.GetDecimal(2);
                 await r.CloseAsync();
 
-                int meses = frecuencia switch {
-                    "Mensual"    => 1,
-                    "Trimestral" => 3,
-                    "Semestral"  => 6,
-                    "Anual"      => 12,
-                    _            => 1,
-                };
-                DateTime nuevoProxPago = proximoPago.AddMonths(meses);
+                DateTime nuevoProxPago = CalcularNuevoProximoPago(proximoPago, frecuencia, req.FechaPago);
 
                 await using var cmdIns = conn.CreateCommand();
                 cmdIns.CommandText = """
@@ -487,10 +520,10 @@ public class LicenciasController(IConfiguration config, ILogger<LicenciasControl
                 await cmdIns.ExecuteNonQueryAsync(ct);
 
                 await using var cmdUpd = conn.CreateCommand();
-                cmdUpd.CommandText = """
+                cmdUpd.CommandText = $"""
                     UPDATE dbo.Licencias
                     SET ProximoPago   = @NuevoProximoPago,
-                        Estado        = 'Activa',
+                        Estado        = {EstadoSql("CAST(@NuevoProximoPago AS DATE)")},
                         ActualizadoEn = GETUTCDATE()
                     WHERE Id = @Id
                     """;
