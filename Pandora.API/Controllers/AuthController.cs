@@ -276,8 +276,9 @@ public class AuthController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
 
-            // ── 2) El usuario debe existir y estar activo (lo da de alta el admin) ──
-            Guid userId; string username; string fullName; string role; int modules; Guid? tenantId; bool isActive;
+            // ── 2) Buscar al usuario por correo (lo aprueba/da de alta el admin) ──
+            Guid userId = Guid.Empty; string username = ""; string fullName = ""; string role = "User";
+            int modules = 0; Guid? tenantId = null; bool isActive = false; bool found = false;
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
@@ -286,16 +287,74 @@ public class AuthController(
                     """;
                 cmd.Parameters.AddWithValue("@Email", email);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
-                if (!await r.ReadAsync(ct))
-                    return StatusCode(403, new { error = "not_provisioned", message = "Tu cuenta aún no tiene acceso a Pandora. Contacta al administrador." });
+                if (await r.ReadAsync(ct))
+                {
+                    found    = true;
+                    userId   = r.GetGuid(0);
+                    username = r.IsDBNull(1) ? email : r.GetString(1);
+                    fullName = r.IsDBNull(2) ? username : r.GetString(2);
+                    role     = r.IsDBNull(3) ? "User" : r.GetString(3);
+                    modules  = r.GetInt32(4);
+                    tenantId = r.IsDBNull(5) ? null : r.GetGuid(5);
+                    isActive = !r.IsDBNull(6) && r.GetBoolean(6);
+                }
+            }
 
-                userId   = r.GetGuid(0);
-                username = r.IsDBNull(1) ? email : r.GetString(1);
-                fullName = r.IsDBNull(2) ? username : r.GetString(2);
-                role     = r.IsDBNull(3) ? "User" : r.GetString(3);
-                modules  = r.GetInt32(4);
-                tenantId = r.IsDBNull(5) ? null : r.GetGuid(5);
-                isActive = !r.IsDBNull(6) && r.GetBoolean(6);
+            // ── 2b) Sin cuenta → generar/actualizar SOLICITUD DE ACCESO pendiente ──
+            if (!found)
+            {
+                var reqName = !string.IsNullOrWhiteSpace(req.FullName) ? req.FullName!.Trim()
+                            : (!string.IsNullOrWhiteSpace(payload.Name) ? payload.Name!.Trim() : email);
+                object reqPos = string.IsNullOrWhiteSpace(req.Position) ? DBNull.Value : req.Position!.Trim();
+                object picture = string.IsNullOrWhiteSpace(payload.Picture) ? DBNull.Value : payload.Picture!;
+
+                string? status;
+                await using (var cs = conn.CreateCommand())
+                {
+                    cs.CommandText = "SELECT Status FROM dbo.AccessRequests WHERE LOWER(Email) = LOWER(@E)";
+                    cs.Parameters.AddWithValue("@E", email);
+                    status = (await cs.ExecuteScalarAsync(ct)) as string;
+                }
+
+                if (status == "rejected")
+                    return StatusCode(403, new { error = "request_rejected", message = "Tu solicitud de acceso fue rechazada. Contacta al administrador." });
+
+                await using (var up = conn.CreateCommand())
+                {
+                    if (status is null)
+                    {
+                        up.CommandText = """
+                            INSERT INTO dbo.AccessRequests (Id, Email, FullName, Picture, Position, Status, CreatedAt)
+                            VALUES (NEWID(), @Email, @FullName, @Picture, @Position, 'pending', GETUTCDATE())
+                            """;
+                    }
+                    else // 'pending' (o estado residual) → refrescar datos capturados
+                    {
+                        up.CommandText = """
+                            UPDATE dbo.AccessRequests
+                            SET FullName = @FullName,
+                                Position = COALESCE(@Position, Position),
+                                Picture  = COALESCE(@Picture, Picture),
+                                Status   = 'pending'
+                            WHERE LOWER(Email) = LOWER(@Email)
+                            """;
+                    }
+                    up.Parameters.AddWithValue("@Email", email);
+                    up.Parameters.AddWithValue("@FullName", reqName);
+                    up.Parameters.AddWithValue("@Picture", picture);
+                    up.Parameters.AddWithValue("@Position", reqPos);
+                    await up.ExecuteNonQueryAsync(ct);
+                }
+
+                logger.LogInformation("AccessRequest {State} para {Email}", status is null ? "NUEVA" : "actualizada", email);
+                return Ok(new
+                {
+                    pending = true,
+                    needsDetails = status is null,   // primera vez → el frontend pide completar datos
+                    name = reqName,
+                    email,
+                    message = "Tu solicitud de acceso fue enviada. Un administrador debe aprobarla.",
+                });
             }
 
             if (!isActive)
@@ -825,7 +884,7 @@ public class AuthController(
 
 // ── DTOs locales ──────────────────────────────────────────────────────────────
 public record RefreshRequest(string RefreshToken);
-public record GoogleLoginRequest(string IdToken);
+public record GoogleLoginRequest(string IdToken, string? FullName = null, string? Position = null);
 public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Token, string NewPassword);
 public record OtpRequest(string Username);

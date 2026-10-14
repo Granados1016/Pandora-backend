@@ -1292,6 +1292,37 @@ using (var scopeGwp = app.Services.CreateScope())
         Console.WriteLine("[SuperAdmin] Migración única: Admin existentes promovidos a SuperAdmin.");
 }
 
+// ── Solicitudes de acceso con cuenta institucional (onboarding Google) ───────
+// Cuando alguien con correo institucional intenta entrar con Google y no tiene
+// cuenta, se crea aquí una solicitud PENDIENTE que el administrador aprueba o
+// rechaza. Al aprobar se crea su usuario en AppUsers (sin contraseña: entra por
+// Google). Una sola solicitud por correo (índice único).
+{
+    await using var connAR = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connAR.OpenAsync();
+    await using var cmdAR = connAR.CreateCommand();
+    cmdAR.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AccessRequests' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.AccessRequests (
+                Id         UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Email      NVARCHAR(256)    NOT NULL,
+                FullName   NVARCHAR(256)    NULL,
+                Picture    NVARCHAR(MAX)    NULL,
+                Position   NVARCHAR(256)    NULL,
+                TenantId   UNIQUEIDENTIFIER NULL,
+                Status     NVARCHAR(20)     NOT NULL DEFAULT 'pending',
+                CreatedAt  DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                DecidedAt  DATETIME2        NULL,
+                DecidedBy  NVARCHAR(256)    NULL
+            );
+            CREATE UNIQUE INDEX IX_AccessRequests_Email ON dbo.AccessRequests(Email);
+        END
+        """;
+    await cmdAR.ExecuteNonQueryAsync();
+}
+
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
 {
     await using var connBit = new Microsoft.Data.SqlClient.SqlConnection(
