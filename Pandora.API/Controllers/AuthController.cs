@@ -34,7 +34,7 @@ public class AuthController(
     /// Centraliza la lógica compartida entre /refresh y /verify-otp.
     /// </summary>
     private string BuildJwt(string username, string role, string fullName, int modules, Guid userId,
-                            Guid? tenantId = null, string? impersonatedBy = null)
+                            Guid? tenantId = null, string? impersonatedBy = null, bool needsOnboarding = false)
     {
         string jwtKey   = config["JwtSettings:Key"]!;
         string issuer   = config["JwtSettings:Issuer"]!;
@@ -57,6 +57,10 @@ public class AuthController(
         // Marca de impersonación: el SuperAdmin está actuando como Admin de este tenant.
         if (!string.IsNullOrWhiteSpace(impersonatedBy))
             claims.Add(new Claim("impersonatedBy", impersonatedBy));
+
+        // Perfil pendiente: cuenta precargada que aún debe completar nombre/puesto.
+        if (needsOnboarding)
+            claims.Add(new Claim("needsOnboarding", "1"));
 
         var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
         var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -279,10 +283,12 @@ public class AuthController(
             // ── 2) Buscar al usuario por correo (lo aprueba/da de alta el admin) ──
             Guid userId = Guid.Empty; string username = ""; string fullName = ""; string role = "User";
             int modules = 0; Guid? tenantId = null; bool isActive = false; bool found = false;
+            bool needsOnboarding = false;
             await using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = """
-                    SELECT Id, Username, FullName, Role, Modules, TenantId, ISNULL(IsActive, 0)
+                    SELECT Id, Username, FullName, Role, Modules, TenantId, ISNULL(IsActive, 0),
+                           ISNULL(NeedsOnboarding, 0)
                     FROM dbo.AppUsers WHERE LOWER(Email) = LOWER(@Email)
                     """;
                 cmd.Parameters.AddWithValue("@Email", email);
@@ -297,6 +303,7 @@ public class AuthController(
                     modules  = r.GetInt32(4);
                     tenantId = r.IsDBNull(5) ? null : r.GetGuid(5);
                     isActive = !r.IsDBNull(6) && r.GetBoolean(6);
+                    needsOnboarding = !r.IsDBNull(7) && r.GetBoolean(7);
                 }
             }
 
@@ -380,7 +387,7 @@ public class AuthController(
             }
 
             // ── 4) Emitir JWT + refresh token (misma mecánica que el login normal) ──
-            string token       = BuildJwt(username, role, fullName, modules, userId, tenantId);
+            string token       = BuildJwt(username, role, fullName, modules, userId, tenantId, needsOnboarding: needsOnboarding);
             string refreshToken = NewRefreshToken();
             await using (var cmd = conn.CreateCommand())
             {
@@ -401,6 +408,7 @@ public class AuthController(
                 token,
                 refreshToken,
                 tenantId = tenantId?.ToString(),
+                needsOnboarding,
             });
         }
         catch (Exception ex)
@@ -408,6 +416,62 @@ public class AuthController(
             logger.LogError(ex, "GoogleLogin error for {Email}", email);
             return StatusCode(500, "Error al iniciar sesión con Google.");
         }
+    }
+
+    // ── POST /api/auth/complete-profile ───────────────────────────────────────
+    /// <summary>
+    /// Completa el perfil (nombre/puesto) de una cuenta precargada en su primer
+    /// ingreso. Actualiza AppUsers, limpia NeedsOnboarding y emite un token fresco
+    /// (ya sin la bandera) para que los datos queden homologados en todo Pandora.
+    /// </summary>
+    [Authorize]
+    [HttpPost("complete-profile")]
+    public async Task<IActionResult> CompleteProfile([FromBody] CompleteProfileDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.FullName))
+            return BadRequest("El nombre es obligatorio.");
+
+        var uname = User.FindFirstValue(ClaimTypes.Name);
+        if (string.IsNullOrWhiteSpace(uname)) return Unauthorized();
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    UPDATE dbo.AppUsers
+                    SET FullName = @FullName, Position = @Position,
+                        NeedsOnboarding = 0, UpdatedAt = GETUTCDATE()
+                    WHERE LOWER(Username) = LOWER(@U)
+                    """;
+                cmd.Parameters.AddWithValue("@FullName", dto.FullName.Trim());
+                cmd.Parameters.AddWithValue("@Position", (object?)dto.Position?.Trim() ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@U", uname);
+                if (await cmd.ExecuteNonQueryAsync(ct) == 0) return NotFound("Usuario no encontrado.");
+            }
+
+            Guid userId; string role; int modules; Guid? tenantId; string fullName;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Id, ISNULL(Role,'User'), ISNULL(Modules,0), TenantId, FullName FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+                cmd.Parameters.AddWithValue("@U", uname);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return NotFound();
+                userId   = r.GetGuid(0);
+                role     = r.GetString(1);
+                modules  = r.GetInt32(2);
+                tenantId = r.IsDBNull(3) ? null : r.GetGuid(3);
+                fullName = r.IsDBNull(4) ? uname : r.GetString(4);
+            }
+
+            string token = BuildJwt(uname, role, fullName, modules, userId, tenantId);
+            logger.LogInformation("CompleteProfile OK para {User}", uname);
+            return Ok(new { token });
+        }
+        catch (Exception ex) { logger.LogError(ex, "CompleteProfile {User}", uname); return StatusCode(500, ex.Message); }
     }
 
     // ── POST /api/auth/impersonate/{tenantId} ─────────────────────────────────
@@ -885,6 +949,7 @@ public class AuthController(
 // ── DTOs locales ──────────────────────────────────────────────────────────────
 public record RefreshRequest(string RefreshToken);
 public record GoogleLoginRequest(string IdToken, string? FullName = null, string? Position = null);
+public record CompleteProfileDto(string FullName, string? Position);
 public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Token, string NewPassword);
 public record OtpRequest(string Username);

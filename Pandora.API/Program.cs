@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -149,9 +150,67 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
                 }
             }
             return Task.CompletedTask;
+        },
+
+        // Revalidación en cada petición contra la BD (defensa en capas, estilo Hub):
+        // si al usuario lo desactivaron o le cambiaron el rol, aplica CASI al instante
+        // (caché de 15 s), sin esperar a que venza el JWT. Se omite en tokens de
+        // impersonación (el SuperAdmin actúa como Admin del tenant a propósito).
+        OnTokenValidated = async context =>
+        {
+            var principal = context.Principal;
+            if (principal is null) return;
+            // No tocar los tokens de impersonación.
+            if (!string.IsNullOrEmpty(principal.FindFirst("impersonatedBy")?.Value)) return;
+
+            var uname = principal.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
+                     ?? principal.FindFirst("unique_name")?.Value
+                     ?? principal.FindFirst("name")?.Value;
+            if (string.IsNullOrWhiteSpace(uname)) return;
+
+            var sp    = context.HttpContext.RequestServices;
+            var cache = sp.GetService<Microsoft.Extensions.Caching.Memory.IMemoryCache>();
+            var cacheKey = "uinfo:" + uname.ToLowerInvariant();
+
+            (bool active, string role) info;
+            if (cache != null && cache.TryGetValue(cacheKey, out (bool active, string role) cached))
+            {
+                info = cached;
+            }
+            else
+            {
+                try
+                {
+                    var cs = sp.GetRequiredService<IConfiguration>().GetConnectionString("PandoraDb");
+                    await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+                    await conn.OpenAsync();
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT ISNULL(IsActive,0), ISNULL(Role,'User') FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+                    cmd.Parameters.AddWithValue("@U", uname);
+                    await using var r = await cmd.ExecuteReaderAsync();
+                    info = await r.ReadAsync()
+                        ? (r.GetBoolean(0), r.GetString(1))
+                        : (false, "User");   // usuario borrado → revocar
+                    cache?.Set(cacheKey, info, TimeSpan.FromSeconds(15));
+                }
+                catch { return; }   // ante un error de BD, no se rompe la petición
+            }
+
+            if (!info.active) { context.Fail("user_inactive"); return; }
+
+            // Promoción/democión inmediata: si el rol en BD difiere del token, se reemplaza.
+            var tokenRole = principal.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "";
+            if (!string.Equals(tokenRole, info.role, StringComparison.OrdinalIgnoreCase)
+                && principal.Identity is System.Security.Claims.ClaimsIdentity id)
+            {
+                foreach (var c in id.FindAll(System.Security.Claims.ClaimTypes.Role).ToList())
+                    id.RemoveClaim(c);
+                id.AddClaim(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, info.role));
+            }
         }
     };
 });
+builder.Services.AddMemoryCache();
 
 // ── SignalR ──────────────────────────────────────────────────────────────────
 builder.Services.AddSignalR();
@@ -1321,6 +1380,16 @@ using (var scopeGwp = app.Services.CreateScope())
         END
         """;
     await cmdAR.ExecuteNonQueryAsync();
+
+    // Bandera de perfil pendiente: cuentas precargadas (institucionales/Google) que
+    // deben completar nombre/puesto en su primer inicio de sesión.
+    await using var cmdNO = connAR.CreateCommand();
+    cmdNO.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'NeedsOnboarding')
+            ALTER TABLE dbo.AppUsers ADD NeedsOnboarding BIT NOT NULL DEFAULT 0;
+        """;
+    await cmdNO.ExecuteNonQueryAsync();
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────

@@ -62,8 +62,19 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
     public async Task<IActionResult> CreateUser([FromBody] SaCreateUserDto dto, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(dto.Username)) return BadRequest("Usuario requerido.");
-        if (string.IsNullOrWhiteSpace(dto.Password) || dto.Password.Length < 6)
+
+        // Cuenta institucional/Google: sin contraseña (entra por Google) y debe
+        // completar su perfil en el primer ingreso (NeedsOnboarding).
+        bool googleOnly = dto.GoogleOnly;
+        if (googleOnly)
+        {
+            if (string.IsNullOrWhiteSpace(dto.Email))
+                return BadRequest("Para una cuenta institucional (Google) el correo es obligatorio.");
+        }
+        else if (string.IsNullOrWhiteSpace(dto.Password) || dto.Password.Length < 6)
+        {
             return BadRequest("La contraseña debe tener al menos 6 caracteres.");
+        }
 
         var role = (dto.Role ?? "User").Trim();
         var canon = ValidRoles.FirstOrDefault(v => v.Equals(role, StringComparison.OrdinalIgnoreCase)) ?? "User";
@@ -76,24 +87,30 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
             cmd.CommandText = """
                 INSERT INTO dbo.AppUsers
                     (Id, Username, FullName, Email, PasswordHash, Role, Modules, ModulesViewOnly,
-                     IsActive, Position, TenantId, CreatedAt)
+                     IsActive, Position, TenantId, NeedsOnboarding, CreatedAt)
                 VALUES
                     (NEWID(), @Username, @FullName, @Email, @Hash, @Role, @Modules, 0,
-                     @IsActive, @Position, @TenantId, GETUTCDATE())
+                     @IsActive, @Position, @TenantId, @NeedsOnboarding, GETUTCDATE())
                 """;
             var uname = dto.Username.Trim().ToLower();
             // FullName es NOT NULL en la BD → si no se captura nombre, usamos el usuario.
             var fullName = string.IsNullOrWhiteSpace(dto.FullName) ? uname : dto.FullName.Trim();
+            // Cuenta Google: contraseña aleatoria no divulgada (el acceso es por Google).
+            var hash = googleOnly
+                ? UserService.HashPassword(Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"))
+                : UserService.HashPassword(dto.Password!);
             cmd.Parameters.AddWithValue("@Username", uname);
             cmd.Parameters.AddWithValue("@FullName", fullName);
             // Email es NOT NULL en la BD (sin índice único) → cadena vacía si no se captura.
             cmd.Parameters.AddWithValue("@Email",    (object?)dto.Email?.Trim()    ?? string.Empty);
-            cmd.Parameters.AddWithValue("@Hash",     UserService.HashPassword(dto.Password));
+            cmd.Parameters.AddWithValue("@Hash",     hash);
             cmd.Parameters.AddWithValue("@Role",     canon);
             cmd.Parameters.AddWithValue("@Modules",  dto.Modules ?? 0);
             cmd.Parameters.AddWithValue("@IsActive", dto.IsActive);
             cmd.Parameters.AddWithValue("@Position", (object?)dto.Position?.Trim() ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@TenantId", dto.TenantId.HasValue ? (object)dto.TenantId.Value : DBNull.Value);
+            // Solo las cuentas Google precargadas deben completar perfil al entrar.
+            cmd.Parameters.AddWithValue("@NeedsOnboarding", googleOnly);
             await cmd.ExecuteNonQueryAsync(ct);
             logger.LogInformation("SuperAdmin {By} creó usuario {User} ({Role}) en tenant {Tenant}",
                 User.Identity?.Name, uname, canon, dto.TenantId);
@@ -157,9 +174,10 @@ public record SaCreateUserDto(
     string  Username,
     string? FullName,
     string? Email,
-    string  Password,
+    string? Password,
     string? Role,
     Guid?   TenantId,
     int?    Modules,
     string? Position,
-    bool    IsActive = true);
+    bool    IsActive = true,
+    bool    GoogleOnly = false);
