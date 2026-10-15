@@ -14,19 +14,41 @@ namespace Pandora.API.Services;
 /// </summary>
 public static class SmtpHelper
 {
-    // Clave de cifrado derivada de una frase fija — en producción puede venir de env var
-    private static readonly byte[] EncKey =
-        SHA256.HashData(Encoding.UTF8.GetBytes("Pandora_SMTP_Enc_Key_2024!"));
+    // Frase por defecto (fallback). La llave REAL debería venir de la variable de
+    // entorno Security:SmtpEncKey en producción (ver ResolveKey). Mantener el
+    // fallback conserva compatibilidad: si no se configura, todo sigue igual.
+    private const string DefaultEncPhrase = "Pandora_SMTP_Enc_Key_2024!";
+    private static readonly byte[] DefaultEncKey =
+        SHA256.HashData(Encoding.UTF8.GetBytes(DefaultEncPhrase));
+
+    /// <summary>
+    /// Llave AES efectiva para cifrar/descifrar la contraseña SMTP: usa
+    /// Security:SmtpEncKey si está configurada (env var), si no la frase por defecto.
+    /// Debe ser la MISMA que usa AdminController al guardar.
+    /// </summary>
+    public static byte[] ResolveKey(IConfiguration config)
+    {
+        var phrase = config["Security:SmtpEncKey"];
+        return string.IsNullOrWhiteSpace(phrase)
+            ? DefaultEncKey
+            : SHA256.HashData(Encoding.UTF8.GetBytes(phrase.Trim()));
+    }
 
     // ── Descifrar contraseña ─────────────────────────────────────────────────
-    public static string? Decrypt(string? encrypted)
+    // Compat: usa la llave por defecto (sin config).
+    public static string? Decrypt(string? encrypted) => DecryptWith(encrypted, DefaultEncKey);
+    // Preferido: usa la llave resuelta desde config (env var si está).
+    public static string? Decrypt(string? encrypted, IConfiguration config) =>
+        DecryptWith(encrypted, ResolveKey(config));
+
+    private static string? DecryptWith(string? encrypted, byte[] key)
     {
         if (string.IsNullOrWhiteSpace(encrypted)) return null;
         try
         {
             var raw = Convert.FromBase64String(encrypted);
             using var aes = Aes.Create();
-            aes.Key = EncKey;
+            aes.Key = key;
             var iv = new byte[16];
             Buffer.BlockCopy(raw, 0, iv, 0, 16);
             aes.IV = iv;
@@ -66,7 +88,7 @@ public static class SmtpHelper
         var port     = int.TryParse(d.GetValueOrDefault("smtp_port") ?? smtp["Port"], out var p) ? p : 587;
         var from     = d.GetValueOrDefault("smtp_from_email") ?? smtp["FromEmail"] ?? smtp["Username"] ?? "";
         var encPass  = d.GetValueOrDefault("smtp_password");
-        var pass     = (encPass != null ? Decrypt(encPass) : null) ?? smtp["Password"] ?? "";
+        var pass     = (encPass != null ? Decrypt(encPass, config) : null) ?? smtp["Password"] ?? "";
         var fromName = d.GetValueOrDefault("smtp_from_name")  ?? smtp["FromName"]  ?? "Pandora";
         var useSsl   = (d.GetValueOrDefault("smtp_use_ssl")   ?? smtp["UseSsl"]    ?? "true") == "true";
 
