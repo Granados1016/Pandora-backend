@@ -327,6 +327,8 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
+// Healthcheck liviano para Railway (Swagger está deshabilitado en producción).
+app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 app.MapHub<ProgressHub>("/hubs/progress");
 app.MapHub<NotificationsHub>("/hubs/notifications");
 app.MapFallbackToFile("index.html");
