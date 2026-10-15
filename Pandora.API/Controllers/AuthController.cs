@@ -354,6 +354,14 @@ public class AuthController(
                 }
 
                 logger.LogInformation("AccessRequest {State} para {Email}", status is null ? "NUEVA" : "actualizada", email);
+
+                // Aviso por correo a los administradores (solo cuando es una solicitud NUEVA).
+                if (status is null)
+                {
+                    var notifName = reqName;
+                    _ = Task.Run(() => NotifyAdminsOfAccessRequestAsync(email, notifName), CancellationToken.None);
+                }
+
                 return Ok(new
                 {
                     pending = true,
@@ -472,6 +480,49 @@ public class AuthController(
             return Ok(new { token });
         }
         catch (Exception ex) { logger.LogError(ex, "CompleteProfile {User}", uname); return StatusCode(500, ex.Message); }
+    }
+
+    // Aviso por correo a los administradores cuando llega una solicitud de acceso nueva.
+    // Best-effort: se dispara en segundo plano y nunca rompe el login.
+    private async Task NotifyAdminsOfAccessRequestAsync(string email, string name)
+    {
+        try
+        {
+            var connStr = config.GetConnectionString("PandoraDb")!;
+            var recipients = new List<string>();
+            await using (var conn = new SqlConnection(connStr))
+            {
+                await conn.OpenAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT DISTINCT Email FROM dbo.AppUsers
+                    WHERE Role IN ('Admin','SuperAdmin') AND ISNULL(IsActive,0) = 1
+                      AND Email IS NOT NULL AND LTRIM(RTRIM(Email)) <> ''
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync()) recipients.Add(r.GetString(0));
+            }
+            if (recipients.Count == 0) return;
+
+            var smtp = await SmtpHelper.LoadAsync(connStr, config);
+            var safeName  = System.Net.WebUtility.HtmlEncode(name);
+            var safeEmail = System.Net.WebUtility.HtmlEncode(email);
+            var subject = "Pandora — Nueva solicitud de acceso";
+            var body = $"""
+                <div style="font-family:Arial,sans-serif;color:#333">
+                  <h2 style="color:#1a237e;margin:0 0 12px">Nueva solicitud de acceso</h2>
+                  <p><b>{safeName}</b> solicitó acceso a Pandora con su cuenta institucional.</p>
+                  <table style="border-collapse:collapse">
+                    <tr><td style="padding:6px;color:#555">Correo</td><td style="padding:6px">{safeEmail}</td></tr>
+                  </table>
+                  <p style="margin-top:12px">Entra a <b>Solicitudes de acceso</b> en Pandora para aprobarla o rechazarla.</p>
+                </div>
+                """;
+            foreach (var to in recipients)
+                _ = await SmtpHelper.SendAsync(smtp, to, to, subject, body);
+            logger.LogInformation("Aviso de solicitud de acceso enviado a {N} admin(s) por {Email}", recipients.Count, email);
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo notificar la solicitud de acceso de {Email}", email); }
     }
 
     // ── POST /api/auth/impersonate/{tenantId} ─────────────────────────────────
