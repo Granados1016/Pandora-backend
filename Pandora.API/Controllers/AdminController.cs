@@ -394,13 +394,12 @@ public class AdminController(
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static readonly byte[] _encKey =
-        SHA256.HashData(Encoding.UTF8.GetBytes("Pandora_SMTP_Enc_Key_2024!"));
-
-    private static string EncryptSetting(string plain)
+    // Llave AES resuelta desde config (Security:SmtpEncKey) — MISMA que SmtpHelper.
+    // Instancia (no static) para poder leer `config` del constructor primario.
+    private string EncryptSetting(string plain)
     {
         using var aes = Aes.Create();
-        aes.Key = _encKey;
+        aes.Key = SmtpHelper.ResolveKey(config);
         aes.GenerateIV();
         using var enc = aes.CreateEncryptor();
         var data = Encoding.UTF8.GetBytes(plain);
@@ -411,14 +410,14 @@ public class AdminController(
         return Convert.ToBase64String(result);
     }
 
-    private static string? DecryptSetting(string? encrypted)
+    private string? DecryptSetting(string? encrypted)
     {
         if (string.IsNullOrWhiteSpace(encrypted)) return null;
         try
         {
             var raw = Convert.FromBase64String(encrypted);
             using var aes = Aes.Create();
-            aes.Key = _encKey;
+            aes.Key = SmtpHelper.ResolveKey(config);
             var iv = new byte[16];
             Buffer.BlockCopy(raw, 0, iv, 0, 16);
             aes.IV = iv;

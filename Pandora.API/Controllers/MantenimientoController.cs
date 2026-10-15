@@ -13,7 +13,8 @@ namespace Pandora.API.Controllers;
 public class MantenimientoController(
     IConfiguration config,
     ILogger<MantenimientoController> logger,
-    Pandora.API.Services.PushService push) : ControllerBase
+    Pandora.API.Services.PushService push,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private static readonly TimeZoneInfo MxTz = TimeZoneInfo.FindSystemTimeZoneById(
         OperatingSystem.IsWindows() ? "Central Standard Time" : "America/Mexico_City");
@@ -21,6 +22,7 @@ public class MantenimientoController(
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private string CurrentUser => User.FindFirstValue(ClaimTypes.Name)
                                ?? User.FindFirstValue("name") ?? "sistema";
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── GET /api/mantenimiento ────────────────────────────────────────────────
     [HttpGet]
@@ -40,7 +42,8 @@ public class MantenimientoController(
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
 
-            var where = new List<string> { "IsDeleted = 0" };
+            var where = new List<string> { "IsDeleted = 0", "TenantId = @TenantId" };
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (!string.IsNullOrWhiteSpace(search))
             {
                 where.Add("(Folio LIKE @s OR Titulo LIKE @s OR NombreEquipo LIKE @s OR TecnicoAsignado LIKE @s)");
@@ -90,9 +93,10 @@ public class MantenimientoController(
                        ChecklistJson, Notas, CostoEstimado, CostoReal,
                        CreadoPor, CreadoEn, ActualizadoEn
                 FROM dbo.Mantenimientos
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
             object? entry = null;
             await using (var r = await cmd.ExecuteReaderAsync(ct))
@@ -157,9 +161,10 @@ public class MantenimientoController(
             cmdFolio.CommandText = """
                 SELECT ISNULL(MAX(CAST(SUBSTRING(Folio, 10, 4) AS INT)), 0) + 1
                 FROM dbo.Mantenimientos
-                WHERE Folio LIKE @Prefix AND IsDeleted = 0
+                WHERE Folio LIKE @Prefix AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
             cmdFolio.Parameters.AddWithValue("@Prefix", $"MNT-{DateTime.UtcNow.Year}-%");
+            cmdFolio.Parameters.AddWithValue("@TenantId", TenantParam);
             var seq   = Convert.ToInt32(await cmdFolio.ExecuteScalarAsync(ct));
             var folio = $"MNT-{DateTime.UtcNow.Year}-{seq:D4}";
             var id    = Guid.NewGuid();
@@ -171,14 +176,15 @@ public class MantenimientoController(
                      EquipoId, NombreEquipo, Ubicacion, TecnicoAsignado, EmailTecnico,
                      ResponsableEquipo, EmailResponsable,
                      FechaProgramada, FechaRealizada, DuracionMinutos,
-                     ChecklistJson, Notas, CostoEstimado, CostoReal, CreadoPor)
+                     ChecklistJson, Notas, CostoEstimado, CostoReal, CreadoPor, TenantId)
                 VALUES
                     (@Id, @Folio, @Titulo, @Desc, @Tipo, @Estado, @Prio,
                      @EquipoId, @NombreEquipo, @Ubic, @Tecnico, @EmailTec,
                      @Responsable, @EmailResp,
                      @FechaProg, @FechaReal, @Dur,
-                     @Checklist, @Notas, @CostoEst, @CostoReal, @CreadoPor)
+                     @Checklist, @Notas, @CostoEst, @CostoReal, @CreadoPor, @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
             cmd.Parameters.AddWithValue("@Id",          id);
             cmd.Parameters.AddWithValue("@Folio",       folio);
             cmd.Parameters.AddWithValue("@Titulo",      dto.Titulo.Trim());
@@ -238,9 +244,10 @@ public class MantenimientoController(
             {
                 cmdOld.CommandText = """
                     SELECT Folio, TecnicoAsignado, EmailTecnico, ResponsableEquipo, EmailResponsable, FechaProgramada
-                    FROM dbo.Mantenimientos WHERE Id = @Id AND IsDeleted = 0
+                    FROM dbo.Mantenimientos WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                     """;
                 cmdOld.Parameters.AddWithValue("@Id", id);
+                cmdOld.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmdOld.ExecuteReaderAsync(ct);
                 if (!await r.ReadAsync(ct)) return NotFound();
                 folio          = r.GetString(0);
@@ -273,8 +280,9 @@ public class MantenimientoController(
                     CostoEstimado     = @CostoEst,
                     CostoReal         = @CostoReal,
                     ActualizadoEn     = GETUTCDATE()
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
             cmd.Parameters.AddWithValue("@Id",          id);
             cmd.Parameters.AddWithValue("@Titulo",      dto.Titulo.Trim());
             cmd.Parameters.AddWithValue("@Desc",        (object?)dto.Descripcion     ?? DBNull.Value);
@@ -325,8 +333,9 @@ public class MantenimientoController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE dbo.Mantenimientos SET IsDeleted=1 WHERE Id=@Id";
+            cmd.CommandText = "UPDATE dbo.Mantenimientos SET IsDeleted=1 WHERE Id=@Id AND TenantId=@TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await cmd.ExecuteNonQueryAsync(ct);
             return NoContent();
         }
@@ -341,6 +350,13 @@ public class MantenimientoController(
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await using (var guard = conn.CreateCommand())
+            {
+                guard.CommandText = "SELECT 1 FROM dbo.Mantenimientos WHERE Id=@MntId AND IsDeleted=0 AND TenantId=@TenantId";
+                guard.Parameters.AddWithValue("@MntId", id);
+                guard.Parameters.AddWithValue("@TenantId", TenantParam);
+                if (await guard.ExecuteScalarAsync(ct) is null) return NotFound();
+            }
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.MantenimientoSeguimientos (MantenimientoId, Nota, Tipo, CreadoPor)
@@ -370,6 +386,13 @@ public class MantenimientoController(
 
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+            await using (var guard = conn.CreateCommand())
+            {
+                guard.CommandText = "SELECT 1 FROM dbo.Mantenimientos WHERE Id=@MntId AND IsDeleted=0 AND TenantId=@TenantId";
+                guard.Parameters.AddWithValue("@MntId", id);
+                guard.Parameters.AddWithValue("@TenantId", TenantParam);
+                if (await guard.ExecuteScalarAsync(ct) is null) return NotFound();
+            }
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.MantenimientoEvidencias (MantenimientoId, NombreArchivo, Mime, Datos, SubidoPor)
@@ -395,9 +418,14 @@ public class MantenimientoController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT NombreArchivo, Mime, Datos FROM dbo.MantenimientoEvidencias WHERE Id=@EvId AND MantenimientoId=@MntId";
+            cmd.CommandText = """
+                SELECT e.NombreArchivo, e.Mime, e.Datos FROM dbo.MantenimientoEvidencias e
+                WHERE e.Id=@EvId AND e.MantenimientoId=@MntId
+                  AND EXISTS (SELECT 1 FROM dbo.Mantenimientos m WHERE m.Id=e.MantenimientoId AND m.TenantId=@TenantId)
+                """;
             cmd.Parameters.AddWithValue("@EvId",  evId);
             cmd.Parameters.AddWithValue("@MntId", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound();
             var nombre = r.GetString(0);
@@ -417,9 +445,14 @@ public class MantenimientoController(
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.MantenimientoEvidencias WHERE Id=@EvId AND MantenimientoId=@MntId";
+            cmd.CommandText = """
+                DELETE e FROM dbo.MantenimientoEvidencias e
+                WHERE e.Id=@EvId AND e.MantenimientoId=@MntId
+                  AND EXISTS (SELECT 1 FROM dbo.Mantenimientos m WHERE m.Id=e.MantenimientoId AND m.TenantId=@TenantId)
+                """;
             cmd.Parameters.AddWithValue("@EvId",  evId);
             cmd.Parameters.AddWithValue("@MntId", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await cmd.ExecuteNonQueryAsync(ct);
             return NoContent();
         }
@@ -490,8 +523,9 @@ public class MantenimientoController(
                     ISNULL(SUM(CASE WHEN FechaProgramada < GETUTCDATE() AND Estado NOT IN ('Completado','Cancelado') THEN 1 ELSE 0 END), 0) AS Vencidos,
                     ISNULL(SUM(CASE WHEN FechaProgramada BETWEEN GETUTCDATE() AND DATEADD(DAY,7,GETUTCDATE()) AND Estado='Programado' THEN 1 ELSE 0 END), 0) AS Proximos7Dias,
                     ISNULL(SUM(CASE WHEN MONTH(FechaProgramada)=MONTH(GETUTCDATE()) AND YEAR(FechaProgramada)=YEAR(GETUTCDATE()) THEN 1 ELSE 0 END), 0) AS EsteMes
-                FROM dbo.Mantenimientos WHERE IsDeleted=0
+                FROM dbo.Mantenimientos WHERE IsDeleted=0 AND TenantId=@TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             object summary = new {};
             if (await r.ReadAsync(ct))
@@ -525,8 +559,9 @@ public class MantenimientoController(
                        NombreEquipo, Ubicacion, TecnicoAsignado,
                        FechaProgramada, FechaRealizada, DuracionMinutos,
                        CostoEstimado, CostoReal, CreadoPor, CreadoEn
-                FROM dbo.Mantenimientos WHERE IsDeleted=0 ORDER BY FechaProgramada DESC
+                FROM dbo.Mantenimientos WHERE IsDeleted=0 AND TenantId=@TenantId ORDER BY FechaProgramada DESC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var sb = new StringBuilder();
             sb.AppendLine("Folio,Titulo,Tipo,Estado,Prioridad,Equipo,Ubicacion,Tecnico,FechaProgramada,FechaRealizada,DuracionMin,CostoEst,CostoReal,CreadoPor,CreadoEn");
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -559,9 +594,11 @@ public class MantenimientoController(
                 SELECT Folio, Titulo, NombreEquipo, TecnicoAsignado, FechaProgramada, Id
                 FROM dbo.Mantenimientos
                 WHERE IsDeleted = 0
+                  AND TenantId = @TenantId
                   AND Estado NOT IN ('Completado','Cancelado')
                   AND FechaProgramada BETWEEN GETUTCDATE() AND DATEADD(DAY, 2, GETUTCDATE())
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             int count = 0;
             while (await r.ReadAsync(ct))

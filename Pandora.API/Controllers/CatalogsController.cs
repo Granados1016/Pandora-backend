@@ -8,9 +8,11 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/catalogs")]
 [Authorize]
-public class CatalogsController(IConfiguration config, ILogger<CatalogsController> logger) : ControllerBase
+public class CatalogsController(IConfiguration config, ILogger<CatalogsController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ════════════════════════════════════════════════════════════════════════
     //  DEPARTMENTS
@@ -27,8 +29,10 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             cmd.CommandText = """
                 SELECT Id, Name, InventoryPrefix, IsActive, CreatedAt
                 FROM dbo.Departments
+                WHERE TenantId = @TenantId
                 ORDER BY Name
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -56,9 +60,10 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO dbo.Departments (Id, Name, InventoryPrefix, IsActive, CreatedAt)
-                VALUES (@Id, @Name, @Prefix, @IsActive, GETUTCDATE())
+                INSERT INTO dbo.Departments (Id, Name, InventoryPrefix, IsActive, CreatedAt, TenantId)
+                VALUES (@Id, @Name, @Prefix, @IsActive, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Prefix",   (object?)dto.InventoryPrefix ?? DBNull.Value);
@@ -81,8 +86,9 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             cmd.CommandText = """
                 UPDATE dbo.Departments
                 SET Name = @Name, InventoryPrefix = @Prefix, IsActive = @IsActive, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Prefix",   (object?)dto.InventoryPrefix ?? DBNull.Value);
@@ -102,8 +108,9 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.Departments WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.Departments WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Departamento no encontrado.");
             return NoContent();
@@ -128,10 +135,12 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
                        e.DepartmentId, d.Name AS DepartmentName, e.IsActive, e.CreatedAt
                 FROM dbo.Employees e
                 LEFT JOIN dbo.Departments d ON e.DepartmentId = d.Id
+                WHERE e.TenantId = @TenantId
                 """;
-            if (departmentId.HasValue) { sql += " WHERE e.DepartmentId = @DeptId"; }
+            if (departmentId.HasValue) { sql += " AND e.DepartmentId = @DeptId"; }
             sql += " ORDER BY e.FullName";
             cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (departmentId.HasValue) cmd.Parameters.AddWithValue("@DeptId", departmentId.Value);
 
             var list = new List<object>();
@@ -165,9 +174,10 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO dbo.Employees (Id, FullName, Email, Phone, Position, DepartmentId, IsActive, CreatedAt)
-                VALUES (@Id, @FullName, @Email, @Phone, @Position, @DeptId, @IsActive, GETUTCDATE())
+                INSERT INTO dbo.Employees (Id, FullName, Email, Phone, Position, DepartmentId, IsActive, CreatedAt, TenantId)
+                VALUES (@Id, @FullName, @Email, @Phone, @Position, @DeptId, @IsActive, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@FullName", dto.FullName.Trim());
             cmd.Parameters.AddWithValue("@Email",    (object?)dto.Email      ?? DBNull.Value);
@@ -194,8 +204,9 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
                 UPDATE dbo.Employees
                 SET FullName = @FullName, Email = @Email, Phone = @Phone,
                     Position = @Position, DepartmentId = @DeptId, IsActive = @IsActive, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@FullName", dto.FullName.Trim());
             cmd.Parameters.AddWithValue("@Email",    (object?)dto.Email      ?? DBNull.Value);
@@ -218,8 +229,9 @@ public class CatalogsController(IConfiguration config, ILogger<CatalogsControlle
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.Employees WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.Employees WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Empleado no encontrado.");
             return NoContent();

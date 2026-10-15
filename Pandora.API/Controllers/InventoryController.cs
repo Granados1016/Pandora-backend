@@ -11,9 +11,11 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/inventory")]
 [Authorize]
-public class InventoryController(IConfiguration config, ILogger<InventoryController> logger) : ControllerBase
+public class InventoryController(IConfiguration config, ILogger<InventoryController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     private string? CurrentUsername =>
         User.FindFirstValue(ClaimTypes.Name) ??
@@ -36,10 +38,12 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT t.Id, t.Name, t.Description, t.Department, t.IsActive, t.CreatedAt,
                        COUNT(i.Id) AS ItemCount
                 FROM dbo.InventoryTypes t
-                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
+                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id AND i.TenantId = t.TenantId
+                WHERE t.TenantId = @TenantId
                 GROUP BY t.Id, t.Name, t.Description, t.Department, t.IsActive, t.CreatedAt
                 ORDER BY t.Name
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -68,9 +72,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, Name, Description, Department, IsActive, CreatedAt
-                FROM dbo.InventoryTypes WHERE Id = @Id
+                FROM dbo.InventoryTypes WHERE Id = @Id AND TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Tipo no encontrado.");
             return Ok(new
@@ -97,9 +102,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                INSERT INTO dbo.InventoryTypes (Id, Name, Description, Department, IsActive, CreatedAt)
-                VALUES (@Id, @Name, @Desc, @Dept, @IsActive, GETUTCDATE())
+                INSERT INTO dbo.InventoryTypes (Id, Name, Description, Department, IsActive, CreatedAt, TenantId)
+                VALUES (@Id, @Name, @Desc, @Dept, @IsActive, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Desc",     (object?)dto.Description ?? DBNull.Value);
@@ -124,8 +130,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 UPDATE dbo.InventoryTypes
                 SET Name = @Name, Description = @Desc, Department = @Dept,
                     IsActive = @IsActive, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",       id);
             cmd.Parameters.AddWithValue("@Name",     dto.Name.Trim());
             cmd.Parameters.AddWithValue("@Desc",     (object?)dto.Description ?? DBNull.Value);
@@ -146,8 +153,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.InventoryTypes WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.InventoryTypes WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Tipo no encontrado.");
             return NoContent();
@@ -181,7 +189,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                                     THEN ISNULL(PurchasePrice, 0) ELSE 0 END), 0) AS ActiveValue,
                     ISNULL(SUM(ISNULL(PurchasePrice, 0)), 0) AS TotalValue
                 FROM dbo.InventoryItems
+                WHERE TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
             var total           = r.GetInt32(0);
@@ -200,12 +210,13 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                        COUNT(i.Id) AS TotalCount,
                        ISNULL(SUM(CASE WHEN TRY_CAST(i.Status AS NVARCHAR(50)) IN ('1','Activo') THEN 1 ELSE 0 END), 0) AS ActiveCount
                 FROM dbo.InventoryTypes t
-                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id
-                WHERE t.IsActive = 1
+                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id AND i.TenantId = t.TenantId
+                WHERE t.IsActive = 1 AND t.TenantId = @TenantId
                 GROUP BY t.Id, t.Name
                 HAVING COUNT(i.Id) > 0
                 ORDER BY TotalCount DESC
                 """;
+            cmd2.Parameters.AddWithValue("@TenantId", TenantParam);
             var byType = new List<object>();
             await using var r2 = await cmd2.ExecuteReaderAsync(ct);
             while (await r2.ReadAsync(ct))
@@ -223,8 +234,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT TOP 5 et.Id, i.Name AS ItemName, et.FromPerson, et.ToPerson, et.TransferDate
                 FROM dbo.EquipmentTransfers et
                 JOIN dbo.InventoryItems i ON et.InventoryItemId = i.Id
+                WHERE i.TenantId = @TenantId
                 ORDER BY et.TransferDate DESC
                 """;
+            cmd3.Parameters.AddWithValue("@TenantId", TenantParam);
             var recentTransfers = new List<object>();
             await using var r3 = await cmd3.ExecuteReaderAsync(ct);
             while (await r3.ReadAsync(ct))
@@ -272,15 +285,17 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             if (departmentId.HasValue)
             {
                 await using var cmdP = conn.CreateCommand();
-                cmdP.CommandText = "SELECT InventoryPrefix FROM dbo.Departments WHERE Id = @Id";
+                cmdP.CommandText = "SELECT InventoryPrefix FROM dbo.Departments WHERE Id = @Id AND TenantId = @TenantId";
                 cmdP.Parameters.AddWithValue("@Id", departmentId.Value);
+                cmdP.Parameters.AddWithValue("@TenantId", TenantParam);
                 var p = await cmdP.ExecuteScalarAsync(ct);
                 if (p is string s && !string.IsNullOrWhiteSpace(s)) prefix = s;
             }
             // Contar items con ese prefijo
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems WHERE InventoryNumber LIKE @Prefix + '%'";
+            cmd.CommandText = "SELECT COUNT(*) FROM dbo.InventoryItems WHERE InventoryNumber LIKE @Prefix + '%' AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Prefix", prefix);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var count = (int)await cmd.ExecuteScalarAsync(ct)!;
             var next  = $"{prefix}-{(count + 1):D4}";
             return Ok(new { nextNumber = next });
@@ -307,10 +322,12 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 FROM dbo.InventoryItems i
                 LEFT JOIN dbo.InventoryTypes t ON i.InventoryTypeId = t.Id
                 LEFT JOIN dbo.Employees e ON i.AssignedEmployeeId = e.Id
+                WHERE i.TenantId = @TenantId
                 """;
-            if (typeId.HasValue) { sql += " WHERE i.InventoryTypeId = @TypeId"; }
+            if (typeId.HasValue) { sql += " AND i.InventoryTypeId = @TypeId"; }
             sql += " ORDER BY i.InventoryNumber";
             cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (typeId.HasValue) cmd.Parameters.AddWithValue("@TypeId", typeId.Value);
 
             var list = new List<object>();
@@ -340,9 +357,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 FROM dbo.InventoryItems i
                 LEFT JOIN dbo.InventoryTypes t ON i.InventoryTypeId = t.Id
                 LEFT JOIN dbo.Employees e ON i.AssignedEmployeeId = e.Id
-                WHERE i.Id = @Id
+                WHERE i.Id = @Id AND i.TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Equipo no encontrado.");
             return Ok(ReadItem(r));
@@ -365,12 +383,13 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 INSERT INTO dbo.InventoryItems
                     (Id, InventoryNumber, Name, Brand, Model, SerialNumber, Status,
                      Department, AssignedTo, AssignedEmployeeId, InventoryTypeId, IsPhone,
-                     PurchaseDate, PurchasePrice, Accessories, CreatedAt)
+                     PurchaseDate, PurchasePrice, Accessories, CreatedAt, TenantId)
                 VALUES
                     (@Id, @InvNum, @Name, @Brand, @Model, @Serial, @Status,
                      @Dept, @AssignedTo, @EmpId, @TypeId, @IsPhone,
-                     @PurchDate, @PurchPrice, @Acc, GETUTCDATE())
+                     @PurchDate, @PurchPrice, @Acc, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",   TenantParam);
             cmd.Parameters.AddWithValue("@Id",         id);
             cmd.Parameters.AddWithValue("@InvNum",     dto.InventoryNumber.Trim());
             cmd.Parameters.AddWithValue("@Name",       dto.Name.Trim());
@@ -405,8 +424,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             string? oldStatus = null, oldDept = null, oldAssigned = null;
             await using (var cmdPrev = conn.CreateCommand())
             {
-                cmdPrev.CommandText = "SELECT Status, Department, AssignedTo FROM dbo.InventoryItems WHERE Id = @Id";
+                cmdPrev.CommandText = "SELECT Status, Department, AssignedTo FROM dbo.InventoryItems WHERE Id = @Id AND TenantId = @TenantId";
                 cmdPrev.Parameters.AddWithValue("@Id", id);
+                cmdPrev.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var rp = await cmdPrev.ExecuteReaderAsync(ct);
                 if (await rp.ReadAsync(ct))
                 {
@@ -425,8 +445,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     InventoryTypeId = @TypeId, IsPhone = @IsPhone,
                     PurchaseDate = @PurchDate, PurchasePrice = @PurchPrice,
                     Accessories = @Acc, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",   TenantParam);
             cmd.Parameters.AddWithValue("@Id",         id);
             cmd.Parameters.AddWithValue("@InvNum",     dto.InventoryNumber?.Trim() ?? "");
             cmd.Parameters.AddWithValue("@Name",       dto.Name.Trim());
@@ -484,8 +505,9 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await using var conn = Conn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.InventoryItems WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.InventoryItems WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Equipo no encontrado.");
             return NoContent();
@@ -507,9 +529,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                        TransferDate, Notes, CreatedBy, CreatedAt
                 FROM dbo.EquipmentTransfers
                 WHERE InventoryItemId = @Id
+                  AND EXISTS (SELECT 1 FROM dbo.InventoryItems i WHERE i.Id = EquipmentTransfers.InventoryItemId AND i.TenantId = @TenantId)
                 ORDER BY TransferDate DESC
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -538,6 +562,16 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // El equipo padre debe pertenecer al tenant del usuario
+            await using (var guard = conn.CreateCommand())
+            {
+                guard.CommandText = "SELECT 1 FROM dbo.InventoryItems WHERE Id = @ItemId AND TenantId = @TenantId";
+                guard.Parameters.AddWithValue("@ItemId", id);
+                guard.Parameters.AddWithValue("@TenantId", TenantParam);
+                if (await guard.ExecuteScalarAsync(ct) is null) return NotFound("Equipo no encontrado.");
+            }
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 INSERT INTO dbo.EquipmentTransfers
@@ -563,11 +597,12 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             cmd2.CommandText = """
                 UPDATE dbo.InventoryItems
                 SET Department = @ToDept, AssignedTo = @ToPerson, UpdatedAt = GETUTCDATE()
-                WHERE Id = @ItemId
+                WHERE Id = @ItemId AND TenantId = @TenantId
                 """;
             cmd2.Parameters.AddWithValue("@ToDept",  (object?)dto.ToDepartment ?? DBNull.Value);
             cmd2.Parameters.AddWithValue("@ToPerson",(object?)dto.ToPerson     ?? DBNull.Value);
             cmd2.Parameters.AddWithValue("@ItemId",  id);
+            cmd2.Parameters.AddWithValue("@TenantId", TenantParam);
             await cmd2.ExecuteNonQueryAsync(ct);
 
             return Ok(new { id = tid });
@@ -588,9 +623,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 SELECT Id, FieldName, OldValue, NewValue, ChangedBy, ChangedAt, Notes
                 FROM dbo.InventoryChangeLogs
                 WHERE InventoryItemId = @ItemId
+                  AND EXISTS (SELECT 1 FROM dbo.InventoryItems i WHERE i.Id = InventoryChangeLogs.InventoryItemId AND i.TenantId = @TenantId)
                 ORDER BY ChangedAt DESC
                 """;
             cmd.Parameters.AddWithValue("@ItemId", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -609,8 +646,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
     }
 
     // ── Excel Export (simple CSV) ─────────────────────────────────────────────
+    // Requiere JWT. El token puede venir por query (?access_token=) para la
+    // descarga directa del navegador — Program.cs lo promueve a Bearer para
+    // la ruta /api/inventory/excel antes de validar.
     [HttpGet("excel/export")]
-    [AllowAnonymous]
+    [Authorize]
     public async Task<IActionResult> Export([FromQuery] string? access_token, CancellationToken ct)
     {
         try
@@ -624,8 +664,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                        i.PurchaseDate, i.PurchasePrice, i.Accessories
                 FROM dbo.InventoryItems i
                 LEFT JOIN dbo.InventoryTypes t ON i.InventoryTypeId = t.Id
+                WHERE i.TenantId = @TenantId
                 ORDER BY i.InventoryNumber
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var sb = new StringBuilder();
             sb.AppendLine("NumInventario,Nombre,Marca,Modelo,NumSerie,Estado,Departamento,AsignadoA,Tipo,FechaCompra,Precio,Accesorios");
             await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -647,7 +689,7 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 
     // ── Excel Template ────────────────────────────────────────────────────────
     [HttpGet("excel/template")]
-    [AllowAnonymous]
+    [Authorize]
     public IActionResult Template([FromQuery] string? access_token)
     {
         using var wb = new XLWorkbook();
@@ -710,7 +752,8 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             {
                 await conn.OpenAsync(ct);
                 await using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT Id, Name FROM dbo.InventoryTypes WHERE IsActive = 1";
+                cmd.CommandText = "SELECT Id, Name FROM dbo.InventoryTypes WHERE IsActive = 1 AND TenantId = @TenantId";
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 while (await r.ReadAsync(ct))
                     typeMap[r.GetString(1)] = r.GetGuid(0);
@@ -867,9 +910,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     await using var numCmd = conn.CreateCommand();
                     numCmd.CommandText = """
                         SELECT TOP 1 InventoryNumber FROM dbo.InventoryItems
-                        WHERE InventoryNumber LIKE 'AUTO-%'
+                        WHERE InventoryNumber LIKE 'AUTO-%' AND TenantId = @TenantId
                         ORDER BY CreatedAt DESC
                         """;
+                    numCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                     var last = await numCmd.ExecuteScalarAsync(ct) as string;
                     int seq = 1;
                     if (last is not null && last.StartsWith("AUTO-") && int.TryParse(last[5..], out int prev))
@@ -898,12 +942,13 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                     INSERT INTO dbo.InventoryItems
                       (Id, InventoryNumber, Name, Brand, Model, SerialNumber, Status,
                        Department, AssignedTo, InventoryTypeId, PurchaseDate, PurchasePrice,
-                       Accessories, IsPhone, CreatedAt)
+                       Accessories, IsPhone, CreatedAt, TenantId)
                     VALUES
                       (NEWID(), @Num, @Name, @Brand, @Model, @Serial, @Status,
                        @Dept, @Assigned, @TypeId, @PurchDate, @PurchPrice,
-                       @Accessories, 0, GETUTCDATE())
+                       @Accessories, 0, GETUTCDATE(), @TenantId)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
                 cmd.Parameters.AddWithValue("@Num",         invNum);
                 cmd.Parameters.AddWithValue("@Name",        name);
                 cmd.Parameters.AddWithValue("@Brand",       (object?)S("brand")        ?? DBNull.Value);

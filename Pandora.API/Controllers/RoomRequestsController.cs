@@ -12,12 +12,15 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class RoomRequestsController(
     IConfiguration config,
-    ILogger<RoomRequestsController> logger) : ControllerBase
+    ILogger<RoomRequestsController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private SqlConnection CreateConn()
         => new(config.GetConnectionString("PandoraDb"));
+
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     /// <summary>
     /// Crea la tabla RoomRequests con el esquema actual.
@@ -67,10 +70,17 @@ public class RoomRequestsController(
                 END
                 """;
 
+            const string tenantCol = """
+                IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
+                    ALTER TABLE dbo.RoomRequests ADD TenantId UNIQUEIDENTIFIER NULL;
+                """;
+
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = migrate;
             await cmd.ExecuteNonQueryAsync(ct);
             cmd.CommandText = create;
+            await cmd.ExecuteNonQueryAsync(ct);
+            cmd.CommandText = tenantCol;
             await cmd.ExecuteNonQueryAsync(ct);
         }
         catch (Exception ex)
@@ -105,10 +115,12 @@ public class RoomRequestsController(
                        CoffeeBreak, CoffeeBreakItems,
                        Status, AdminNotes, ReservationId, CreatedAt
                 FROM   dbo.RoomRequests
-                {(status is not null ? "WHERE Status = @status" : "")}
+                WHERE  TenantId = @TenantId
+                {(status is not null ? "AND Status = @status" : "")}
                 ORDER BY CreatedAt DESC
                 """;
 
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (status is not null)
                 cmd.Parameters.AddWithValue("@status", status);
 
@@ -175,16 +187,17 @@ public class RoomRequestsController(
                      RequestedDate, StartTime, EndTime,
                      AttendeeCount, Resources,
                      CoffeeBreak, CoffeeBreakItems,
-                     Status, CreatedAt)
+                     Status, CreatedAt, TenantId)
                 VALUES
                     (@Id, @Area, @Responsible, @Activity,
                      @Room, @Disposition,
                      @Date, @Start, @End,
                      @Count, @Resources,
                      @Coffee, @CoffeeItems,
-                     'Pendiente', GETUTCDATE())
+                     'Pendiente', GETUTCDATE(), @TenantId)
                 """;
 
+            cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
             cmd.Parameters.AddWithValue("@Id",          id);
             cmd.Parameters.AddWithValue("@Area",        dto.Area.Trim());
             cmd.Parameters.AddWithValue("@Responsible", dto.ResponsibleName.Trim());
@@ -237,8 +250,9 @@ public class RoomRequestsController(
                        AdminNotes    = @AdminNotes,
                        ReservationId = @ReservationId,
                        UpdatedAt     = GETUTCDATE()
-                WHERE  Id = @Id
+                WHERE  Id = @Id AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",      TenantParam);
             cmd.Parameters.AddWithValue("@Id",           id);
             cmd.Parameters.AddWithValue("@Status",        dto.Status.Trim());
             cmd.Parameters.AddWithValue("@AdminNotes",    string.IsNullOrWhiteSpace(dto.AdminNotes)
@@ -267,8 +281,9 @@ public class RoomRequestsController(
             await using var conn = CreateConn();
             await conn.OpenAsync(ct);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM dbo.RoomRequests WHERE Id = @Id";
+            cmd.CommandText = "DELETE FROM dbo.RoomRequests WHERE Id = @Id AND TenantId = @TenantId";
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Solicitud no encontrada.");
             return NoContent();

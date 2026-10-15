@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Google.Apis.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -33,7 +34,7 @@ public class AuthController(
     /// Centraliza la lógica compartida entre /refresh y /verify-otp.
     /// </summary>
     private string BuildJwt(string username, string role, string fullName, int modules, Guid userId,
-                            Guid? tenantId = null)
+                            Guid? tenantId = null, string? impersonatedBy = null, bool needsOnboarding = false)
     {
         string jwtKey   = config["JwtSettings:Key"]!;
         string issuer   = config["JwtSettings:Issuer"]!;
@@ -52,6 +53,14 @@ public class AuthController(
 
         if (tenantId.HasValue)
             claims.Add(new Claim("tenantId", tenantId.Value.ToString()));
+
+        // Marca de impersonación: el SuperAdmin está actuando como Admin de este tenant.
+        if (!string.IsNullOrWhiteSpace(impersonatedBy))
+            claims.Add(new Claim("impersonatedBy", impersonatedBy));
+
+        // Perfil pendiente: cuenta precargada que aún debe completar nombre/puesto.
+        if (needsOnboarding)
+            claims.Add(new Claim("needsOnboarding", "1"));
 
         var key    = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
         var creds  = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -160,16 +169,22 @@ public class AuthController(
 
         // Regenerar JWT con tenantId incluido
         var tenantId = await GetUserTenantIdAsync(req.Username, ct);
+
+        // Extraer el token original de la respuesta de jwtService. La clave puede
+        // venir como "token" o "Token" según la serialización — se busca sin
+        // importar mayúsculas para no perderlo.
+        var json0  = JsonSerializer.Serialize(response);
+        var dict0  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
+        var tokKey = dict0.Keys.FirstOrDefault(k => k.Equals("token", StringComparison.OrdinalIgnoreCase));
+        string? origToken = tokKey != null ? dict0[tokKey].GetString() : null;
+
         string? newToken = null;
         try
         {
-            // Extraer datos del JWT generado por jwtService para regenerarlo con tenantId
-            var json0 = JsonSerializer.Serialize(response);
-            var dict0 = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
-            if (dict0.TryGetValue("token", out var tokenElem))
+            if (!string.IsNullOrWhiteSpace(origToken))
             {
                 var handler   = new JwtSecurityTokenHandler();
-                var parsed    = handler.ReadJwtToken(tokenElem.GetString());
+                var parsed    = handler.ReadJwtToken(origToken);
                 var username2 = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Name || c.Type == "unique_name")?.Value ?? req.Username;
                 var role2     = parsed.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Role || c.Type == "role")?.Value ?? "User";
                 var fullName2 = parsed.Claims.FirstOrDefault(c => c.Type == "fullName")?.Value ?? username2;
@@ -180,15 +195,379 @@ public class AuthController(
         }
         catch (Exception ex) { logger.LogWarning(ex, "No se pudo regenerar JWT con tenantId"); }
 
-        // Añadir refreshToken y token enriquecido a la respuesta
-        var json = JsonSerializer.Serialize(response);
-        var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json)!;
+        // Construir la respuesta final. Se GARANTIZA una clave "token" en minúscula
+        // (el frontend lee data.token); se usa el token enriquecido con tenantId si
+        // se pudo regenerar, si no el original. Se elimina cualquier clave "Token"
+        // en otra capitalización para no dejar duplicados confusos.
+        var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json0)!;
+        foreach (var dup in dict.Keys.Where(k => k.Equals("token", StringComparison.OrdinalIgnoreCase) && k != "token").ToList())
+            dict.Remove(dup);
         dict["refreshToken"] = JsonSerializer.SerializeToElement(refreshToken);
-        if (newToken != null)
-            dict["token"] = JsonSerializer.SerializeToElement(newToken);
+        dict["token"]        = JsonSerializer.SerializeToElement(newToken ?? origToken ?? "");
         if (tenantId.HasValue)
             dict["tenantId"] = JsonSerializer.SerializeToElement(tenantId.Value.ToString());
         return Ok(dict);
+    }
+
+    // ── POST /api/auth/google ─────────────────────────────────────────────────
+    /// <summary>
+    /// Login con cuenta institucional de Google (OpenID Connect).
+    /// El frontend obtiene un id_token con Google Identity Services y lo envía aquí.
+    /// El acceso lo controla el administrador: el usuario DEBE existir ya en Pandora
+    /// (vinculado por correo). No se auto-crea ninguna cuenta.
+    /// El proveedor de identidad (Google Workspace) es la autoridad de autenticación,
+    /// por lo que este flujo NO exige el OTP propio de Pandora (2FA de la app).
+    /// </summary>
+    [EnableRateLimiting("login-policy")]
+    [HttpPost("google")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GoogleLogin([FromBody] GoogleLoginRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.IdToken))
+            return BadRequest("Token de Google requerido.");
+
+        // ── 1) Validar el id_token con Google (firma, expiración, emisor, audiencia) ──
+        string[] clientIds = config.GetSection("GoogleAuth:ClientIds").Get<string[]>()
+                             ?? (string.IsNullOrWhiteSpace(config["GoogleAuth:ClientId"])
+                                    ? Array.Empty<string>()
+                                    : new[] { config["GoogleAuth:ClientId"]! });
+        if (clientIds.Length == 0)
+        {
+            logger.LogError("GoogleLogin: GoogleAuth:ClientId no está configurado.");
+            return StatusCode(500, new { error = "google_not_configured", message = "El inicio de sesión con Google no está configurado." });
+        }
+
+        GoogleJsonWebSignature.Payload payload;
+        try
+        {
+            payload = await GoogleJsonWebSignature.ValidateAsync(req.IdToken,
+                new GoogleJsonWebSignature.ValidationSettings { Audience = clientIds });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "GoogleLogin: id_token inválido");
+            return Unauthorized("No se pudo validar la cuenta de Google.");
+        }
+
+        if (payload.EmailVerified != true || string.IsNullOrWhiteSpace(payload.Email))
+            return Unauthorized("La cuenta de Google no tiene un correo verificado.");
+
+        var email = payload.Email.Trim();
+
+        // ── Candado de dominio institucional ──────────────────────────────────
+        // Si GoogleAuth:AllowedDomains está configurado, SOLO se aceptan correos
+        // (y hosted domain de Workspace) de esos dominios. Vacío = sin restricción.
+        var allowedDomains = config.GetSection("GoogleAuth:AllowedDomains").Get<string[]>()
+                             ?? Array.Empty<string>();
+        if (allowedDomains.Length > 0)
+        {
+            var atIdx       = email.IndexOf('@');
+            var emailDomain = atIdx >= 0 ? email[(atIdx + 1)..].ToLowerInvariant() : "";
+            var hostedDom   = (payload.HostedDomain ?? "").ToLowerInvariant();
+            bool emailOk  = allowedDomains.Any(d => string.Equals(d.Trim(), emailDomain, StringComparison.OrdinalIgnoreCase));
+            // Si Google reporta hosted domain (cuenta Workspace), también debe coincidir.
+            bool hostedOk = string.IsNullOrEmpty(hostedDom)
+                          || allowedDomains.Any(d => string.Equals(d.Trim(), hostedDom, StringComparison.OrdinalIgnoreCase));
+            if (!emailOk || !hostedOk)
+            {
+                logger.LogWarning("GoogleLogin: dominio no permitido {Email} (hd={Hd})", email, hostedDom);
+                return StatusCode(403, new { error = "domain_not_allowed", message = "Solo se permite el acceso con tu correo institucional." });
+            }
+        }
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // ── 2) Buscar al usuario por correo (lo aprueba/da de alta el admin) ──
+            Guid userId = Guid.Empty; string username = ""; string fullName = ""; string role = "User";
+            int modules = 0; Guid? tenantId = null; bool isActive = false; bool found = false;
+            bool needsOnboarding = false;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT Id, Username, FullName, Role, Modules, TenantId, ISNULL(IsActive, 0),
+                           ISNULL(NeedsOnboarding, 0)
+                    FROM dbo.AppUsers WHERE LOWER(Email) = LOWER(@Email)
+                    """;
+                cmd.Parameters.AddWithValue("@Email", email);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (await r.ReadAsync(ct))
+                {
+                    found    = true;
+                    userId   = r.GetGuid(0);
+                    username = r.IsDBNull(1) ? email : r.GetString(1);
+                    fullName = r.IsDBNull(2) ? username : r.GetString(2);
+                    role     = r.IsDBNull(3) ? "User" : r.GetString(3);
+                    modules  = r.GetInt32(4);
+                    tenantId = r.IsDBNull(5) ? null : r.GetGuid(5);
+                    isActive = !r.IsDBNull(6) && r.GetBoolean(6);
+                    needsOnboarding = !r.IsDBNull(7) && r.GetBoolean(7);
+                }
+            }
+
+            // ── 2b) Sin cuenta → generar/actualizar SOLICITUD DE ACCESO pendiente ──
+            if (!found)
+            {
+                var reqName = !string.IsNullOrWhiteSpace(req.FullName) ? req.FullName!.Trim()
+                            : (!string.IsNullOrWhiteSpace(payload.Name) ? payload.Name!.Trim() : email);
+                object reqPos = string.IsNullOrWhiteSpace(req.Position) ? DBNull.Value : req.Position!.Trim();
+                object picture = string.IsNullOrWhiteSpace(payload.Picture) ? DBNull.Value : payload.Picture!;
+
+                string? status;
+                await using (var cs = conn.CreateCommand())
+                {
+                    cs.CommandText = "SELECT Status FROM dbo.AccessRequests WHERE LOWER(Email) = LOWER(@E)";
+                    cs.Parameters.AddWithValue("@E", email);
+                    status = (await cs.ExecuteScalarAsync(ct)) as string;
+                }
+
+                if (status == "rejected")
+                    return StatusCode(403, new { error = "request_rejected", message = "Tu solicitud de acceso fue rechazada. Contacta al administrador." });
+
+                await using (var up = conn.CreateCommand())
+                {
+                    if (status is null)
+                    {
+                        up.CommandText = """
+                            INSERT INTO dbo.AccessRequests (Id, Email, FullName, Picture, Position, Status, CreatedAt)
+                            VALUES (NEWID(), @Email, @FullName, @Picture, @Position, 'pending', GETUTCDATE())
+                            """;
+                    }
+                    else // 'pending' (o estado residual) → refrescar datos capturados
+                    {
+                        up.CommandText = """
+                            UPDATE dbo.AccessRequests
+                            SET FullName = @FullName,
+                                Position = COALESCE(@Position, Position),
+                                Picture  = COALESCE(@Picture, Picture),
+                                Status   = 'pending'
+                            WHERE LOWER(Email) = LOWER(@Email)
+                            """;
+                    }
+                    up.Parameters.AddWithValue("@Email", email);
+                    up.Parameters.AddWithValue("@FullName", reqName);
+                    up.Parameters.AddWithValue("@Picture", picture);
+                    up.Parameters.AddWithValue("@Position", reqPos);
+                    await up.ExecuteNonQueryAsync(ct);
+                }
+
+                logger.LogInformation("AccessRequest {State} para {Email}", status is null ? "NUEVA" : "actualizada", email);
+
+                // Aviso por correo a los administradores (solo cuando es una solicitud NUEVA).
+                if (status is null)
+                {
+                    var notifName = reqName;
+                    _ = Task.Run(() => NotifyAdminsOfAccessRequestAsync(email, notifName), CancellationToken.None);
+                }
+
+                return Ok(new
+                {
+                    pending = true,
+                    needsDetails = status is null,   // primera vez → el frontend pide completar datos
+                    name = reqName,
+                    email,
+                    message = "Tu solicitud de acceso fue enviada. Un administrador debe aprobarla.",
+                });
+            }
+
+            if (!isActive)
+                return StatusCode(403, new { error = "user_disabled", message = "Tu cuenta está desactivada. Contacta al administrador." });
+
+            // ── 3) Verificar licencia del tenant (igual que el login por contraseña) ──
+            if (tenantId.HasValue)
+            {
+                await using var cmdLic = conn.CreateCommand();
+                cmdLic.CommandText = "SELECT ISNULL(IsActive,1), ExpiresAt, Name FROM dbo.Tenants WHERE Id = @T";
+                cmdLic.Parameters.AddWithValue("@T", tenantId.Value);
+                await using var rLic = await cmdLic.ExecuteReaderAsync(ct);
+                if (await rLic.ReadAsync(ct))
+                {
+                    var tActive = rLic.GetBoolean(0);
+                    var tExp    = rLic.IsDBNull(1) ? (DateTime?)null : rLic.GetDateTime(1);
+                    var tName   = rLic.IsDBNull(2) ? "tu organización" : rLic.GetString(2);
+                    if (!tActive)
+                        return StatusCode(403, new { error = "license_suspended", message = "El acceso de su organización ha sido suspendido. Contacte al proveedor." });
+                    if (tExp.HasValue && tExp.Value < DateTime.UtcNow)
+                        return StatusCode(403, new { error = "license_expired", message = $"La licencia de {tName} venció el {tExp.Value:dd/MM/yyyy}. Contacte al proveedor para renovar." });
+                }
+            }
+
+            // ── 4) Emitir JWT + refresh token (misma mecánica que el login normal) ──
+            string token       = BuildJwt(username, role, fullName, modules, userId, tenantId, needsOnboarding: needsOnboarding);
+            string refreshToken = NewRefreshToken();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    DELETE FROM dbo.RefreshTokens WHERE Username = @Username;
+                    INSERT INTO dbo.RefreshTokens (Token, Username, ExpiresAt, CreatedAt)
+                    VALUES (@Token, @Username, @ExpiresAt, GETUTCDATE());
+                    """;
+                cmd.Parameters.AddWithValue("@Token",     refreshToken);
+                cmd.Parameters.AddWithValue("@Username",  username.ToLower().Trim());
+                cmd.Parameters.AddWithValue("@ExpiresAt", DateTime.UtcNow.AddDays(7));
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            logger.LogInformation("GoogleLogin OK para {Email} (usuario {Username})", email, username);
+            return Ok(new
+            {
+                token,
+                refreshToken,
+                tenantId = tenantId?.ToString(),
+                needsOnboarding,
+            });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GoogleLogin error for {Email}", email);
+            return StatusCode(500, "Error al iniciar sesión con Google.");
+        }
+    }
+
+    // ── POST /api/auth/complete-profile ───────────────────────────────────────
+    /// <summary>
+    /// Completa el perfil (nombre/puesto) de una cuenta precargada en su primer
+    /// ingreso. Actualiza AppUsers, limpia NeedsOnboarding y emite un token fresco
+    /// (ya sin la bandera) para que los datos queden homologados en todo Pandora.
+    /// </summary>
+    [Authorize]
+    [HttpPost("complete-profile")]
+    public async Task<IActionResult> CompleteProfile([FromBody] CompleteProfileDto dto, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(dto.FullName))
+            return BadRequest("El nombre es obligatorio.");
+
+        var uname = User.FindFirstValue(ClaimTypes.Name);
+        if (string.IsNullOrWhiteSpace(uname)) return Unauthorized();
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    UPDATE dbo.AppUsers
+                    SET FullName = @FullName, Position = @Position,
+                        NeedsOnboarding = 0, UpdatedAt = GETUTCDATE()
+                    WHERE LOWER(Username) = LOWER(@U)
+                    """;
+                cmd.Parameters.AddWithValue("@FullName", dto.FullName.Trim());
+                cmd.Parameters.AddWithValue("@Position", (object?)dto.Position?.Trim() ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@U", uname);
+                if (await cmd.ExecuteNonQueryAsync(ct) == 0) return NotFound("Usuario no encontrado.");
+            }
+
+            Guid userId; string role; int modules; Guid? tenantId; string fullName;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Id, ISNULL(Role,'User'), ISNULL(Modules,0), TenantId, FullName FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+                cmd.Parameters.AddWithValue("@U", uname);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return NotFound();
+                userId   = r.GetGuid(0);
+                role     = r.GetString(1);
+                modules  = r.GetInt32(2);
+                tenantId = r.IsDBNull(3) ? null : r.GetGuid(3);
+                fullName = r.IsDBNull(4) ? uname : r.GetString(4);
+            }
+
+            string token = BuildJwt(uname, role, fullName, modules, userId, tenantId);
+            logger.LogInformation("CompleteProfile OK para {User}", uname);
+            return Ok(new { token });
+        }
+        catch (Exception ex) { logger.LogError(ex, "CompleteProfile {User}", uname); return StatusCode(500, ex.Message); }
+    }
+
+    // Aviso por correo a los administradores cuando llega una solicitud de acceso nueva.
+    // Best-effort: se dispara en segundo plano y nunca rompe el login.
+    private async Task NotifyAdminsOfAccessRequestAsync(string email, string name)
+    {
+        try
+        {
+            var connStr = config.GetConnectionString("PandoraDb")!;
+            var recipients = new List<string>();
+            await using (var conn = new SqlConnection(connStr))
+            {
+                await conn.OpenAsync();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT DISTINCT Email FROM dbo.AppUsers
+                    WHERE Role IN ('Admin','SuperAdmin') AND ISNULL(IsActive,0) = 1
+                      AND Email IS NOT NULL AND LTRIM(RTRIM(Email)) <> ''
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync()) recipients.Add(r.GetString(0));
+            }
+            if (recipients.Count == 0) return;
+
+            var smtp = await SmtpHelper.LoadAsync(connStr, config);
+            var safeName  = System.Net.WebUtility.HtmlEncode(name);
+            var safeEmail = System.Net.WebUtility.HtmlEncode(email);
+            var subject = "Pandora — Nueva solicitud de acceso";
+            var body = $"""
+                <div style="font-family:Arial,sans-serif;color:#333">
+                  <h2 style="color:#1a237e;margin:0 0 12px">Nueva solicitud de acceso</h2>
+                  <p><b>{safeName}</b> solicitó acceso a Pandora con su cuenta institucional.</p>
+                  <table style="border-collapse:collapse">
+                    <tr><td style="padding:6px;color:#555">Correo</td><td style="padding:6px">{safeEmail}</td></tr>
+                  </table>
+                  <p style="margin-top:12px">Entra a <b>Solicitudes de acceso</b> en Pandora para aprobarla o rechazarla.</p>
+                </div>
+                """;
+            foreach (var to in recipients)
+                _ = await SmtpHelper.SendAsync(smtp, to, to, subject, body);
+            logger.LogInformation("Aviso de solicitud de acceso enviado a {N} admin(s) por {Email}", recipients.Count, email);
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo notificar la solicitud de acceso de {Email}", email); }
+    }
+
+    // ── POST /api/auth/impersonate/{tenantId} ─────────────────────────────────
+    /// <summary>
+    /// "Entrar como" un cliente: el SuperAdmin obtiene un token de Admin scoped
+    /// al tenant indicado. Con ese token actúa como administrador de ESE cliente
+    /// y todo el aislamiento por tenant + los [Authorize(Roles="Admin")] aplican
+    /// igual. El token lleva el claim "impersonatedBy" para auditoría. No se
+    /// persiste refresh token (no debe sobrescribir la sesión real del SuperAdmin);
+    /// al expirar, el SuperAdmin vuelve a "entrar como".
+    /// </summary>
+    [HttpPost("impersonate/{tenantId:guid}")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<IActionResult> Impersonate(Guid tenantId, CancellationToken ct)
+    {
+        var saUser     = User.FindFirstValue(ClaimTypes.Name) ?? "";
+        var saUserId   = Guid.TryParse(User.FindFirstValue(JwtRegisteredClaimNames.Sub), out var g) ? g : Guid.Empty;
+        var saFullName = User.FindFirstValue("fullName") ?? saUser;
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            string tenantName;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Name FROM dbo.Tenants WHERE Id = @T";
+                cmd.Parameters.AddWithValue("@T", tenantId);
+                var nameObj = await cmd.ExecuteScalarAsync(ct);
+                if (nameObj is null or DBNull) return NotFound(new { error = "tenant_not_found", message = "Cliente no encontrado." });
+                tenantName = (string)nameObj;
+            }
+
+            // Token de Admin scoped al tenant, actuando como el SuperAdmin (auditoría)
+            var token = BuildJwt(saUser, "Admin", saFullName, modules: -1, userId: saUserId,
+                                 tenantId: tenantId, impersonatedBy: saUser);
+
+            logger.LogInformation("SuperAdmin {User} impersona al tenant {Tenant} ({Id})", saUser, tenantName, tenantId);
+            return Ok(new { token, tenantId = tenantId.ToString(), tenantName });
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Impersonate tenant {Id}", tenantId);
+            return StatusCode(500, "Error al entrar como el cliente.");
+        }
     }
 
     // ── POST /api/auth/refresh ────────────────────────────────────────────────
@@ -421,6 +800,8 @@ public class AuthController(
     }
 
     // ── POST /api/auth/send-otp ──────────────────────────────────────────────
+    // Rate-limited: evita spam de correos OTP a la cuenta del usuario.
+    [EnableRateLimiting("login-policy")]
     [HttpPost("send-otp")]
     [AllowAnonymous]
     public async Task<IActionResult> SendOtp([FromBody] OtpRequest req, CancellationToken ct)
@@ -467,6 +848,8 @@ public class AuthController(
     }
 
     // ── POST /api/auth/verify-otp ────────────────────────────────────────────
+    // Rate-limited: evita fuerza bruta del código OTP de 6 dígitos.
+    [EnableRateLimiting("login-policy")]
     [HttpPost("verify-otp")]
     [AllowAnonymous]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest req, CancellationToken ct)
@@ -616,6 +999,8 @@ public class AuthController(
 
 // ── DTOs locales ──────────────────────────────────────────────────────────────
 public record RefreshRequest(string RefreshToken);
+public record GoogleLoginRequest(string IdToken, string? FullName = null, string? Position = null);
+public record CompleteProfileDto(string FullName, string? Position);
 public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Token, string NewPassword);
 public record OtpRequest(string Username);

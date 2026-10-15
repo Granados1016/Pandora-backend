@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -88,18 +89,29 @@ builder.Services.AddSwaggerGen(c =>
 // ── CORS ─────────────────────────────────────────────────────────────────────
 string[] allowedOrigins = builder.Configuration.GetSection("AllowedOrigins").Get<string[]>()
                           ?? ["http://localhost:3000", "http://localhost:5173", "http://localhost:5174"];
+// Prefijos de proyectos propios permitidos en plataformas públicas (vercel.app / railway.app).
+// Antes se confiaba en CUALQUIER subdominio de esas plataformas — donde cualquiera puede
+// desplegar un sitio — lo que permitía a una página de un tercero (p.ej. evil-xyz.vercel.app)
+// hacer peticiones autenticadas contra la API. Ahora solo se aceptan despliegues cuyo host
+// empieza con uno de estos prefijos (configurable por entorno vía AllowedPlatformPrefixes).
+string[] allowedPlatformPrefixes = builder.Configuration.GetSection("AllowedPlatformPrefixes").Get<string[]>()
+                          ?? ["pandora", "azul"];
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("PandoraPolicy", p =>
         p.SetIsOriginAllowed(origin =>
         {
             if (string.IsNullOrEmpty(origin)) return false;
-            var uri = new Uri(origin);
-            // Permitir cualquier subdominio de vercel.app y railway.app
-            if (uri.Host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)) return true;
-            if (uri.Host.EndsWith(".railway.app", StringComparison.OrdinalIgnoreCase)) return true;
-            // Permitir orígenes explícitos configurados (localhost, etc.)
-            return allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase);
+            // 1) Orígenes explícitos (localhost en dev, dominios propios en prod)
+            if (allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) return true;
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
+            var host = uri.Host;
+            // 2) Plataformas públicas: SOLO despliegues propios (por prefijo), nunca de terceros.
+            bool isPublicPlatform = host.EndsWith(".vercel.app", StringComparison.OrdinalIgnoreCase)
+                                 || host.EndsWith(".railway.app", StringComparison.OrdinalIgnoreCase);
+            if (isPublicPlatform)
+                return allowedPlatformPrefixes.Any(pre => host.StartsWith(pre, StringComparison.OrdinalIgnoreCase));
+            return false;
         })
          .AllowAnyHeader()
          .AllowAnyMethod()
@@ -131,15 +143,74 @@ builder.Services.AddAuthentication("Bearer").AddJwtBearer(opts =>
                 if (path.StartsWithSegments("/hubs") ||
                     path.StartsWithSegments("/api/inventory/excel") ||
                     path.StartsWithSegments("/api/procedimientos") ||
+                    path.StartsWithSegments("/api/campaigns") ||
                     (path.Value?.Contains("/visualizar") == true))
                 {
                     context.Token = accessToken;
                 }
             }
             return Task.CompletedTask;
+        },
+
+        // Revalidación en cada petición contra la BD (defensa en capas, estilo Hub):
+        // si al usuario lo desactivaron o le cambiaron el rol, aplica CASI al instante
+        // (caché de 15 s), sin esperar a que venza el JWT. Se omite en tokens de
+        // impersonación (el SuperAdmin actúa como Admin del tenant a propósito).
+        OnTokenValidated = async context =>
+        {
+            var principal = context.Principal;
+            if (principal is null) return;
+            // No tocar los tokens de impersonación.
+            if (!string.IsNullOrEmpty(principal.FindFirst("impersonatedBy")?.Value)) return;
+
+            var uname = principal.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
+                     ?? principal.FindFirst("unique_name")?.Value
+                     ?? principal.FindFirst("name")?.Value;
+            if (string.IsNullOrWhiteSpace(uname)) return;
+
+            var sp    = context.HttpContext.RequestServices;
+            var cache = sp.GetService<Microsoft.Extensions.Caching.Memory.IMemoryCache>();
+            var cacheKey = "uinfo:" + uname.ToLowerInvariant();
+
+            (bool active, string role) info;
+            if (cache != null && cache.TryGetValue(cacheKey, out (bool active, string role) cached))
+            {
+                info = cached;
+            }
+            else
+            {
+                try
+                {
+                    var cs = sp.GetRequiredService<IConfiguration>().GetConnectionString("PandoraDb");
+                    await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cs);
+                    await conn.OpenAsync();
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = "SELECT ISNULL(IsActive,0), ISNULL(Role,'User') FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+                    cmd.Parameters.AddWithValue("@U", uname);
+                    await using var r = await cmd.ExecuteReaderAsync();
+                    info = await r.ReadAsync()
+                        ? (r.GetBoolean(0), r.GetString(1))
+                        : (false, "User");   // usuario borrado → revocar
+                    cache?.Set(cacheKey, info, TimeSpan.FromSeconds(15));
+                }
+                catch { return; }   // ante un error de BD, no se rompe la petición
+            }
+
+            if (!info.active) { context.Fail("user_inactive"); return; }
+
+            // Promoción/democión inmediata: si el rol en BD difiere del token, se reemplaza.
+            var tokenRole = principal.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "";
+            if (!string.Equals(tokenRole, info.role, StringComparison.OrdinalIgnoreCase)
+                && principal.Identity is System.Security.Claims.ClaimsIdentity id)
+            {
+                foreach (var c in id.FindAll(System.Security.Claims.ClaimTypes.Role).ToList())
+                    id.RemoveClaim(c);
+                id.AddClaim(new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, info.role));
+            }
         }
     };
 });
+builder.Services.AddMemoryCache();
 
 // ── SignalR ──────────────────────────────────────────────────────────────────
 builder.Services.AddSignalR();
@@ -228,9 +299,12 @@ Directory.CreateDirectory(Path.Combine(storageRoot, "libros"));
 Directory.CreateDirectory(Path.Combine(storageRoot, "portadas"));
 Directory.CreateDirectory(Path.Combine(storageRoot, "vacaciones-docs"));
 
-// ── Swagger ───────────────────────────────────────────────────────────────
-app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pandora v1"));
+// ── Swagger (solo en desarrollo — no exponer la superficie de la API en prod) ─
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Pandora v1"));
+}
 
 // ── Archivos estáticos ────────────────────────────────────────────────────
 app.UseDefaultFiles();
@@ -334,11 +408,29 @@ using (var scope = app.Services.CreateScope())
             FullName     = "Administrador Pandora",
             Email        = builder.Configuration["AdminUser:Email"] ?? "admin@pandora.local",
             PasswordHash = UserService.HashPassword(adminPassword),
-            Role         = "Admin",
+            Role         = "SuperAdmin",   // el primer usuario del sistema es el Super Admin del proveedor
             Modules      = ModuleAccess.All,
             IsActive     = true
         });
         await db.SaveChangesAsync();
+    }
+
+    // ── Promover al Super Admin del proveedor (idempotente, cada arranque) ──────
+    // El usuario configurado en SuperAdmin:Username (por defecto el AdminUser) tiene
+    // rol "SuperAdmin": gestiona TODOS los clientes/tenants. Un Admin normal solo
+    // administra su propio tenant. Esto corre también en BDs existentes.
+    {
+        var superUser = (builder.Configuration["SuperAdmin:Username"]
+                         ?? builder.Configuration["AdminUser:Username"]
+                         ?? "admin").ToLower();
+        await using var connSa = new Microsoft.Data.SqlClient.SqlConnection(
+            builder.Configuration.GetConnectionString("PandoraDb"));
+        await connSa.OpenAsync();
+        await using var cmdSa = connSa.CreateCommand();
+        cmdSa.CommandText = "UPDATE dbo.AppUsers SET Role = 'SuperAdmin' WHERE LOWER(Username) = @U AND Role <> 'SuperAdmin'";
+        cmdSa.Parameters.AddWithValue("@U", superUser);
+        var promoted = await cmdSa.ExecuteNonQueryAsync();
+        if (promoted > 0) Console.WriteLine($"[SuperAdmin] Usuario '{superUser}' promovido a SuperAdmin.");
     }
 
     // ── Biblioteca — seed inicial de categorías y libros ─────────────────
@@ -1239,6 +1331,65 @@ using (var scopeGwp = app.Services.CreateScope())
         END
         """;
     await cmdSS.ExecuteNonQueryAsync();
+
+    // ── Migración ÚNICA: promover TODOS los Admin existentes a SuperAdmin ────────
+    // Por decisión del proveedor, al introducir el modelo de roles todos los Admin
+    // actuales pasan a SuperAdmin para no perder acceso; luego se corrigen a mano.
+    // Guardada con marcador en SystemSettings para que NO vuelva a ejecutarse (así
+    // las correcciones manuales posteriores — demover a Admin — persisten).
+    await using var cmdBootstrap = connSS.CreateCommand();
+    cmdBootstrap.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM dbo.SystemSettings WHERE SettingKey = 'bootstrap_promote_admins_to_superadmin_v1')
+        BEGIN
+            UPDATE dbo.AppUsers SET Role = 'SuperAdmin' WHERE Role = 'Admin';
+            INSERT INTO dbo.SystemSettings (SettingKey, SettingValue)
+            VALUES ('bootstrap_promote_admins_to_superadmin_v1', CONVERT(NVARCHAR(30), GETUTCDATE(), 126));
+        END
+        """;
+    var bootstrapAffected = await cmdBootstrap.ExecuteNonQueryAsync();
+    if (bootstrapAffected > 0)
+        Console.WriteLine("[SuperAdmin] Migración única: Admin existentes promovidos a SuperAdmin.");
+}
+
+// ── Solicitudes de acceso con cuenta institucional (onboarding Google) ───────
+// Cuando alguien con correo institucional intenta entrar con Google y no tiene
+// cuenta, se crea aquí una solicitud PENDIENTE que el administrador aprueba o
+// rechaza. Al aprobar se crea su usuario en AppUsers (sin contraseña: entra por
+// Google). Una sola solicitud por correo (índice único).
+{
+    await using var connAR = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connAR.OpenAsync();
+    await using var cmdAR = connAR.CreateCommand();
+    cmdAR.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='AccessRequests' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.AccessRequests (
+                Id         UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Email      NVARCHAR(256)    NOT NULL,
+                FullName   NVARCHAR(256)    NULL,
+                Picture    NVARCHAR(MAX)    NULL,
+                Position   NVARCHAR(256)    NULL,
+                TenantId   UNIQUEIDENTIFIER NULL,
+                Status     NVARCHAR(20)     NOT NULL DEFAULT 'pending',
+                CreatedAt  DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                DecidedAt  DATETIME2        NULL,
+                DecidedBy  NVARCHAR(256)    NULL
+            );
+            CREATE UNIQUE INDEX IX_AccessRequests_Email ON dbo.AccessRequests(Email);
+        END
+        """;
+    await cmdAR.ExecuteNonQueryAsync();
+
+    // Bandera de perfil pendiente: cuentas precargadas (institucionales/Google) que
+    // deben completar nombre/puesto en su primer inicio de sesión.
+    await using var cmdNO = connAR.CreateCommand();
+    cmdNO.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'NeedsOnboarding')
+            ALTER TABLE dbo.AppUsers ADD NeedsOnboarding BIT NOT NULL DEFAULT 0;
+        """;
+    await cmdNO.ExecuteNonQueryAsync();
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
@@ -1697,6 +1848,72 @@ using (var scopeEnc = app.Services.CreateScope())
 
         IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Reservations') AND name='TenantId')
             ALTER TABLE dbo.Reservations ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        -- P3 aislamiento por tenant: módulos adicionales
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Comunicados') AND name='TenantId')
+            ALTER TABLE dbo.Comunicados ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Bitacora') AND name='TenantId')
+            ALTER TABLE dbo.Bitacora ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.Procedimientos') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Procedimientos') AND name='TenantId')
+            ALTER TABLE dbo.Procedimientos ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.ProcedimientoCategorias') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ProcedimientoCategorias') AND name='TenantId')
+            ALTER TABLE dbo.ProcedimientoCategorias ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.Capacitaciones') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
+            ALTER TABLE dbo.Capacitaciones ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+            ALTER TABLE dbo.ActivosFijos ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.Licencias') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Licencias') AND name='TenantId')
+            ALTER TABLE dbo.Licencias ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.CheckadorSitios') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorSitios') AND name='TenantId')
+            ALTER TABLE dbo.CheckadorSitios ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.CalendarNotificationEmails') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CalendarNotificationEmails') AND name='TenantId')
+            ALTER TABLE dbo.CalendarNotificationEmails ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
+            ALTER TABLE dbo.RoomRequests ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+            ALTER TABLE dbo.VacationRequests ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.VacationHolidays') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationHolidays') AND name='TenantId')
+            ALTER TABLE dbo.VacationHolidays ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+            ALTER TABLE dbo.VacationPolicies ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
+            ALTER TABLE dbo.EmailCampaigns ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryItems') AND name='TenantId')
+            ALTER TABLE dbo.InventoryItems ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.InventoryTypes') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryTypes') AND name='TenantId')
+            ALTER TABLE dbo.InventoryTypes ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.Departments') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Departments') AND name='TenantId')
+            ALTER TABLE dbo.Departments ADD TenantId UNIQUEIDENTIFIER NULL;
+        IF OBJECT_ID('dbo.Employees') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Employees') AND name='TenantId')
+            ALTER TABLE dbo.Employees ADD TenantId UNIQUEIDENTIFIER NULL;
         """;
     await cmdIso.ExecuteNonQueryAsync();
 
@@ -1721,6 +1938,55 @@ using (var scopeEnc = app.Services.CreateScope())
         JOIN dbo.AppUsers u ON cr.UserId = CAST(u.Id AS NVARCHAR(100))
         WHERE cr.TenantId IS NULL AND u.TenantId IS NOT NULL;
 
+        -- Comunicados: por autor; el resto cae al tenant por defecto abajo
+        UPDATE c SET c.TenantId = u.TenantId
+        FROM dbo.Comunicados c
+        JOIN dbo.AppUsers u ON LOWER(c.Author) = LOWER(u.Username)
+        WHERE c.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Bitacora: por quien reportó; el resto cae al tenant por defecto abajo
+        UPDATE b SET b.TenantId = u.TenantId
+        FROM dbo.Bitacora b
+        JOIN dbo.AppUsers u ON LOWER(b.ReportadoPor) = LOWER(u.Username)
+        WHERE b.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Procedimientos: por quien subió; el resto cae al tenant por defecto abajo
+        IF OBJECT_ID('dbo.Procedimientos') IS NOT NULL
+            UPDATE p SET p.TenantId = u.TenantId
+            FROM dbo.Procedimientos p
+            JOIN dbo.AppUsers u ON LOWER(p.UploadedBy) = LOWER(u.Username)
+            WHERE p.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- Capacitaciones: por quien la creó; el resto cae al tenant por defecto abajo
+        IF OBJECT_ID('dbo.Capacitaciones') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
+            UPDATE cap SET cap.TenantId = u.TenantId
+            FROM dbo.Capacitaciones cap
+            JOIN dbo.AppUsers u ON LOWER(cap.CreatedBy) = LOWER(u.Username)
+            WHERE cap.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- ActivosFijos: por quien lo creó; el resto cae al tenant por defecto abajo
+        IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+            UPDATE af SET af.TenantId = u.TenantId
+            FROM dbo.ActivosFijos af
+            JOIN dbo.AppUsers u ON LOWER(af.CreatedBy) = LOWER(u.Username)
+            WHERE af.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
+        -- VacationRequests/Policies: por su Username; el resto al tenant por defecto
+        IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+            UPDATE vr SET vr.TenantId = u.TenantId
+            FROM dbo.VacationRequests vr
+            JOIN dbo.AppUsers u ON LOWER(vr.Username) = LOWER(u.Username)
+            WHERE vr.TenantId IS NULL AND u.TenantId IS NOT NULL;
+        IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+            UPDATE vp SET vp.TenantId = u.TenantId
+            FROM dbo.VacationPolicies vp
+            JOIN dbo.AppUsers u ON LOWER(vp.Username) = LOWER(u.Username)
+            WHERE vp.TenantId IS NULL AND u.TenantId IS NOT NULL;
+
         -- Poblar Rooms y Reservations con el primer tenant activo (son recursos globales del sistema)
         DECLARE @DefaultTid UNIQUEIDENTIFIER = (SELECT TOP 1 Id FROM dbo.Tenants WHERE IsActive = 1 ORDER BY CreadoEn);
         IF @DefaultTid IS NOT NULL
@@ -1728,6 +1994,54 @@ using (var scopeEnc = app.Services.CreateScope())
             UPDATE dbo.Rooms        SET TenantId = @DefaultTid WHERE TenantId IS NULL;
             UPDATE dbo.Reservations SET TenantId = @DefaultTid WHERE TenantId IS NULL;
             UPDATE dbo.TicketAreaConfigs SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            UPDATE dbo.Comunicados  SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            UPDATE dbo.Bitacora     SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Procedimientos') IS NOT NULL
+                UPDATE dbo.Procedimientos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.ProcedimientoCategorias') IS NOT NULL
+                UPDATE dbo.ProcedimientoCategorias SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Capacitaciones') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Capacitaciones') AND name='TenantId')
+                UPDATE dbo.Capacitaciones SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.ActivosFijos') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ActivosFijos') AND name='TenantId')
+                UPDATE dbo.ActivosFijos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Licencias') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Licencias') AND name='TenantId')
+                UPDATE dbo.Licencias SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.CheckadorSitios') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorSitios') AND name='TenantId')
+                UPDATE dbo.CheckadorSitios SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.CalendarNotificationEmails') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CalendarNotificationEmails') AND name='TenantId')
+                UPDATE dbo.CalendarNotificationEmails SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.RoomRequests') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.RoomRequests') AND name='TenantId')
+                UPDATE dbo.RoomRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationRequests') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationRequests') AND name='TenantId')
+                UPDATE dbo.VacationRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationHolidays') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationHolidays') AND name='TenantId')
+                UPDATE dbo.VacationHolidays SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VacationPolicies') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VacationPolicies') AND name='TenantId')
+                UPDATE dbo.VacationPolicies SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
+                UPDATE dbo.EmailCampaigns SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryItems') AND name='TenantId')
+                UPDATE dbo.InventoryItems SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.InventoryTypes') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryTypes') AND name='TenantId')
+                UPDATE dbo.InventoryTypes SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Departments') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Departments') AND name='TenantId')
+                UPDATE dbo.Departments SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Employees') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Employees') AND name='TenantId')
+                UPDATE dbo.Employees SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();

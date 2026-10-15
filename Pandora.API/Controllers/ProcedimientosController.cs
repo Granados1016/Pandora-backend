@@ -16,12 +16,17 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class ProcedimientosController(
     IConfiguration config,
-    ILogger<ProcedimientosController> logger) : ControllerBase
+    ILogger<ProcedimientosController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
     private string? CurrentUser() =>
         User.FindFirstValue(ClaimTypes.Name) ?? User.FindFirstValue("name");
+
+    // Tenant del usuario (fail-closed). En /view /download el token viaja por query
+    // y Program.cs lo promueve a Bearer, así que User/tenant están disponibles aquí.
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── POST /api/procedimientos ──────────────────────────────────────────────
     /// <summary>Sube un nuevo procedimiento (binario en BD).</summary>
@@ -72,11 +77,12 @@ public class ProcedimientosController(
 
             cmd.CommandText = """
                 INSERT INTO dbo.Procedimientos
-                    (Title, Description, Category, FileName, FileContentType, FileSize, FileData, UploadedBy, UploadedAt)
+                    (Title, Description, Category, FileName, FileContentType, FileSize, FileData, UploadedBy, UploadedAt, TenantId)
                 OUTPUT INSERTED.Id
                 VALUES
-                    (@Title, @Desc, @Cat, @FileName, @ContentType, @FileSize, @FileData, @UploadedBy, GETUTCDATE())
+                    (@Title, @Desc, @Cat, @FileName, @ContentType, @FileSize, @FileData, @UploadedBy, GETUTCDATE(), @TenantId)
                 """;
+            cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
             cmd.Parameters.AddWithValue("@Title",       title.Trim());
             cmd.Parameters.AddWithValue("@Desc",        (object?)description?.Trim() ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@Cat",         (object?)category?.Trim()    ?? DBNull.Value);
@@ -136,10 +142,12 @@ public class ProcedimientosController(
                 SELECT COUNT(*)
                 FROM dbo.Procedimientos
                 WHERE IsDeleted = 0
+                  AND TenantId = @TenantId
                   AND (@Search IS NULL OR Title       LIKE '%' + @Search + '%'
                                        OR Description LIKE '%' + @Search + '%')
                   AND (@Cat    IS NULL OR Category = @Cat)
                 """;
+            cntCmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cntCmd.Parameters.AddWithValue("@Search",
                 string.IsNullOrWhiteSpace(search)   ? (object)DBNull.Value : search.Trim());
             cntCmd.Parameters.AddWithValue("@Cat",
@@ -153,12 +161,14 @@ public class ProcedimientosController(
                    FileName, FileContentType, FileSize, UploadedBy, UploadedAt
             FROM dbo.Procedimientos
             WHERE IsDeleted = 0
+              AND TenantId = @TenantId
               AND (@Search IS NULL OR Title       LIKE '%' + @Search + '%'
                                    OR Description LIKE '%' + @Search + '%')
               AND (@Cat    IS NULL OR Category = @Cat)
             ORDER BY UploadedAt DESC
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Search",
             string.IsNullOrWhiteSpace(search)   ? (object)DBNull.Value : search.Trim());
         cmd.Parameters.AddWithValue("@Cat",
@@ -222,9 +232,10 @@ public class ProcedimientosController(
         cmd.CommandText = """
             UPDATE dbo.Procedimientos
             SET IsDeleted = 1, FileData = NULL
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) return NotFound();
         logger.LogInformation("Procedimiento #{Id} eliminado por {User}", id, CurrentUser());
@@ -247,11 +258,12 @@ public class ProcedimientosController(
         cmd.CommandText = """
             SELECT Id, Name, Color, SortOrder,
                    (SELECT COUNT(*) FROM dbo.Procedimientos p
-                    WHERE p.Category = c.Name AND p.IsDeleted = 0) AS UsageCount
+                    WHERE p.Category = c.Name AND p.IsDeleted = 0 AND p.TenantId = @TenantId) AS UsageCount
             FROM dbo.ProcedimientoCategorias c
-            WHERE IsActive = 1
+            WHERE IsActive = 1 AND TenantId = @TenantId
             ORDER BY SortOrder, Name
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         var list = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -276,13 +288,14 @@ public class ProcedimientosController(
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            IF EXISTS (SELECT 1 FROM dbo.ProcedimientoCategorias WHERE Name = @Name AND IsActive = 1)
+            IF EXISTS (SELECT 1 FROM dbo.ProcedimientoCategorias WHERE Name = @Name AND IsActive = 1 AND TenantId = @TenantId)
                 SELECT -1
             ELSE
-                INSERT INTO dbo.ProcedimientoCategorias (Name, Color, SortOrder)
+                INSERT INTO dbo.ProcedimientoCategorias (Name, Color, SortOrder, TenantId)
                 OUTPUT INSERTED.Id
-                VALUES (@Name, @Color, @SortOrder)
+                VALUES (@Name, @Color, @SortOrder, @TenantId)
             """;
+        cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
         cmd.Parameters.AddWithValue("@Name",      dto.Name.Trim());
         cmd.Parameters.AddWithValue("@Color",     (object?)dto.Color?.Trim() ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@SortOrder", dto.SortOrder);
@@ -304,8 +317,9 @@ public class ProcedimientosController(
         string? oldName = null;
         await using (var q = conn.CreateCommand())
         {
-            q.CommandText = "SELECT Name FROM dbo.ProcedimientoCategorias WHERE Id = @Id AND IsActive = 1";
+            q.CommandText = "SELECT Name FROM dbo.ProcedimientoCategorias WHERE Id = @Id AND IsActive = 1 AND TenantId = @TenantId";
             q.Parameters.AddWithValue("@Id", id);
+            q.Parameters.AddWithValue("@TenantId", TenantParam);
             oldName = await q.ExecuteScalarAsync(ct) as string;
         }
         if (oldName is null) return NotFound();
@@ -314,12 +328,13 @@ public class ProcedimientosController(
         cmd.CommandText = """
             UPDATE dbo.ProcedimientoCategorias
             SET Name = @Name, Color = @Color, SortOrder = @SortOrder
-            WHERE Id = @Id AND IsActive = 1;
+            WHERE Id = @Id AND IsActive = 1 AND TenantId = @TenantId;
 
             UPDATE dbo.Procedimientos
             SET Category = @Name
-            WHERE Category = @OldName AND IsDeleted = 0;
+            WHERE Category = @OldName AND IsDeleted = 0 AND TenantId = @TenantId;
             """;
+        cmd.Parameters.AddWithValue("@TenantId",  TenantParam);
         cmd.Parameters.AddWithValue("@Id",        id);
         cmd.Parameters.AddWithValue("@Name",      dto.Name.Trim());
         cmd.Parameters.AddWithValue("@Color",     (object?)dto.Color?.Trim() ?? DBNull.Value);
@@ -340,18 +355,20 @@ public class ProcedimientosController(
         {
             q.CommandText = """
                 SELECT COUNT(*) FROM dbo.Procedimientos p
-                JOIN dbo.ProcedimientoCategorias c ON c.Name = p.Category
-                WHERE c.Id = @Id AND p.IsDeleted = 0
+                JOIN dbo.ProcedimientoCategorias c ON c.Name = p.Category AND c.TenantId = p.TenantId
+                WHERE c.Id = @Id AND p.IsDeleted = 0 AND p.TenantId = @TenantId
                 """;
             q.Parameters.AddWithValue("@Id", id);
+            q.Parameters.AddWithValue("@TenantId", TenantParam);
             int count = (int)(await q.ExecuteScalarAsync(ct) ?? 0);
             if (count > 0)
                 return Conflict($"Esta categoría tiene {count} procedimiento(s) activos. Reasígnalos antes de eliminarla.");
         }
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE dbo.ProcedimientoCategorias SET IsActive = 0 WHERE Id = @Id";
+        cmd.CommandText = "UPDATE dbo.ProcedimientoCategorias SET IsActive = 0 WHERE Id = @Id AND TenantId = @TenantId";
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         int rows = await cmd.ExecuteNonQueryAsync(ct);
         return rows == 0 ? NotFound() : NoContent();
     }
@@ -410,9 +427,10 @@ public class ProcedimientosController(
                 readCmd.Transaction = (SqlTransaction)tx;
                 readCmd.CommandText = """
                     SELECT FileName, FileContentType, FileData, UploadedBy, UploadedAt
-                    FROM dbo.Procedimientos WHERE Id = @Id AND IsDeleted = 0
+                    FROM dbo.Procedimientos WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                     """;
                 readCmd.Parameters.AddWithValue("@Id", id);
+                readCmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await readCmd.ExecuteReaderAsync(ct);
                 if (!await r.ReadAsync(ct)) return NotFound();
                 curFileName    = r.GetString(0);
@@ -508,12 +526,15 @@ public class ProcedimientosController(
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT Id, VersionNumber, FileName, FileContentType, FileSize, UploadedBy, UploadedAt
-            FROM dbo.ProcedimientoVersiones
-            WHERE ProcedimientoId = @Id
-            ORDER BY VersionNumber DESC
+            SELECT v.Id, v.VersionNumber, v.FileName, v.FileContentType, v.FileSize, v.UploadedBy, v.UploadedAt
+            FROM dbo.ProcedimientoVersiones v
+            WHERE v.ProcedimientoId = @Id
+              AND EXISTS (SELECT 1 FROM dbo.Procedimientos p
+                          WHERE p.Id = v.ProcedimientoId AND p.TenantId = @TenantId)
+            ORDER BY v.VersionNumber DESC
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         var list = new List<object>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -542,12 +563,15 @@ public class ProcedimientosController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandTimeout = 120;
         cmd.CommandText = """
-            SELECT FileName, FileContentType, FileData
-            FROM dbo.ProcedimientoVersiones
-            WHERE Id = @VId AND ProcedimientoId = @Id
+            SELECT v.FileName, v.FileContentType, v.FileData
+            FROM dbo.ProcedimientoVersiones v
+            WHERE v.Id = @VId AND v.ProcedimientoId = @Id
+              AND EXISTS (SELECT 1 FROM dbo.Procedimientos p
+                          WHERE p.Id = v.ProcedimientoId AND p.TenantId = @TenantId)
             """;
         cmd.Parameters.AddWithValue("@VId", vId);
         cmd.Parameters.AddWithValue("@Id",  id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         await using var r = await cmd.ExecuteReaderAsync(
             System.Data.CommandBehavior.SequentialAccess, ct);
         if (!await r.ReadAsync(ct)) return NotFound();
@@ -574,9 +598,10 @@ public class ProcedimientosController(
         cmd.CommandText = """
             SELECT FileContentType, FileName, FileData
             FROM dbo.Procedimientos
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         await using var r = await cmd.ExecuteReaderAsync(
             System.Data.CommandBehavior.SequentialAccess, ct);
 

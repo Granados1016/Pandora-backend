@@ -17,10 +17,12 @@ namespace Pandora.API.Controllers;
 [Authorize]
 public class CampaignsController(
     IConfiguration config,
-    ILogger<CampaignsController> logger) : ControllerBase
+    ILogger<CampaignsController> logger,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     // ── Helpers ───────────────────────────────────────────────────────────────
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     private string? CurrentUsername =>
         User.FindFirstValue(ClaimTypes.Name) ??
@@ -52,6 +54,10 @@ public class CampaignsController(
                 END WHERE Status NOT LIKE '%[^0-9]%' OR Status IS NULL;
                 ALTER TABLE dbo.EmailCampaigns ALTER COLUMN Status NVARCHAR(50) NOT NULL;
             END
+
+            IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
+                ALTER TABLE dbo.EmailCampaigns ADD TenantId UNIQUEIDENTIFIER NULL;
             """;
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
@@ -130,9 +136,10 @@ public class CampaignsController(
                        TotalRecipients, SentCount, FailedCount, IsDeleted,
                        CreatedAt, SentAt, TemplateId
                 FROM dbo.EmailCampaigns
-                WHERE IsDeleted = 0
+                WHERE IsDeleted = 0 AND TenantId = @TenantId
                 ORDER BY CreatedAt DESC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) list.Add(ReadCampaign(r));
@@ -155,9 +162,10 @@ public class CampaignsController(
                        TotalRecipients, SentCount, FailedCount, IsDeleted,
                        CreatedAt, SentAt, TemplateId
                 FROM dbo.EmailCampaigns
-                WHERE IsDeleted = 1
+                WHERE IsDeleted = 1 AND TenantId = @TenantId
                 ORDER BY CreatedAt DESC
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) list.Add(ReadCampaign(r));
@@ -180,9 +188,10 @@ public class CampaignsController(
                        TotalRecipients, SentCount, FailedCount, IsDeleted,
                        CreatedAt, SentAt, TemplateId
                 FROM dbo.EmailCampaigns
-                WHERE Id = @Id
+                WHERE Id = @Id AND TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Campaña no encontrada.");
             return Ok(ReadCampaign(r));
@@ -212,11 +221,12 @@ public class CampaignsController(
                 cmd.CommandText = """
                     INSERT INTO dbo.EmailCampaigns
                         (Id, Name, Subject, Body, ProgramType, Status,
-                         TotalRecipients, SentCount, FailedCount, IsDeleted, CreatedAt)
+                         TotalRecipients, SentCount, FailedCount, IsDeleted, CreatedAt, TenantId)
                     VALUES
                         (@Id, @Name, @Subject, @Body, @ProgramType, 'Pendiente',
-                         @Total, 0, 0, 0, GETUTCDATE())
+                         @Total, 0, 0, 0, GETUTCDATE(), @TenantId)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
                 cmd.Parameters.AddWithValue("@Id",          id);
                 cmd.Parameters.AddWithValue("@Name",        dto.Name.Trim());
                 cmd.Parameters.AddWithValue("@Subject",     dto.Subject.Trim());
@@ -268,8 +278,9 @@ public class CampaignsController(
             int programType = 1;
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT Subject, Body, ProgramType FROM dbo.EmailCampaigns WHERE Id = @Id AND IsDeleted = 0";
+                cmd.CommandText = "SELECT Subject, Body, ProgramType FROM dbo.EmailCampaigns WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId";
                 cmd.Parameters.AddWithValue("@Id", id);
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (!await r.ReadAsync(ct)) return NotFound("Campaña no encontrada.");
                 subject     = r.GetString(0);
@@ -467,14 +478,17 @@ public class CampaignsController(
                 UPDATE dbo.CampaignRecipients
                 SET Status = 'Pending', ErrorMessage = NULL, SentAt = NULL
                 WHERE CampaignId = @Id AND Status = 'Failed'
+                  AND EXISTS (SELECT 1 FROM dbo.EmailCampaigns c WHERE c.Id = CampaignRecipients.CampaignId AND c.TenantId = @TenantId)
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
 
             // Actualizar estado de campaña
             await using var cmd2 = conn.CreateCommand();
-            cmd2.CommandText = "UPDATE dbo.EmailCampaigns SET Status='Pendiente', UpdatedAt=GETUTCDATE() WHERE Id=@Id";
+            cmd2.CommandText = "UPDATE dbo.EmailCampaigns SET Status='Pendiente', UpdatedAt=GETUTCDATE() WHERE Id=@Id AND TenantId=@TenantId";
             cmd2.Parameters.AddWithValue("@Id", id);
+            cmd2.Parameters.AddWithValue("@TenantId", TenantParam);
             await cmd2.ExecuteNonQueryAsync(ct);
 
             return Ok(new { reset = rows });
@@ -498,8 +512,9 @@ public class CampaignsController(
             int programType = 1;
             await using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = "SELECT Name, Subject, Body, ProgramType FROM dbo.EmailCampaigns WHERE Id=@Id";
+                cmd.CommandText = "SELECT Name, Subject, Body, ProgramType FROM dbo.EmailCampaigns WHERE Id=@Id AND TenantId=@TenantId";
                 cmd.Parameters.AddWithValue("@Id", id);
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 await using var r = await cmd.ExecuteReaderAsync(ct);
                 if (!await r.ReadAsync(ct)) return NotFound("Campaña no encontrada.");
                 name = r.GetString(0); subject = r.GetString(1);
@@ -525,9 +540,10 @@ public class CampaignsController(
             {
                 cmd.CommandText = """
                     INSERT INTO dbo.EmailCampaigns
-                        (Id, Name, Subject, Body, ProgramType, Status, TotalRecipients, SentCount, FailedCount, IsDeleted, CreatedAt)
-                    VALUES (@Id, @Name, @Subject, @Body, @ProgramType, 'Pendiente', @Total, 0, 0, 0, GETUTCDATE())
+                        (Id, Name, Subject, Body, ProgramType, Status, TotalRecipients, SentCount, FailedCount, IsDeleted, CreatedAt, TenantId)
+                    VALUES (@Id, @Name, @Subject, @Body, @ProgramType, 'Pendiente', @Total, 0, 0, 0, GETUTCDATE(), @TenantId)
                     """;
+                cmd.Parameters.AddWithValue("@TenantId", TenantParam);
                 cmd.Parameters.AddWithValue("@Id",  newId);
                 cmd.Parameters.AddWithValue("@Name", $"(Copia) {name}");
                 cmd.Parameters.AddWithValue("@Subject", subject);
@@ -572,8 +588,9 @@ public class CampaignsController(
                 UPDATE dbo.EmailCampaigns
                 SET IsDeleted = 1, DeletedAt = GETUTCDATE(),
                     DeletedBy = @User, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             cmd.Parameters.AddWithValue("@Id",   id);
             cmd.Parameters.AddWithValue("@User", (object?)(CurrentUsername) ?? DBNull.Value);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
@@ -595,9 +612,10 @@ public class CampaignsController(
             cmd.CommandText = """
                 UPDATE dbo.EmailCampaigns
                 SET IsDeleted = 0, DeletedAt = NULL, DeletedBy = NULL, UpdatedAt = GETUTCDATE()
-                WHERE Id = @Id AND IsDeleted = 1
+                WHERE Id = @Id AND IsDeleted = 1 AND TenantId = @TenantId
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             int rows = await cmd.ExecuteNonQueryAsync(ct);
             if (rows == 0) return NotFound("Campaña no encontrada o ya activa.");
             return Ok();
@@ -620,9 +638,11 @@ public class CampaignsController(
                 SELECT Id, FullName, Email, Username, Status, ErrorMessage, SentAt, ReadAt
                 FROM dbo.CampaignRecipients
                 WHERE CampaignId = @Id
+                  AND EXISTS (SELECT 1 FROM dbo.EmailCampaigns c WHERE c.Id = CampaignRecipients.CampaignId AND c.TenantId = @TenantId)
                 ORDER BY FullName
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
@@ -671,18 +691,14 @@ public class CampaignsController(
     }
 
     // ── GET /api/campaigns/{id}/export ────────────────────────────────────────
+    // Requiere JWT. El token puede venir por query (?access_token=) para la
+    // descarga directa del navegador — Program.cs lo promueve a Bearer para la
+    // ruta /api/campaigns antes de validar, de modo que el endpoint queda
+    // protegido por el middleware de autenticación (ya no [AllowAnonymous]).
     [HttpGet("{id:guid}/export")]
-    [AllowAnonymous]
+    [Authorize]
     public async Task<IActionResult> Export(Guid id, [FromQuery] string? access_token, CancellationToken ct)
     {
-        // Validar token de acceso via query string
-        if (!string.IsNullOrWhiteSpace(access_token))
-        {
-            var token = HttpContext.Request.Headers.Authorization.FirstOrDefault();
-            if (string.IsNullOrWhiteSpace(token))
-                HttpContext.Request.Headers.Append("Authorization", $"Bearer {access_token}");
-        }
-
         try
         {
             await using var conn = Conn();
@@ -696,9 +712,13 @@ public class CampaignsController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT FullName, Email, Username, Status, ErrorMessage, SentAt
-                FROM dbo.CampaignRecipients WHERE CampaignId = @Id ORDER BY FullName
+                FROM dbo.CampaignRecipients
+                WHERE CampaignId = @Id
+                  AND EXISTS (SELECT 1 FROM dbo.EmailCampaigns c WHERE c.Id = CampaignRecipients.CampaignId AND c.TenantId = @TenantId)
+                ORDER BY FullName
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct))
             {

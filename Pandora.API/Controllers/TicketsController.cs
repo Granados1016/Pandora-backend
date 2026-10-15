@@ -26,6 +26,16 @@ public class TicketsController(
         User.Claims.FirstOrDefault(c => c.Type.EndsWith("name", StringComparison.OrdinalIgnoreCase))?.Value ??
         "Desconocido";
 
+    // Nombre para MOSTRAR (solicitante en correos/UI). Cae al usuario si no hay nombre.
+    private string CurrentFullName
+    {
+        get
+        {
+            var fn = User.FindFirstValue("fullName");
+            return string.IsNullOrWhiteSpace(fn) ? CurrentUser : fn.Trim();
+        }
+    }
+
     private string? CurrentEmail =>
         User.FindFirstValue(ClaimTypes.Email) ??
         User.FindFirstValue("email") ??
@@ -453,8 +463,15 @@ public class TicketsController(
             if (desde.HasValue)                       where.Add("CreatedAt >= @Desde");
             if (hasta.HasValue)                       where.Add("CreatedAt < @Hasta");
 
+            // El solicitante se MUESTRA con el nombre completo (resuelto desde AppUsers por
+            // su usuario). El filtro de propiedad sigue usando la columna real SubmittedBy
+            // (el username), así que "mis tickets" no se rompe. Arregla también tickets viejos.
             var sql = $"""
-                SELECT Id, TicketNumber, Title, Status, Priority, Area, Department, AssignedTo, SubmittedBy, CreatedAt, UpdatedAt
+                SELECT Id, TicketNumber, Title, Status, Priority, Area, Department, AssignedTo,
+                       ISNULL((SELECT TOP 1 NULLIF(LTRIM(RTRIM(u.FullName)),'')
+                               FROM dbo.AppUsers u WHERE LOWER(u.Username) = LOWER(dbo.Tickets.SubmittedBy)),
+                              SubmittedBy) AS SubmittedBy,
+                       CreatedAt, UpdatedAt
                 FROM dbo.Tickets
                 {(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "")}
                 ORDER BY CreatedAt DESC
@@ -511,7 +528,11 @@ public class TicketsController(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT Id, TicketNumber, Title, TemplateId, Status, Priority, Department,
-                       AssignedTo, SubmittedBy, SubmittedByEmail, DelayNote, CloseNote, CreatedAt, UpdatedAt
+                       AssignedTo,
+                       ISNULL((SELECT TOP 1 NULLIF(LTRIM(RTRIM(u.FullName)),'')
+                               FROM dbo.AppUsers u WHERE LOWER(u.Username) = LOWER(dbo.Tickets.SubmittedBy)),
+                              SubmittedBy) AS SubmittedBy,
+                       SubmittedByEmail, DelayNote, CloseNote, CreatedAt, UpdatedAt
                 FROM dbo.Tickets WHERE Id = @Id
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
@@ -717,10 +738,10 @@ public class TicketsController(
                 $"{dto.Title} — {dto.Area ?? dto.Department ?? "Sin área"}",
                 $"/tickets/{id}"), CancellationToken.None);
             // Notificación a correo general del sistema
-            _ = Task.Run(() => SendCreatedEmailAsync(ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", CurrentUser), CancellationToken.None);
+            _ = Task.Run(() => SendCreatedEmailAsync(ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", CurrentFullName), CancellationToken.None);
             // Notificación al correo configurado del área
             if (!string.IsNullOrWhiteSpace(dto.Area))
-                _ = Task.Run(() => SendAreaNotificationAsync(ticketNumber, dto.Title, dto.Area, CurrentUser, dto.SubmittedByEmail), CancellationToken.None);
+                _ = Task.Run(() => SendAreaNotificationAsync(ticketNumber, dto.Title, dto.Area, CurrentFullName, dto.SubmittedByEmail), CancellationToken.None);
             // Confirmación al solicitante
             if (!string.IsNullOrWhiteSpace(dto.SubmittedByEmail))
                 _ = Task.Run(() => SendSubmitterConfirmationAsync(dto.SubmittedByEmail!, ticketNumber, dto.Title, dto.Area ?? dto.Department ?? "—", id), CancellationToken.None);

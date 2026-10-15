@@ -14,10 +14,16 @@ namespace Pandora.API.Controllers;
 public class ComunicadosController(
     IConfiguration config,
     ILogger<ComunicadosController> logger,
-    IHubContext<NotificationsHub> hub) : ControllerBase
+    IHubContext<NotificationsHub> hub,
+    Pandora.API.Services.TenantService tenant) : ControllerBase
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
     private string? CurrentUser() => User.FindFirstValue(ClaimTypes.Name) ?? User.FindFirstValue("name");
+
+    // Tenant del usuario autenticado. Si el token no trae tenant, el filtro
+    // "TenantId = @TenantId" con DBNull no empareja ninguna fila (fail-closed,
+    // nunca expone datos de otro cliente).
+    private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── Helper: insertar notificación broadcast y emitir evento SignalR ─────────
     private async Task BroadcastComunicadoAsync(string title, string author, SqlConnection conn, CancellationToken ct)
@@ -49,7 +55,6 @@ public class ComunicadosController(
 
     // ── GET /api/comunicados ──────────────────────────────────────────────────
     [HttpGet]
-    [AllowAnonymous]
     public async Task<IActionResult> GetAll(
         [FromQuery] int page     = 1,
         [FromQuery] int pageSize = 10,
@@ -72,8 +77,10 @@ public class ComunicadosController(
                 FROM dbo.Comunicados
                 WHERE IsDeleted = 0
                   AND IsPublished = 1
+                  AND TenantId = @TenantId
                   AND (ExpiresAt IS NULL OR ExpiresAt > GETUTCDATE())
                 """;
+            countCmd.Parameters.AddWithValue("@TenantId", TenantParam);
             total = (int)(await countCmd.ExecuteScalarAsync(ct))!;
         }
 
@@ -84,10 +91,12 @@ public class ComunicadosController(
             FROM dbo.Comunicados
             WHERE IsDeleted = 0
               AND IsPublished = 1
+              AND TenantId = @TenantId
               AND (ExpiresAt IS NULL OR ExpiresAt > GETUTCDATE())
             ORDER BY CreatedAt DESC
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             """;
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         cmd.Parameters.AddWithValue("@Offset",   (page - 1) * pageSize);
         cmd.Parameters.AddWithValue("@PageSize", pageSize);
 
@@ -120,9 +129,10 @@ public class ComunicadosController(
         cmd.CommandText = """
             SELECT Id, Title, Content, Priority, Author, IsPublished, ExpiresAt, CreatedAt
             FROM dbo.Comunicados
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return NotFound();
@@ -152,9 +162,9 @@ public class ComunicadosController(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             INSERT INTO dbo.Comunicados
-                (Title, Content, Priority, Author, IsPublished, ExpiresAt, IsDeleted)
+                (Title, Content, Priority, Author, IsPublished, ExpiresAt, IsDeleted, TenantId)
             OUTPUT INSERTED.Id
-            VALUES (@Title, @Content, @Priority, @Author, @IsPublished, @ExpiresAt, 0)
+            VALUES (@Title, @Content, @Priority, @Author, @IsPublished, @ExpiresAt, 0, @TenantId)
             """;
         cmd.Parameters.AddWithValue("@Title",       dto.Title);
         cmd.Parameters.AddWithValue("@Content",     dto.Content);
@@ -162,6 +172,7 @@ public class ComunicadosController(
         cmd.Parameters.AddWithValue("@Author",      author);
         cmd.Parameters.AddWithValue("@IsPublished", dto.IsPublished);
         cmd.Parameters.AddWithValue("@ExpiresAt",   (object?)dto.ExpiresAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
 
         var newId = (int)(await cmd.ExecuteScalarAsync(ct))!;
 
@@ -186,9 +197,10 @@ public class ComunicadosController(
         {
             checkCmd.CommandText = """
                 SELECT IsPublished FROM dbo.Comunicados
-                WHERE Id = @Id AND IsDeleted = 0
+                WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
                 """;
             checkCmd.Parameters.AddWithValue("@Id", id);
+            checkCmd.Parameters.AddWithValue("@TenantId", TenantParam);
             var val = await checkCmd.ExecuteScalarAsync(ct);
             if (val is bool b) wasPublished = b;
         }
@@ -201,7 +213,7 @@ public class ComunicadosController(
                 Priority    = @Priority,
                 IsPublished = @IsPublished,
                 ExpiresAt   = @ExpiresAt
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Title",       dto.Title);
         cmd.Parameters.AddWithValue("@Content",     dto.Content);
@@ -209,6 +221,7 @@ public class ComunicadosController(
         cmd.Parameters.AddWithValue("@IsPublished", dto.IsPublished);
         cmd.Parameters.AddWithValue("@ExpiresAt",   (object?)dto.ExpiresAt ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Id",          id);
+        cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
 
         var rows = await cmd.ExecuteNonQueryAsync(ct);
         if (rows == 0) return NotFound();
@@ -232,9 +245,10 @@ public class ComunicadosController(
         cmd.CommandText = """
             UPDATE dbo.Comunicados
             SET IsDeleted = 1
-            WHERE Id = @Id AND IsDeleted = 0
+            WHERE Id = @Id AND IsDeleted = 0 AND TenantId = @TenantId
             """;
         cmd.Parameters.AddWithValue("@Id", id);
+        cmd.Parameters.AddWithValue("@TenantId", TenantParam);
         var rows = await cmd.ExecuteNonQueryAsync(ct);
 
         return rows > 0 ? NoContent() : NotFound();
