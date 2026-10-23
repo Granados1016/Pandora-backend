@@ -22,6 +22,21 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         User.FindFirstValue("name") ??
         User.Claims.FirstOrDefault(c => c.Type.EndsWith("name", StringComparison.OrdinalIgnoreCase))?.Value;
 
+    // Admin y SuperAdmin ven TODO el inventario de todas las áreas.
+    private bool IsAdmin => User.IsInRole("Admin") || User.IsInRole("SuperAdmin");
+
+    // Área del usuario (para que un usuario normal vea solo su inventario). null = sin área.
+    private async Task<string?> GetCurrentUserAreaAsync(SqlConnection conn, CancellationToken ct)
+    {
+        var u = CurrentUsername;
+        if (string.IsNullOrWhiteSpace(u)) return null;
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Area FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+        cmd.Parameters.AddWithValue("@U", u);
+        var o = await cmd.ExecuteScalarAsync(ct);
+        return o is string s && !string.IsNullOrWhiteSpace(s) ? s : null;
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     //  TYPES
     // ════════════════════════════════════════════════════════════════════════
@@ -325,10 +340,21 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 WHERE i.TenantId = @TenantId
                 """;
             if (typeId.HasValue) { sql += " AND i.InventoryTypeId = @TypeId"; }
+
+            // Visibilidad por área: Admin/SuperAdmin ven todo; un usuario normal solo su área.
+            string? userArea = null;
+            if (!IsAdmin)
+            {
+                userArea = await GetCurrentUserAreaAsync(conn, ct);
+                // Sin área asignada → no ve nada (debe configurarse su área).
+                sql += userArea is null ? " AND 1 = 0" : " AND i.Department = @Area";
+            }
+
             sql += " ORDER BY i.InventoryNumber";
             cmd.CommandText = sql;
             cmd.Parameters.AddWithValue("@TenantId", TenantParam);
             if (typeId.HasValue) cmd.Parameters.AddWithValue("@TypeId", typeId.Value);
+            if (userArea is not null) cmd.Parameters.AddWithValue("@Area", userArea);
 
             var list = new List<object>();
             await using var r = await cmd.ExecuteReaderAsync(ct);

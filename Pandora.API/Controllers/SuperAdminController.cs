@@ -32,7 +32,7 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT u.Id, u.Username, u.FullName, u.Email, u.Role, u.IsActive,
-                       u.TenantId, ISNULL(t.DisplayName, t.Name) AS TenantName
+                       u.TenantId, ISNULL(t.DisplayName, t.Name) AS TenantName, u.Area
                 FROM dbo.AppUsers u
                 LEFT JOIN dbo.Tenants t ON u.TenantId = t.Id
                 ORDER BY TenantName, u.Username
@@ -50,6 +50,7 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
                     isActive   = !r.IsDBNull(5) && r.GetBoolean(5),
                     tenantId   = r.IsDBNull(6) ? (Guid?)null : r.GetGuid(6),
                     tenantName = r.IsDBNull(7) ? "— (sin cliente)" : r.GetString(7),
+                    area       = r.IsDBNull(8) ? null : r.GetString(8),
                 });
             return Ok(list);
         }
@@ -87,10 +88,10 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
             cmd.CommandText = """
                 INSERT INTO dbo.AppUsers
                     (Id, Username, FullName, Email, PasswordHash, Role, Modules, ModulesViewOnly,
-                     IsActive, Position, TenantId, NeedsOnboarding, CreatedAt)
+                     IsActive, Position, TenantId, NeedsOnboarding, Area, CreatedAt)
                 VALUES
                     (NEWID(), @Username, @FullName, @Email, @Hash, @Role, @Modules, 0,
-                     @IsActive, @Position, @TenantId, @NeedsOnboarding, GETUTCDATE())
+                     @IsActive, @Position, @TenantId, @NeedsOnboarding, @Area, GETUTCDATE())
                 """;
             var uname = dto.Username.Trim().ToLower();
             // FullName es NOT NULL en la BD → si no se captura nombre, usamos el usuario.
@@ -111,6 +112,7 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
             cmd.Parameters.AddWithValue("@TenantId", dto.TenantId.HasValue ? (object)dto.TenantId.Value : DBNull.Value);
             // Solo las cuentas Google precargadas deben completar perfil al entrar.
             cmd.Parameters.AddWithValue("@NeedsOnboarding", googleOnly);
+            cmd.Parameters.AddWithValue("@Area", (object?)dto.Area?.Trim() ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
             logger.LogInformation("SuperAdmin {By} creó usuario {User} ({Role}) en tenant {Tenant}",
                 User.Identity?.Name, uname, canon, dto.TenantId);
@@ -167,9 +169,30 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
         }
         catch (Exception ex) { logger.LogError(ex, "SuperAdmin.ToggleActive {Id}", id); return StatusCode(500, ex.Message); }
     }
+
+    // ── PUT /api/superadmin/users/{id}/area ───────────────────────────────────
+    /// <summary>Asigna el área/departamento del usuario (para ver solo su inventario).</summary>
+    [HttpPut("users/{id:guid}/area")]
+    public async Task<IActionResult> SetArea(Guid id, [FromBody] SetAreaDto dto, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE dbo.AppUsers SET Area = @Area, UpdatedAt = GETUTCDATE() WHERE Id = @Id";
+            cmd.Parameters.AddWithValue("@Area", string.IsNullOrWhiteSpace(dto.Area) ? DBNull.Value : (object)dto.Area.Trim());
+            cmd.Parameters.AddWithValue("@Id", id);
+            int rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound("Usuario no encontrado.");
+            return Ok(new { id, area = dto.Area });
+        }
+        catch (Exception ex) { logger.LogError(ex, "SuperAdmin.SetArea {Id}", id); return StatusCode(500, ex.Message); }
+    }
 }
 
 public record SetRoleDto(string? Role);
+public record SetAreaDto(string? Area);
 public record SaCreateUserDto(
     string  Username,
     string? FullName,
@@ -180,4 +203,5 @@ public record SaCreateUserDto(
     int?    Modules,
     string? Position,
     bool    IsActive = true,
-    bool    GoogleOnly = false);
+    bool    GoogleOnly = false,
+    string? Area = null);

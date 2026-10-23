@@ -1392,6 +1392,16 @@ using (var scopeGwp = app.Services.CreateScope())
             ALTER TABLE dbo.AppUsers ADD NeedsOnboarding BIT NOT NULL DEFAULT 0;
         """;
     await cmdNO.ExecuteNonQueryAsync();
+
+    // Área/Departamento del usuario: para que cada usuario vea SOLO el inventario de su
+    // área (Admin/SuperAdmin ven todas). Coincide por nombre con InventoryItems.Department.
+    await using var cmdArea = connAR.CreateCommand();
+    cmdArea.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'Area')
+            ALTER TABLE dbo.AppUsers ADD Area NVARCHAR(200) NULL;
+        """;
+    await cmdArea.ExecuteNonQueryAsync();
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
