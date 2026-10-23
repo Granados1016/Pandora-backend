@@ -1402,6 +1402,45 @@ using (var scopeGwp = app.Services.CreateScope())
             ALTER TABLE dbo.AppUsers ADD Area NVARCHAR(200) NULL;
         """;
     await cmdArea.ExecuteNonQueryAsync();
+
+    // Actas de entrega / Resguardos de equipo (documento firmado de entrega-recepción).
+    await using var cmdResg = connAR.CreateCommand();
+    cmdResg.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Resguardos' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Resguardos (
+                Id            UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Folio         NVARCHAR(30)     NOT NULL,
+                Fecha         DATE             NOT NULL,
+                Area          NVARCHAR(200)    NULL,
+                QuienEntrega  NVARCHAR(200)    NULL,
+                QuienRecibe   NVARCHAR(200)    NOT NULL,
+                JefeInmediato NVARCHAR(200)    NULL,
+                Observaciones NVARCHAR(MAX)    NULL,
+                Estado        NVARCHAR(30)     NOT NULL DEFAULT 'Pendiente de firma',
+                DocumentData  VARBINARY(MAX)   NULL,
+                DocumentMime  NVARCHAR(100)    NULL,
+                DocumentName  NVARCHAR(255)    NULL,
+                CreatedBy     NVARCHAR(200)    NULL,
+                CreatedAt     DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                TenantId      UNIQUEIDENTIFIER NULL
+            );
+            CREATE TABLE dbo.ResguardoItems (
+                Id              UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                ResguardoId     UNIQUEIDENTIFIER NOT NULL,
+                InventoryItemId UNIQUEIDENTIFIER NULL,
+                Equipo          NVARCHAR(200)    NULL,
+                MarcaModelo     NVARCHAR(400)    NULL,
+                Serie           NVARCHAR(200)    NULL,
+                Inventario      NVARCHAR(50)     NULL,
+                Estado          NVARCHAR(50)     NULL,
+                Accesorios      NVARCHAR(MAX)    NULL,
+                CONSTRAINT FK_ResguardoItems_Resguardo FOREIGN KEY (ResguardoId)
+                    REFERENCES dbo.Resguardos(Id) ON DELETE CASCADE
+            );
+        END
+        """;
+    await cmdResg.ExecuteNonQueryAsync();
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
