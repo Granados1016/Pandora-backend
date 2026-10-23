@@ -1,9 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
+using System.IO.Compression;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Pandora.API.Controllers;
 
@@ -236,10 +238,25 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
                         rr.IsDBNull(5) ? "" : rr.GetString(5)));
             }
 
+            // Si el cliente tiene plantilla Word (.docx) cargada, se rellena TAL CUAL su formato.
+            byte[]? template = null;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Data FROM dbo.ResguardoPlantillas WHERE TenantId = @T";
+                cmd.Parameters.AddWithValue("@T", tenant.TenantId ?? Guid.Empty);
+                if (await cmd.ExecuteScalarAsync(ct) is byte[] b) template = b;
+            }
+
+            if (template is not null)
+            {
+                var docx = FillDocxTemplate(template, r, items);
+                return File(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", $"Acta_{r.Folio}.docx");
+            }
+
+            // Fallback sin plantilla: HTML servido como Word.
             var html = BuildActaHtml(orgName, r, items);
             var bytes = Encoding.UTF8.GetBytes(html);
-            var fileName = $"Acta_{r.Folio}.doc";
-            return File(bytes, "application/msword", fileName);
+            return File(bytes, "application/msword", $"Acta_{r.Folio}.doc");
         }
         catch (Exception ex) { logger.LogError(ex, "Resguardos.Acta {Id}", id); return StatusCode(500, ex.Message); }
     }
@@ -321,6 +338,141 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
             return Ok();
         }
         catch (Exception ex) { logger.LogError(ex, "Resguardos.Delete {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // ── POST /api/inventory/resguardos/plantilla  (subir plantilla Word del cliente) ──
+    [HttpPost("plantilla")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> UploadPlantilla(IFormFile file, CancellationToken ct)
+    {
+        if (file is null || file.Length == 0) return BadRequest("Archivo requerido.");
+        if (!file.FileName.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
+            return BadRequest("La plantilla debe ser un archivo Word .docx con los tokens {{...}}.");
+        if (file.Length > 10 * 1024 * 1024) return BadRequest("La plantilla supera 10 MB.");
+        try
+        {
+            using var ms = new MemoryStream();
+            await file.CopyToAsync(ms, ct);
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                MERGE dbo.ResguardoPlantillas AS t
+                USING (SELECT @T AS TenantId) AS s ON t.TenantId = s.TenantId
+                WHEN MATCHED THEN UPDATE SET Data=@Data, FileName=@Name, UpdatedAt=GETUTCDATE()
+                WHEN NOT MATCHED THEN INSERT (TenantId, Data, FileName) VALUES (@T, @Data, @Name);
+                """;
+            cmd.Parameters.AddWithValue("@T", tenant.TenantId ?? Guid.Empty);
+            cmd.Parameters.AddWithValue("@Data", ms.ToArray());
+            cmd.Parameters.AddWithValue("@Name", (object?)Path.GetFileName(file.FileName) ?? "plantilla.docx");
+            await cmd.ExecuteNonQueryAsync(ct);
+            return Ok(new { ok = true, fileName = file.FileName });
+        }
+        catch (Exception ex) { logger.LogError(ex, "Resguardos.UploadPlantilla"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── GET /api/inventory/resguardos/plantilla/info ─────────────────────────
+    [HttpGet("plantilla/info")]
+    public async Task<IActionResult> PlantillaInfo(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT FileName, UpdatedAt FROM dbo.ResguardoPlantillas WHERE TenantId = @T";
+            cmd.Parameters.AddWithValue("@T", tenant.TenantId ?? Guid.Empty);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return Ok(new { has = false });
+            return Ok(new { has = true, fileName = r.IsDBNull(0) ? null : r.GetString(0), updatedAt = r.GetDateTime(1) });
+        }
+        catch (Exception ex) { logger.LogError(ex, "Resguardos.PlantillaInfo"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── GET /api/inventory/resguardos/plantilla  (descargar la plantilla actual) ──
+    [HttpGet("plantilla")]
+    [Authorize(Roles = "Admin,SuperAdmin")]
+    public async Task<IActionResult> GetPlantilla(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Data, FileName FROM dbo.ResguardoPlantillas WHERE TenantId = @T";
+            cmd.Parameters.AddWithValue("@T", tenant.TenantId ?? Guid.Empty);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return NotFound("Sin plantilla.");
+            var data = (byte[])r[0];
+            var name = r.IsDBNull(1) ? "plantilla_acta.docx" : r.GetString(1);
+            return File(data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", name);
+        }
+        catch (Exception ex) { logger.LogError(ex, "Resguardos.GetPlantilla"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── Relleno de la plantilla Word (.docx) ──────────────────────────────────
+    // La plantilla tiene tokens {{...}} en runs únicos; clonamos la fila de equipo
+    // (con {{NO}}) y su fila de accesorios (con {{ACCESORIOS}}) por cada equipo.
+    private static string Xe(string? s) => WebUtility.HtmlEncode(s ?? "");
+
+    private static byte[] FillDocxTemplate(byte[] template,
+        ResguardoRow r, List<(string eq, string mm, string se, string inv, string es, string acc)> items)
+    {
+        using var ms = new MemoryStream();
+        ms.Write(template, 0, template.Length);
+        ms.Position = 0;
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Update, leaveOpen: true))
+        {
+            var entry = zip.GetEntry("word/document.xml") ?? throw new InvalidOperationException("document.xml no encontrado");
+            string xml;
+            using (var s = entry.Open())
+            using (var reader = new StreamReader(s, Encoding.UTF8))
+                xml = reader.ReadToEnd();
+
+            xml = ExpandEquipmentRows(xml, items);
+            xml = xml.Replace("{{FECHA}}", Xe(r.Fecha.ToString("dd/MM/yyyy")))
+                     .Replace("{{AREA}}", Xe(r.Area))
+                     .Replace("{{ENTREGA}}", Xe(r.QuienEntrega))
+                     .Replace("{{RECIBE}}", Xe(r.QuienRecibe))
+                     .Replace("{{JEFE}}", Xe(r.JefeInmediato))
+                     .Replace("{{FOLIO}}", Xe(r.Folio))
+                     .Replace("{{OBSERVACIONES}}", Xe(r.Observaciones));
+
+            using (var s = entry.Open())
+            {
+                s.SetLength(0);
+                using var w = new StreamWriter(s, new UTF8Encoding(false));
+                w.Write(xml);
+            }
+        }
+        return ms.ToArray();
+    }
+
+    private static string ExpandEquipmentRows(string xml,
+        List<(string eq, string mm, string se, string inv, string es, string acc)> items)
+    {
+        // Fila de equipo (contiene {{NO}}) seguida de la fila de accesorios ({{ACCESORIOS}}).
+        var rx = new Regex(
+            @"(<w:tr\b(?:(?!</w:tr>).)*?\{\{NO\}\}(?:(?!</w:tr>).)*?</w:tr>)\s*(<w:tr\b(?:(?!</w:tr>).)*?\{\{ACCESORIOS\}\}(?:(?!</w:tr>).)*?</w:tr>)",
+            RegexOptions.Singleline);
+        var m = rx.Match(xml);
+        if (!m.Success) return xml;
+        string rowTpl = m.Groups[1].Value, accTpl = m.Groups[2].Value;
+        var sb = new StringBuilder();
+        int n = 1;
+        foreach (var it in items)
+        {
+            sb.Append(rowTpl
+                .Replace("{{NO}}", n.ToString())
+                .Replace("{{EQUIPO}}", Xe(it.eq))
+                .Replace("{{MARCA}}", Xe(it.mm))
+                .Replace("{{SERIE}}", Xe(it.se))
+                .Replace("{{INVENTARIO}}", Xe(it.inv))
+                .Replace("{{ESTADO}}", Xe(it.es)));
+            sb.Append(accTpl.Replace("{{ACCESORIOS}}", Xe(it.acc)));
+            n++;
+        }
+        return xml[..m.Index] + sb + xml[(m.Index + m.Length)..];
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -1441,6 +1441,19 @@ using (var scopeGwp = app.Services.CreateScope())
         END
         """;
     await cmdResg.ExecuteNonQueryAsync();
+
+    // Plantilla del acta (Word .docx con tokens) por cliente/tenant — white-label.
+    await using var cmdPl = connAR.CreateCommand();
+    cmdPl.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='ResguardoPlantillas' AND schema_id=SCHEMA_ID('dbo'))
+            CREATE TABLE dbo.ResguardoPlantillas (
+                TenantId   UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+                Data       VARBINARY(MAX)   NOT NULL,
+                FileName   NVARCHAR(255)    NULL,
+                UpdatedAt  DATETIME2        NOT NULL DEFAULT GETUTCDATE()
+            );
+        """;
+    await cmdPl.ExecuteNonQueryAsync();
 }
 
 // ── Módulo Bitácora de Incidencias ───────────────────────────────────────────
