@@ -105,9 +105,28 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
                 cmd.Parameters.AddWithValue("@Iid", itemId);
                 cmd.Parameters.AddWithValue("@T", TenantParam);
                 await cmd.ExecuteNonQueryAsync(ct);
+
+                // Asignar el equipo a quien recibe + al área del acta (entrega = asignación).
+                if (dto.AsignarEquipos)
+                {
+                    await using var up = conn.CreateCommand();
+                    up.CommandText = """
+                        UPDATE dbo.InventoryItems
+                        SET AssignedTo = @Recibe,
+                            AssignedEmployeeId = NULL,
+                            Department = ISNULL(NULLIF(@Area, ''), Department),
+                            UpdatedAt = GETUTCDATE()
+                        WHERE Id = @Iid AND TenantId = @T
+                        """;
+                    up.Parameters.AddWithValue("@Recibe", dto.QuienRecibe.Trim());
+                    up.Parameters.AddWithValue("@Area", (object?)dto.Area?.Trim() ?? "");
+                    up.Parameters.AddWithValue("@Iid", itemId);
+                    up.Parameters.AddWithValue("@T", TenantParam);
+                    await up.ExecuteNonQueryAsync(ct);
+                }
             }
 
-            logger.LogInformation("Resguardo {Folio} creado por {By}", folio, CurrentUsername);
+            logger.LogInformation("Resguardo {Folio} creado por {By} (asignar={Asig})", folio, CurrentUsername, dto.AsignarEquipos);
             return Ok(new { id, folio });
         }
         catch (Exception ex) { logger.LogError(ex, "Resguardos.Create"); return StatusCode(500, ex.Message); }
@@ -597,4 +616,5 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
 
 public record CreateResguardoDto(
     DateTime? Fecha, string? Area, string? QuienEntrega, string QuienRecibe,
-    string? JefeInmediato, string? Observaciones, Guid[] ItemIds);
+    string? JefeInmediato, string? Observaciones, Guid[] ItemIds,
+    bool AsignarEquipos = true);
