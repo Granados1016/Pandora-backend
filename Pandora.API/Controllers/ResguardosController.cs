@@ -42,7 +42,7 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
     public async Task<IActionResult> Create([FromBody] CreateResguardoDto dto, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(dto.QuienRecibe)) return BadRequest("Indica quién recibe.");
-        if (dto.ItemIds is null || dto.ItemIds.Length == 0) return BadRequest("Selecciona al menos un equipo.");
+        if (dto.Items is null || dto.Items.Length == 0) return BadRequest("Selecciona al menos un equipo.");
 
         try
         {
@@ -89,24 +89,29 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
                 await cmd.ExecuteNonQueryAsync(ct);
             }
 
-            // Snapshot de los equipos seleccionados (solo del tenant)
-            foreach (var itemId in dto.ItemIds.Distinct())
+            // Snapshot de los equipos seleccionados (solo del tenant). Accesorios:
+            // si el usuario los editó en el acta, se usa ese texto; si no, el del inventario.
+            foreach (var it in dto.Items.GroupBy(x => x.ItemId).Select(g => g.First()))
             {
+                object acc = string.IsNullOrWhiteSpace(it.Accesorios) ? DBNull.Value : it.Accesorios.Trim();
+
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = """
                     INSERT INTO dbo.ResguardoItems (Id, ResguardoId, InventoryItemId, Equipo, MarcaModelo, Serie, Inventario, Estado, Accesorios)
                     SELECT NEWID(), @Rid, i.Id, i.Name,
                            LTRIM(RTRIM(ISNULL(i.Brand,'') + ' ' + ISNULL(i.Model,''))),
-                           i.SerialNumber, i.InventoryNumber, i.Status, i.Accessories
+                           i.SerialNumber, i.InventoryNumber, i.Status, COALESCE(@Acc, i.Accessories)
                     FROM dbo.InventoryItems i
                     WHERE i.Id = @Iid AND i.TenantId = @T
                     """;
                 cmd.Parameters.AddWithValue("@Rid", id);
-                cmd.Parameters.AddWithValue("@Iid", itemId);
+                cmd.Parameters.AddWithValue("@Iid", it.ItemId);
+                cmd.Parameters.AddWithValue("@Acc", acc);
                 cmd.Parameters.AddWithValue("@T", TenantParam);
                 await cmd.ExecuteNonQueryAsync(ct);
 
                 // Asignar el equipo a quien recibe + al área del acta (entrega = asignación).
+                // Si se editaron los accesorios, también se actualizan en el inventario.
                 if (dto.AsignarEquipos)
                 {
                     await using var up = conn.CreateCommand();
@@ -115,12 +120,14 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
                         SET AssignedTo = @Recibe,
                             AssignedEmployeeId = NULL,
                             Department = ISNULL(NULLIF(@Area, ''), Department),
+                            Accessories = COALESCE(@Acc, Accessories),
                             UpdatedAt = GETUTCDATE()
                         WHERE Id = @Iid AND TenantId = @T
                         """;
                     up.Parameters.AddWithValue("@Recibe", dto.QuienRecibe.Trim());
                     up.Parameters.AddWithValue("@Area", (object?)dto.Area?.Trim() ?? "");
-                    up.Parameters.AddWithValue("@Iid", itemId);
+                    up.Parameters.AddWithValue("@Acc", acc);
+                    up.Parameters.AddWithValue("@Iid", it.ItemId);
                     up.Parameters.AddWithValue("@T", TenantParam);
                     await up.ExecuteNonQueryAsync(ct);
                 }
@@ -644,5 +651,7 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
 
 public record CreateResguardoDto(
     DateTime? Fecha, string? Area, string? QuienEntrega, string QuienRecibe,
-    string? JefeInmediato, string? Observaciones, Guid[] ItemIds,
+    string? JefeInmediato, string? Observaciones, ResguardoItemInput[] Items,
     bool AsignarEquipos = true);
+
+public record ResguardoItemInput(Guid ItemId, string? Accesorios);
