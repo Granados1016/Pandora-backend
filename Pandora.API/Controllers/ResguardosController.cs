@@ -359,6 +359,34 @@ public class ResguardosController(IConfiguration config, ILogger<ResguardosContr
         catch (Exception ex) { logger.LogError(ex, "Resguardos.Delete {Id}", id); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/inventory/resguardos/personas ───────────────────────────────
+    // Usuarios de Pandora (para autocompletar quién entrega / recibe / jefe).
+    [HttpGet("personas")]
+    public async Task<IActionResult> Personas(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT DISTINCT FullName, ISNULL(Email,''), ISNULL(Area,'')
+                FROM dbo.AppUsers
+                WHERE ISNULL(IsActive,0) = 1
+                  AND FullName IS NOT NULL AND LTRIM(RTRIM(FullName)) <> ''
+                  AND (TenantId = @T OR (@T IS NULL AND TenantId IS NULL))
+                ORDER BY FullName
+                """;
+            cmd.Parameters.AddWithValue("@T", TenantParam);
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                list.Add(new { fullName = r.GetString(0), email = r.GetString(1), area = r.GetString(2) });
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "Resguardos.Personas"); return StatusCode(500, ex.Message); }
+    }
+
     // ── POST /api/inventory/resguardos/plantilla  (subir plantilla Word del cliente) ──
     [HttpPost("plantilla")]
     [Authorize(Roles = "Admin,SuperAdmin")]
