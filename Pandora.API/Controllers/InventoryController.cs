@@ -190,10 +190,20 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
             await using var conn = Conn();
             await conn.OpenAsync(ct);
 
+            // Visibilidad por área: un usuario normal solo ve KPIs/listas de SU área.
+            string? userArea = null;
+            string kpiArea = "", typeArea = "", transArea = "";
+            if (!IsAdmin)
+            {
+                userArea = await GetCurrentUserAreaAsync(conn, ct);
+                if (userArea is null) { kpiArea = typeArea = transArea = " AND 1 = 0"; }
+                else { kpiArea = " AND Department = @Area"; typeArea = " AND i.Department = @Area"; transArea = " AND i.Department = @Area"; }
+            }
+
             // ── KPIs principales ──────────────────────────────────────────────
             // TRY_CAST cubre tanto Status INT (1,2,3,4) como NVARCHAR ('Activo',...)
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT
                     COUNT(*) AS Total,
                     ISNULL(SUM(CASE WHEN TRY_CAST(Status AS NVARCHAR(50)) IN ('1','Activo')        THEN 1 ELSE 0 END), 0) AS Activos,
@@ -204,9 +214,10 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                                     THEN ISNULL(PurchasePrice, 0) ELSE 0 END), 0) AS ActiveValue,
                     ISNULL(SUM(ISNULL(PurchasePrice, 0)), 0) AS TotalValue
                 FROM dbo.InventoryItems
-                WHERE TenantId = @TenantId
+                WHERE TenantId = @TenantId{kpiArea}
                 """;
             cmd.Parameters.AddWithValue("@TenantId", TenantParam);
+            if (userArea is not null) cmd.Parameters.AddWithValue("@Area", userArea);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
             var total           = r.GetInt32(0);
@@ -220,18 +231,19 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 
             // ── Distribución por tipo ─────────────────────────────────────────
             await using var cmd2 = conn.CreateCommand();
-            cmd2.CommandText = """
+            cmd2.CommandText = $"""
                 SELECT t.Name AS TypeName,
                        COUNT(i.Id) AS TotalCount,
                        ISNULL(SUM(CASE WHEN TRY_CAST(i.Status AS NVARCHAR(50)) IN ('1','Activo') THEN 1 ELSE 0 END), 0) AS ActiveCount
                 FROM dbo.InventoryTypes t
-                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id AND i.TenantId = t.TenantId
+                LEFT JOIN dbo.InventoryItems i ON i.InventoryTypeId = t.Id AND i.TenantId = t.TenantId{typeArea}
                 WHERE t.IsActive = 1 AND t.TenantId = @TenantId
                 GROUP BY t.Id, t.Name
                 HAVING COUNT(i.Id) > 0
                 ORDER BY TotalCount DESC
                 """;
             cmd2.Parameters.AddWithValue("@TenantId", TenantParam);
+            if (userArea is not null) cmd2.Parameters.AddWithValue("@Area", userArea);
             var byType = new List<object>();
             await using var r2 = await cmd2.ExecuteReaderAsync(ct);
             while (await r2.ReadAsync(ct))
@@ -245,14 +257,15 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
 
             // ── Últimas transferencias ────────────────────────────────────────
             await using var cmd3 = conn.CreateCommand();
-            cmd3.CommandText = """
+            cmd3.CommandText = $"""
                 SELECT TOP 5 et.Id, i.Name AS ItemName, et.FromPerson, et.ToPerson, et.TransferDate
                 FROM dbo.EquipmentTransfers et
                 JOIN dbo.InventoryItems i ON et.InventoryItemId = i.Id
-                WHERE i.TenantId = @TenantId
+                WHERE i.TenantId = @TenantId{transArea}
                 ORDER BY et.TransferDate DESC
                 """;
             cmd3.Parameters.AddWithValue("@TenantId", TenantParam);
+            if (userArea is not null) cmd3.Parameters.AddWithValue("@Area", userArea);
             var recentTransfers = new List<object>();
             await using var r3 = await cmd3.ExecuteReaderAsync(ct);
             while (await r3.ReadAsync(ct))
@@ -371,8 +384,18 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
         {
             await using var conn = Conn();
             await conn.OpenAsync(ct);
+
+            // Visibilidad por área: un usuario normal solo abre equipos de su área.
+            string areaClause = "";
+            string? userArea = null;
+            if (!IsAdmin)
+            {
+                userArea = await GetCurrentUserAreaAsync(conn, ct);
+                areaClause = userArea is null ? " AND 1 = 0" : " AND i.Department = @Area";
+            }
+
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 SELECT i.Id, i.InventoryNumber, i.Name, i.Brand, i.Model, i.SerialNumber,
                        i.Status, i.Department, i.AssignedTo, i.AssignedEmployeeId,
                        i.InventoryTypeId, i.IsPhone,
@@ -383,10 +406,11 @@ public class InventoryController(IConfiguration config, ILogger<InventoryControl
                 FROM dbo.InventoryItems i
                 LEFT JOIN dbo.InventoryTypes t ON i.InventoryTypeId = t.Id
                 LEFT JOIN dbo.Employees e ON i.AssignedEmployeeId = e.Id
-                WHERE i.Id = @Id AND i.TenantId = @TenantId
+                WHERE i.Id = @Id AND i.TenantId = @TenantId{areaClause}
                 """;
             cmd.Parameters.AddWithValue("@Id", id);
             cmd.Parameters.AddWithValue("@TenantId", TenantParam);
+            if (userArea is not null) cmd.Parameters.AddWithValue("@Area", userArea);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return NotFound("Equipo no encontrado.");
             return Ok(ReadItem(r));
