@@ -2159,6 +2159,66 @@ using (var scopeEnc = app.Services.CreateScope())
     await cmdBkp.ExecuteNonQueryAsync();
 }
 
+// ── Tablas Flotilla (Reserva de Vehículos) ───────────────────────────────────
+{
+    await using var connFlo = new Microsoft.Data.SqlClient.SqlConnection(
+        app.Configuration.GetConnectionString("PandoraDb"));
+    await connFlo.OpenAsync();
+    await using var cmdFlo = connFlo.CreateCommand();
+    cmdFlo.CommandText = """
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='Vehiculos' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.Vehiculos (
+                Id            UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Nombre        NVARCHAR(120)    NOT NULL,
+                Placa         NVARCHAR(20)     NULL,
+                Marca         NVARCHAR(60)     NULL,
+                Modelo        NVARCHAR(60)     NULL,
+                Anio          INT              NULL,
+                Color         NVARCHAR(40)     NULL,
+                Capacidad     INT              NOT NULL DEFAULT 5,
+                ColorEtiqueta NVARCHAR(20)     NULL,
+                FotoData      VARBINARY(MAX)   NULL,
+                FotoMime      NVARCHAR(100)    NULL,
+                Notas         NVARCHAR(MAX)    NULL,
+                IsActive      BIT              NOT NULL DEFAULT 1,
+                CreatedAt     DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt     DATETIME2        NULL,
+                TenantId      UNIQUEIDENTIFIER NULL
+            );
+            CREATE INDEX IX_Veh_Tenant ON dbo.Vehiculos (TenantId);
+        END;
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='VehiculoReservas' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.VehiculoReservas (
+                Id                  UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                VehiculoId          UNIQUEIDENTIFIER NOT NULL,
+                Motivo              NVARCHAR(200)    NOT NULL,
+                Destino             NVARCHAR(300)    NULL,
+                Conductor           NVARCHAR(120)    NULL,
+                SolicitanteNombre   NVARCHAR(120)    NULL,
+                SolicitanteEmail    NVARCHAR(150)    NULL,
+                Pasajeros           NVARCHAR(MAX)    NULL,
+                StartTime           DATETIME2        NOT NULL,
+                EndTime             DATETIME2        NOT NULL,
+                Estado              NVARCHAR(30)     NOT NULL DEFAULT 'Activa',
+                KmSalida            INT              NULL,
+                KmRegreso           INT              NULL,
+                NivelGasolinaSalida NVARCHAR(20)     NULL,
+                Notas               NVARCHAR(MAX)    NULL,
+                CreadoPor           NVARCHAR(100)    NULL,
+                CreatedAt           DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt           DATETIME2        NULL,
+                TenantId            UNIQUEIDENTIFIER NULL
+            );
+            CREATE INDEX IX_VehRes_Vehiculo ON dbo.VehiculoReservas (VehiculoId);
+            CREATE INDEX IX_VehRes_Start    ON dbo.VehiculoReservas (StartTime);
+            CREATE INDEX IX_VehRes_Tenant   ON dbo.VehiculoReservas (TenantId);
+        END
+        """;
+    await cmdFlo.ExecuteNonQueryAsync();
+}
+
 await app.RunAsync();
 
 // ── Helpers locales ──────────────────────────────────────────────────────────
