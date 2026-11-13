@@ -2153,6 +2153,32 @@ using (var scopeEnc = app.Services.CreateScope())
             CREATE INDEX IX_VehRes_Start    ON dbo.VehiculoReservas (StartTime);
             CREATE INDEX IX_VehRes_Tenant   ON dbo.VehiculoReservas (TenantId);
         END
+
+        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='VehiculoSolicitudes' AND schema_id=SCHEMA_ID('dbo'))
+        BEGIN
+            CREATE TABLE dbo.VehiculoSolicitudes (
+                Id                  UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID() PRIMARY KEY,
+                Area                NVARCHAR(200)    NOT NULL,
+                ResponsibleName     NVARCHAR(200)    NOT NULL,
+                SolicitanteEmail    NVARCHAR(200)    NULL,
+                Motivo              NVARCHAR(500)    NOT NULL,
+                Destino             NVARCHAR(300)    NULL,
+                Conductor           NVARCHAR(200)    NULL,
+                Pasajeros           NVARCHAR(MAX)    NULL,
+                VehiculoIdPreferido UNIQUEIDENTIFIER NULL,
+                RequestedDate       DATE             NOT NULL,
+                StartTime           TIME             NOT NULL,
+                EndTime             TIME             NOT NULL,
+                Status              NVARCHAR(20)     NOT NULL DEFAULT 'Pendiente',
+                AdminNotes          NVARCHAR(500)    NULL,
+                ReservaId           UNIQUEIDENTIFIER NULL,
+                CreatedAt           DATETIME2        NOT NULL DEFAULT GETUTCDATE(),
+                UpdatedAt           DATETIME2        NULL,
+                TenantId            UNIQUEIDENTIFIER NULL
+            );
+            CREATE INDEX IX_VehSol_Tenant ON dbo.VehiculoSolicitudes (TenantId);
+            CREATE INDEX IX_VehSol_Status ON dbo.VehiculoSolicitudes (Status);
+        END
         """;
     await cmdFlo.ExecuteNonQueryAsync();
 }

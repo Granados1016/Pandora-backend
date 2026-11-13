@@ -612,6 +612,269 @@ public class FlotillaController(
         }
         catch (Exception ex) { logger.LogWarning("Reserva email failed for {Id}: {Msg}", reservaId, ex.Message); }
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  SOLICITUDES DE VEHÍCULO  (mismo flujo que Solicitudes de Sala)
+    //  El usuario solicita → Admin aprueba (crea la reserva) o rechaza.
+    // ════════════════════════════════════════════════════════════════════════
+
+    private static object? SN(SqlDataReader r, string col)
+        => r.IsDBNull(r.GetOrdinal(col)) ? null : r.GetValue(r.GetOrdinal(col));
+
+    // ── GET /api/flotilla/solicitudes?status=Pendiente ───────────────────────
+    [HttpGet("solicitudes")]
+    public async Task<IActionResult> GetSolicitudes([FromQuery] string? status = null, CancellationToken ct = default)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"""
+                SELECT s.Id, s.Area, s.ResponsibleName, s.SolicitanteEmail, s.Motivo, s.Destino,
+                       s.Conductor, s.Pasajeros, s.VehiculoIdPreferido, s.RequestedDate,
+                       s.StartTime, s.EndTime, s.Status, s.AdminNotes, s.ReservaId, s.CreatedAt,
+                       v.Nombre AS VehNombre
+                FROM dbo.VehiculoSolicitudes s
+                LEFT JOIN dbo.Vehiculos v ON s.VehiculoIdPreferido = v.Id
+                WHERE s.TenantId = @TenantId
+                {(status is not null ? "AND s.Status = @status" : "")}
+                ORDER BY s.CreatedAt DESC
+                """;
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
+            if (status is not null) cmd.Parameters.AddWithValue("@status", status);
+
+            var list = new List<object>();
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+            {
+                var start = (TimeSpan)r["StartTime"];
+                var end   = (TimeSpan)r["EndTime"];
+                list.Add(new
+                {
+                    id                  = r.GetGuid(r.GetOrdinal("Id")),
+                    area                = r.GetString(r.GetOrdinal("Area")),
+                    responsibleName     = r.GetString(r.GetOrdinal("ResponsibleName")),
+                    solicitanteEmail    = SN(r, "SolicitanteEmail"),
+                    motivo              = r.GetString(r.GetOrdinal("Motivo")),
+                    destino             = SN(r, "Destino"),
+                    conductor           = SN(r, "Conductor"),
+                    pasajeros           = SN(r, "Pasajeros"),
+                    vehiculoIdPreferido = SN(r, "VehiculoIdPreferido"),
+                    vehiculoPreferido   = SN(r, "VehNombre"),
+                    requestedDate       = ((DateTime)r["RequestedDate"]).ToString("yyyy-MM-dd"),
+                    startTime           = $"{start.Hours:D2}:{start.Minutes:D2}",
+                    endTime             = $"{end.Hours:D2}:{end.Minutes:D2}",
+                    status              = r.GetString(r.GetOrdinal("Status")),
+                    adminNotes          = SN(r, "AdminNotes"),
+                    reservaId           = SN(r, "ReservaId"),
+                    createdAt           = DateTime.SpecifyKind((DateTime)r["CreatedAt"], DateTimeKind.Utc),
+                });
+            }
+            return Ok(list);
+        }
+        catch (Exception ex) { logger.LogError(ex, "GetSolicitudes"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── POST /api/flotilla/solicitudes ───────────────────────────────────────
+    [HttpPost("solicitudes")]
+    public async Task<IActionResult> CreateSolicitud([FromBody] VehiculoSolicitudDto dto, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Area))            return BadRequest("El área es obligatoria.");
+        if (string.IsNullOrWhiteSpace(dto.ResponsibleName)) return BadRequest("El nombre del responsable es obligatorio.");
+        if (string.IsNullOrWhiteSpace(dto.Motivo))          return BadRequest("El motivo del viaje es obligatorio.");
+
+        var id = Guid.NewGuid();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO dbo.VehiculoSolicitudes
+                    (Id, Area, ResponsibleName, SolicitanteEmail, Motivo, Destino, Conductor,
+                     Pasajeros, VehiculoIdPreferido, RequestedDate, StartTime, EndTime,
+                     Status, CreatedAt, TenantId)
+                VALUES
+                    (@Id, @Area, @Responsible, @Email, @Motivo, @Destino, @Conductor,
+                     @Pasajeros, @VehPref, @Date, @Start, @End,
+                     'Pendiente', GETUTCDATE(), @TenantId)
+                """;
+            cmd.Parameters.AddWithValue("@Id",          id);
+            cmd.Parameters.AddWithValue("@Area",        dto.Area.Trim());
+            cmd.Parameters.AddWithValue("@Responsible", dto.ResponsibleName.Trim());
+            cmd.Parameters.AddWithValue("@Email",       string.IsNullOrWhiteSpace(dto.SolicitanteEmail) ? DBNull.Value : dto.SolicitanteEmail.Trim());
+            cmd.Parameters.AddWithValue("@Motivo",      dto.Motivo.Trim());
+            cmd.Parameters.AddWithValue("@Destino",     string.IsNullOrWhiteSpace(dto.Destino)   ? DBNull.Value : dto.Destino.Trim());
+            cmd.Parameters.AddWithValue("@Conductor",   string.IsNullOrWhiteSpace(dto.Conductor) ? DBNull.Value : dto.Conductor.Trim());
+            cmd.Parameters.AddWithValue("@Pasajeros",   string.IsNullOrWhiteSpace(dto.Pasajeros) ? DBNull.Value : dto.Pasajeros.Trim());
+            cmd.Parameters.AddWithValue("@VehPref",     dto.VehiculoIdPreferido.HasValue ? dto.VehiculoIdPreferido.Value : DBNull.Value);
+            cmd.Parameters.AddWithValue("@Date",        DateTime.Parse(dto.RequestedDate));
+            cmd.Parameters.AddWithValue("@Start",       TimeSpan.Parse(dto.StartTime));
+            cmd.Parameters.AddWithValue("@End",         TimeSpan.Parse(dto.EndTime));
+            cmd.Parameters.AddWithValue("@TenantId",    TenantParam);
+            await cmd.ExecuteNonQueryAsync(ct);
+
+            _ = Task.Run(() => push.SendToAllAsync(
+                "🚗 Nueva solicitud de vehículo",
+                $"{dto.ResponsibleName} — {dto.Motivo}",
+                "/calendar/solicitudes"), CancellationToken.None);
+
+            return Ok(new { id });
+        }
+        catch (Exception ex) { logger.LogError(ex, "CreateSolicitud"); return StatusCode(500, ex.Message); }
+    }
+
+    // ── PUT /api/flotilla/solicitudes/{id}/status ────────────────────────────
+    //  status = "Aprobada"  → requiere vehiculoId; crea la reserva (choque incluido)
+    //  status = "Rechazada" → solo marca y guarda motivo
+    [HttpPut("solicitudes/{id:guid}/status")]
+    public async Task<IActionResult> UpdateSolicitudStatus(Guid id, [FromBody] VehiculoSolicitudStatusDto dto, CancellationToken ct = default)
+    {
+        if (!IsAdmin) return Forbid();
+        if (string.IsNullOrWhiteSpace(dto.Status)) return BadRequest("El estado es obligatorio.");
+
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // Cargar la solicitud
+            string motivo, responsible; object? email, destino, conductor, pasajeros;
+            DateTime reqDate; TimeSpan startT, endT;
+            using (var sc = conn.CreateCommand())
+            {
+                sc.CommandText = """
+                    SELECT Motivo, ResponsibleName, SolicitanteEmail, Destino, Conductor, Pasajeros,
+                           RequestedDate, StartTime, EndTime
+                    FROM dbo.VehiculoSolicitudes WHERE Id = @Id AND TenantId = @TenantId
+                    """;
+                sc.Parameters.AddWithValue("@Id", id);
+                sc.Parameters.AddWithValue("@TenantId", TenantParam);
+                await using var sr = await sc.ExecuteReaderAsync(ct);
+                if (!await sr.ReadAsync(ct)) return NotFound("Solicitud no encontrada.");
+                motivo      = sr.GetString(0);
+                responsible = sr.GetString(1);
+                email       = sr.IsDBNull(2) ? null : sr.GetString(2);
+                destino     = sr.IsDBNull(3) ? null : sr.GetString(3);
+                conductor   = sr.IsDBNull(4) ? null : sr.GetString(4);
+                pasajeros   = sr.IsDBNull(5) ? null : sr.GetString(5);
+                reqDate     = sr.GetDateTime(6);
+                startT      = (TimeSpan)sr["StartTime"];
+                endT        = (TimeSpan)sr["EndTime"];
+            }
+
+            Guid? reservaId = null;
+
+            if (dto.Status.Equals("Aprobada", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!dto.VehiculoId.HasValue || dto.VehiculoId.Value == Guid.Empty)
+                    return BadRequest("Selecciona el vehículo asignado para aprobar la solicitud.");
+
+                // Fecha/hora local MX → UTC (las reservas se guardan en UTC)
+                var localStart = DateTime.SpecifyKind(reqDate.Date + startT, DateTimeKind.Unspecified);
+                var localEnd   = DateTime.SpecifyKind(reqDate.Date + endT,   DateTimeKind.Unspecified);
+                var utcStart   = TimeZoneInfo.ConvertTimeToUtc(localStart, MxTz);
+                var utcEnd     = TimeZoneInfo.ConvertTimeToUtc(localEnd,   MxTz);
+
+                // Vehículo válido + activo
+                string vehNombre;
+                using (var vc = conn.CreateCommand())
+                {
+                    vc.CommandText = "SELECT Nombre FROM dbo.Vehiculos WHERE Id = @Id AND IsActive = 1 AND TenantId = @TenantId";
+                    vc.Parameters.AddWithValue("@Id", dto.VehiculoId.Value);
+                    vc.Parameters.AddWithValue("@TenantId", TenantParam);
+                    var nameObj = await vc.ExecuteScalarAsync(ct);
+                    if (nameObj is null or DBNull) return BadRequest("Vehículo no encontrado o inactivo.");
+                    vehNombre = (string)nameObj;
+                }
+
+                // Choque de horario
+                int conflicts;
+                using (var cc = conn.CreateCommand())
+                {
+                    cc.CommandText = """
+                        SELECT COUNT(1) FROM dbo.VehiculoReservas
+                        WHERE TenantId = @TenantId AND VehiculoId = @VehiculoId
+                          AND Estado <> 'Cancelada' AND StartTime < @End AND EndTime > @Start
+                        """;
+                    cc.Parameters.AddWithValue("@TenantId", TenantParam);
+                    cc.Parameters.AddWithValue("@VehiculoId", dto.VehiculoId.Value);
+                    cc.Parameters.AddWithValue("@Start", utcStart);
+                    cc.Parameters.AddWithValue("@End",   utcEnd);
+                    conflicts = (int)(await cc.ExecuteScalarAsync(ct))!;
+                }
+                if (conflicts > 0)
+                    return Conflict($"El vehículo '{vehNombre}' ya está reservado en ese horario. Elige otro vehículo.");
+
+                // Crear la reserva
+                reservaId = Guid.NewGuid();
+                using (var ic = conn.CreateCommand())
+                {
+                    ic.CommandText = """
+                        INSERT INTO dbo.VehiculoReservas
+                            (Id, VehiculoId, Motivo, Destino, Conductor, SolicitanteNombre, SolicitanteEmail,
+                             Pasajeros, StartTime, EndTime, Estado, Notas, CreadoPor, CreatedAt, TenantId)
+                        VALUES
+                            (@Id, @VehiculoId, @Motivo, @Destino, @Conductor, @SolNombre, @SolEmail,
+                             @Pasajeros, @Start, @End, 'Activa', @Notas, @CreadoPor, GETUTCDATE(), @TenantId)
+                        """;
+                    ic.Parameters.AddWithValue("@Id",         reservaId.Value);
+                    ic.Parameters.AddWithValue("@VehiculoId", dto.VehiculoId.Value);
+                    ic.Parameters.AddWithValue("@Motivo",     motivo);
+                    ic.Parameters.AddWithValue("@Destino",    destino ?? DBNull.Value);
+                    ic.Parameters.AddWithValue("@Conductor",  conductor ?? DBNull.Value);
+                    ic.Parameters.AddWithValue("@SolNombre",  responsible);
+                    ic.Parameters.AddWithValue("@SolEmail",   email ?? DBNull.Value);
+                    ic.Parameters.AddWithValue("@Pasajeros",  pasajeros ?? DBNull.Value);
+                    ic.Parameters.AddWithValue("@Start",      utcStart);
+                    ic.Parameters.AddWithValue("@End",        utcEnd);
+                    ic.Parameters.AddWithValue("@Notas",      string.IsNullOrWhiteSpace(dto.AdminNotes) ? DBNull.Value : dto.AdminNotes.Trim());
+                    ic.Parameters.AddWithValue("@CreadoPor",  (object?)CurrentUsername ?? DBNull.Value);
+                    ic.Parameters.AddWithValue("@TenantId",   TenantParam);
+                    await ic.ExecuteNonQueryAsync(ct);
+                }
+            }
+
+            // Actualizar estado de la solicitud
+            await using var upd = conn.CreateCommand();
+            upd.CommandText = """
+                UPDATE dbo.VehiculoSolicitudes
+                SET Status = @Status, AdminNotes = @AdminNotes, ReservaId = @ReservaId, UpdatedAt = GETUTCDATE()
+                WHERE Id = @Id AND TenantId = @TenantId
+                """;
+            upd.Parameters.AddWithValue("@Status",    dto.Status.Trim());
+            upd.Parameters.AddWithValue("@AdminNotes", string.IsNullOrWhiteSpace(dto.AdminNotes) ? DBNull.Value : dto.AdminNotes.Trim());
+            upd.Parameters.AddWithValue("@ReservaId",  reservaId.HasValue ? reservaId.Value : DBNull.Value);
+            upd.Parameters.AddWithValue("@Id",         id);
+            upd.Parameters.AddWithValue("@TenantId",   TenantParam);
+            int rows = await upd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound("Solicitud no encontrada.");
+
+            return Ok(new { id, reservaId });
+        }
+        catch (Exception ex) { logger.LogError(ex, "UpdateSolicitudStatus {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // ── DELETE /api/flotilla/solicitudes/{id} ────────────────────────────────
+    [HttpDelete("solicitudes/{id:guid}")]
+    public async Task<IActionResult> DeleteSolicitud(Guid id, CancellationToken ct = default)
+    {
+        if (!IsAdmin) return Forbid();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM dbo.VehiculoSolicitudes WHERE Id = @Id AND TenantId = @TenantId";
+            cmd.Parameters.AddWithValue("@Id", id);
+            cmd.Parameters.AddWithValue("@TenantId", TenantParam);
+            int rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound("Solicitud no encontrada.");
+            return NoContent();
+        }
+        catch (Exception ex) { logger.LogError(ex, "DeleteSolicitud {Id}", id); return StatusCode(500, ex.Message); }
+    }
 }
 
 // ── DTOs ───────────────────────────────────────────────────────────────────────
@@ -624,3 +887,21 @@ public record ReservaDto(
     string? SolicitanteNombre, string? SolicitanteEmail, string? Pasajeros,
     DateTime StartTime, DateTime EndTime, string? Estado,
     int? KmSalida, int? KmRegreso, string? NivelGasolinaSalida, string? Notas);
+
+public record VehiculoSolicitudDto(
+    string  Area,
+    string  ResponsibleName,
+    string? SolicitanteEmail,
+    string  Motivo,
+    string? Destino,
+    string? Conductor,
+    string? Pasajeros,
+    Guid?   VehiculoIdPreferido,
+    string  RequestedDate,   // "yyyy-MM-dd"
+    string  StartTime,       // "HH:mm" o "HH:mm:ss"
+    string  EndTime);
+
+public record VehiculoSolicitudStatusDto(
+    string  Status,
+    string? AdminNotes,
+    Guid?   VehiculoId);
