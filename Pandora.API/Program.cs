@@ -2050,6 +2050,33 @@ using (var scopeEnc = app.Services.CreateScope())
     Console.WriteLine("[TenantIso] Columnas TenantId agregadas a tablas principales.");
 }
 
+// ── Seguridad: purgar contraseñas temporales de campañas ya enviadas ────────
+// Backfill idempotente. Una vez enviado el correo, la contraseña temporal en
+// texto plano ya no tiene uso y no debe quedarse en la BD. Los envíos nuevos
+// ya la purgan al marcar 'Sent' (ver CampaignsController); esto limpia lo
+// histórico. Nulificar algo ya nulo es no-op, así que correrlo en cada
+// arranque es seguro e idempotente.
+{
+    try
+    {
+        await using var connCampPwd = new Microsoft.Data.SqlClient.SqlConnection(
+            app.Configuration.GetConnectionString("PandoraDb"));
+        await connCampPwd.OpenAsync();
+        await using var cmdCampPwd = connCampPwd.CreateCommand();
+        cmdCampPwd.CommandText = """
+            IF OBJECT_ID('dbo.CampaignRecipients') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CampaignRecipients') AND name='Password')
+                UPDATE dbo.CampaignRecipients
+                SET Password = NULL
+                WHERE Status = 'Sent' AND Password IS NOT NULL;
+            """;
+        int purged = await cmdCampPwd.ExecuteNonQueryAsync();
+        if (purged > 0)
+            Console.WriteLine($"[Seguridad] Purgadas {purged} contraseñas de destinatarios de campañas ya enviadas.");
+    }
+    catch (Exception ex) { Console.WriteLine("[Seguridad] WARN purga passwords de campañas: " + ex.Message); }
+}
+
 // ── Tabla CalendarNotificationEmails ────────────────────────────────────────
 {
     await using var connCalNotif = new Microsoft.Data.SqlClient.SqlConnection(

@@ -411,7 +411,11 @@ public class CampaignsController(
                         await using var conn2 = Conn();
                         await conn2.OpenAsync();
                         await using var cmd2 = conn2.CreateCommand();
-                        cmd2.CommandText = "UPDATE dbo.CampaignRecipients SET Status='Sent', SentAt=GETUTCDATE() WHERE Id=@Id";
+                        // Seguridad: una vez enviado el correo con la contraseña temporal,
+                        // ya no hay motivo para conservarla en texto plano. Se purga en el
+                        // mismo UPDATE que marca 'Sent' (el envío usa el valor en memoria,
+                        // no se relee de BD; retry-failed solo toca 'Failed', no 'Sent').
+                        cmd2.CommandText = "UPDATE dbo.CampaignRecipients SET Status='Sent', SentAt=GETUTCDATE(), Password=NULL WHERE Id=@Id";
                         cmd2.Parameters.AddWithValue("@Id", rec.Id);
                         await cmd2.ExecuteNonQueryAsync();
                         sent++;
