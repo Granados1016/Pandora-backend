@@ -1,9 +1,9 @@
 # ── Stage 1: build + publish ──────────────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Fuerza rebuild completo sin caché
-ARG BUILDTIME=20260429-cors-v3
+ARG BUILDTIME=20261117-net10-migration
 COPY build_id.txt /tmp/build_id.txt
 RUN echo "Build: $BUILDTIME" && cat /tmp/build_id.txt && date
 
@@ -29,7 +29,7 @@ RUN dotnet publish ./Pandora.API/Pandora.API.csproj \
     --no-restore
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 RUN mkdir -p /app/storage /app/biblioteca \
