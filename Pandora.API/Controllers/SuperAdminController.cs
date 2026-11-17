@@ -56,6 +56,113 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
         catch (Exception ex) { logger.LogError(ex, "SuperAdmin.GetAllUsers"); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/superadmin/system-status ────────────────────────────────────
+    /// <summary>
+    /// #9 Fase 2 (monitoreo) — Snapshot de salud del sistema para el proveedor:
+    /// estado y latencia de la BD, runtime, uptime del proceso, memoria, último
+    /// respaldo (y si está atrasado), y conteos globales. Un solo endpoint para
+    /// ver de un vistazo si todo está sano. Solo SuperAdmin.
+    /// </summary>
+    [HttpGet("system-status")]
+    public async Task<IActionResult> SystemStatus(CancellationToken ct)
+    {
+        // ── Base de datos: estado + latencia ──────────────────────────────────
+        var dbOk = false;
+        long dbLatencyMs = -1;
+        string? dbError = null;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            cmd.CommandTimeout = 5;
+            await cmd.ExecuteScalarAsync(ct);
+            sw.Stop();
+            dbOk = true;
+            dbLatencyMs = sw.ElapsedMilliseconds;
+        }
+        catch (Exception ex) { sw.Stop(); dbError = ex.Message; }
+
+        // ── Último respaldo + conteos (solo si la BD respondió) ───────────────
+        object? lastBackup = null;
+        bool? backupStale = null;
+        int activeTenants = -1, totalUsers = -1;
+        if (dbOk)
+        {
+            try
+            {
+                await using var conn = Conn();
+                await conn.OpenAsync(ct);
+
+                await using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = """
+                        IF OBJECT_ID('dbo.BackupHistory') IS NOT NULL
+                            SELECT TOP 1 FileName, Method, SizeBytes, DriveUploaded, RanAt
+                            FROM dbo.BackupHistory ORDER BY RanAt DESC
+                        """;
+                    await using var r = await cmd.ExecuteReaderAsync(ct);
+                    if (await r.ReadAsync(ct))
+                    {
+                        var ranAt = r.GetDateTime(4);
+                        var ageHours = (DateTime.UtcNow - ranAt).TotalHours;
+                        backupStale = ageHours > 48;
+                        lastBackup = new
+                        {
+                            fileName      = r.GetString(0),
+                            method        = r.GetString(1),
+                            sizeBytes     = r.GetInt64(2),
+                            driveUploaded = !r.IsDBNull(3) && r.GetBoolean(3),
+                            ranAt,
+                            ageHours      = Math.Round(ageHours, 1),
+                        };
+                    }
+                }
+
+                await using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = """
+                        SELECT
+                          (SELECT COUNT(*) FROM dbo.Tenants WHERE IsActive = 1),
+                          (SELECT COUNT(*) FROM dbo.AppUsers)
+                        """;
+                    await using var r = await cmd.ExecuteReaderAsync(ct);
+                    if (await r.ReadAsync(ct))
+                    {
+                        activeTenants = r.GetInt32(0);
+                        totalUsers    = r.GetInt32(1);
+                    }
+                }
+            }
+            catch (Exception ex) { logger.LogWarning(ex, "SystemStatus: no se pudieron leer respaldo/conteos"); }
+        }
+
+        // ── Proceso / runtime ─────────────────────────────────────────────────
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        var startUtc = proc.StartTime.ToUniversalTime();
+        var uptime = DateTime.UtcNow - startUtc;
+
+        var overallOk = dbOk && backupStale != true;
+
+        return Ok(new
+        {
+            ok          = overallOk,
+            checkedAt   = DateTime.UtcNow,
+            database    = new { ok = dbOk, latencyMs = dbLatencyMs, error = dbError },
+            runtime     = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+            environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production",
+            startedAtUtc = startUtc,
+            uptimeHours = Math.Round(uptime.TotalHours, 1),
+            memoryMb    = Math.Round(proc.WorkingSet64 / 1024d / 1024d, 1),
+            lastBackup,
+            backupStale,
+            activeTenants,
+            totalUsers,
+        });
+    }
+
     // ── POST /api/superadmin/users ────────────────────────────────────────────
     /// <summary>Crea un usuario en cualquier cliente, con el rol indicado.</summary>
     [HttpPost("users")]
