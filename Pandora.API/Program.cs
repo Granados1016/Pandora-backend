@@ -229,6 +229,7 @@ builder.Services.AddScoped<Pandora.API.Services.GoogleDriveBackupUploader>();
 builder.Services.AddScoped<Pandora.API.Services.BackupOrchestrator>();
 builder.Services.AddScoped<Pandora.API.Services.BackupRestoreService>();
 builder.Services.AddHostedService<Pandora.API.Services.AutomatedBackupWorker>();
+builder.Services.AddHostedService<Pandora.API.Services.CampaignQueueWorker>();
 
 // ── Push Notifications ────────────────────────────────────────────────────────
 builder.Services.AddSingleton<Pandora.API.Services.PushService>();
@@ -1903,6 +1904,12 @@ using (var scopeEnc = app.Services.CreateScope())
         IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='TenantId')
             ALTER TABLE dbo.EmailCampaigns ADD TenantId UNIQUEIDENTIFIER NULL;
+
+        -- #1 Fase 2: cuenta SMTP con la que se envió la campaña, para que el
+        -- worker de cola retome el resto desde la misma cuenta.
+        IF OBJECT_ID('dbo.EmailCampaigns') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.EmailCampaigns') AND name='SenderEmail')
+            ALTER TABLE dbo.EmailCampaigns ADD SenderEmail NVARCHAR(256) NULL;
 
         IF OBJECT_ID('dbo.InventoryItems') IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.InventoryItems') AND name='TenantId')

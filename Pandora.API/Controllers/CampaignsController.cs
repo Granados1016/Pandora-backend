@@ -100,7 +100,7 @@ public class CampaignsController(
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static string ProgramLabel(int t) => t switch
+    internal static string ProgramLabel(int t) => t switch
     {
         1 => "Licenciatura", 2 => "Posgrado", 3 => "Preparatoria", 4 => "Notificaciones", _ => "General"
     };
@@ -371,6 +371,18 @@ public class CampaignsController(
                 await rollback.ExecuteNonQueryAsync(ct);
                 return BadRequest($"Error de conexión SMTP: {smtpEx.Message}");
             }
+
+            // Recordar con qué cuenta se envió, para que el worker de cola retome
+            // el resto desde la MISMA cuenta (no desde otra) al día siguiente.
+            try
+            {
+                await using var cmdSender = conn.CreateCommand();
+                cmdSender.CommandText = "UPDATE dbo.EmailCampaigns SET SenderEmail=@S WHERE Id=@Id";
+                cmdSender.Parameters.AddWithValue("@S", (object?)fromEmail ?? DBNull.Value);
+                cmdSender.Parameters.AddWithValue("@Id", id);
+                await cmdSender.ExecuteNonQueryAsync(ct);
+            }
+            catch { /* columna puede no existir en BD muy vieja; el ALTER corre al arranque */ }
 
             // ── Envío en background con MailKit ───────────────────────────────────
             _ = Task.Run(async () =>
@@ -805,7 +817,7 @@ public class CampaignsController(
             ? $"\"{s.Replace("\"", "\"\"")}\""
             : s;
 
-    private static string ApplyVars(string template, string fullName, string email,
+    internal static string ApplyVars(string template, string fullName, string email,
         string? username, string? password, string programa,
         Dictionary<string, string> extra)
     {
@@ -825,7 +837,7 @@ public class CampaignsController(
 
     // Convierte imágenes data:base64 embebidas en el HTML a adjuntos CID inline
     // para que los clientes de correo las muestren correctamente.
-    private static MimeEntity BuildBodyWithInlineImages(string html)
+    internal static MimeEntity BuildBodyWithInlineImages(string html)
     {
         var imgRegex = new Regex(
             @"src=""(data:(?<mime>image/[^;]+);base64,(?<data>[^""]+))""",
