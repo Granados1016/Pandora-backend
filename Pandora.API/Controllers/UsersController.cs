@@ -48,6 +48,7 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
         profilePhotoUrl = r.IsDBNull(r.GetOrdinal("ProfilePhotoUrl")) ? null : r.GetString(r.GetOrdinal("ProfilePhotoUrl")),
         bannerPhotoUrl  = r.IsDBNull(r.GetOrdinal("BannerPhotoUrl"))  ? null : r.GetString(r.GetOrdinal("BannerPhotoUrl")),
         createdAt       = r.GetUtcDateTime("CreatedAt"),
+        googleOnly      = !r.IsDBNull(r.GetOrdinal("GoogleOnly")) && r.GetBoolean(r.GetOrdinal("GoogleOnly")),
     };
 
     // Full reader — resolves binary photo data to data URL (used only for single-user endpoints)
@@ -101,7 +102,8 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             {
                 cmd.CommandText = """
                     SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt,
+                           ISNULL(GoogleOnly, 0) AS GoogleOnly
                     FROM dbo.AppUsers
                     WHERE TenantId = @TenantId
                     ORDER BY CreatedAt DESC
@@ -112,7 +114,8 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             {
                 cmd.CommandText = """
                     SELECT Id, Username, FullName, Email, Role, Modules, ModulesViewOnly, IsActive,
-                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt
+                           Position, SmtpEmail, ProfilePhotoUrl, BannerPhotoUrl, CreatedAt,
+                           ISNULL(GoogleOnly, 0) AS GoogleOnly
                     FROM dbo.AppUsers
                     ORDER BY CreatedAt DESC
                     """;

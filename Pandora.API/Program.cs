@@ -655,6 +655,12 @@ using (var scopeU = app.Services.CreateScope())
         IF NOT EXISTS (SELECT 1 FROM sys.columns
                        WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'TwoFactorEnabled')
             ALTER TABLE dbo.AppUsers ADD TwoFactorEnabled BIT NOT NULL DEFAULT 0;
+
+        -- #2 Fase 2: si GoogleOnly=1, la cuenta SOLO puede iniciar sesión con
+        -- Google (OIDC); el login por usuario/contraseña queda bloqueado.
+        IF NOT EXISTS (SELECT 1 FROM sys.columns
+                       WHERE object_id = OBJECT_ID('dbo.AppUsers') AND name = 'GoogleOnly')
+            ALTER TABLE dbo.AppUsers ADD GoogleOnly BIT NOT NULL DEFAULT 0;
         """;
     await cmdU.ExecuteNonQueryAsync();
 }

@@ -102,6 +102,26 @@ public class AuthController(
         if (response is null)
             return Unauthorized("Credenciales incorrectas.");
 
+        // ── #2 Fase 2: cuentas "solo Google" ──────────────────────────────────
+        // Si la cuenta está marcada GoogleOnly, el login por contraseña queda
+        // bloqueado aunque las credenciales sean correctas: debe entrar con el
+        // botón de Google (OIDC). No se emite token ni refresh.
+        try
+        {
+            await using var connG = Conn();
+            await connG.OpenAsync(ct);
+            await using var cmdG = connG.CreateCommand();
+            cmdG.CommandText = "SELECT ISNULL(GoogleOnly, 0) FROM dbo.AppUsers WHERE LOWER(Username) = LOWER(@U)";
+            cmdG.Parameters.AddWithValue("@U", req.Username.Trim());
+            var gResult = await cmdG.ExecuteScalarAsync(ct);
+            if (gResult != null && gResult != DBNull.Value && Convert.ToInt32(gResult) == 1)
+            {
+                logger.LogInformation("Login bloqueado (GoogleOnly) para {User}", req.Username);
+                return StatusCode(403, new { error = "google_only", message = "Esta cuenta solo puede iniciar sesión con Google. Usa el botón \"Iniciar sesión con Google\"." });
+            }
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "No se pudo verificar GoogleOnly para {User}", req.Username); }
+
         // ── Verificar licencia del tenant ─────────────────────────────────────
         try
         {
@@ -675,9 +695,11 @@ public class AuthController(
             string? username = null, fullName = null;
             await using (var cmd = conn.CreateCommand())
             {
+                // Las cuentas "solo Google" no usan contraseña: no se les envía
+                // correo de recuperación (sigue devolviendo 204 para no revelar nada).
                 cmd.CommandText = """
                     SELECT Username, FullName FROM dbo.AppUsers
-                    WHERE LOWER(Email) = LOWER(@Email) AND IsActive = 1
+                    WHERE LOWER(Email) = LOWER(@Email) AND IsActive = 1 AND ISNULL(GoogleOnly, 0) = 0
                     """;
                 cmd.Parameters.AddWithValue("@Email", req.Email.Trim());
                 await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -922,6 +944,34 @@ public class AuthController(
         catch (Exception ex) { return StatusCode(500, ex.Message); }
     }
 
+    // ── POST /api/auth/toggle-google-only/{username} ─────────────────────────
+    /// <summary>
+    /// #2 Fase 2 — Marca/desmarca una cuenta como "solo Google": si se activa,
+    /// esa cuenta solo puede iniciar sesión con Google (OIDC) y queda bloqueado
+    /// el login por usuario/contraseña. Solo Admin.
+    /// </summary>
+    [HttpPost("toggle-google-only/{username}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> ToggleGoogleOnly(string username, [FromBody] ToggleGoogleOnlyDto dto, CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE dbo.AppUsers SET GoogleOnly=@Enable WHERE LOWER(Username)=LOWER(@Username)";
+            cmd.Parameters.AddWithValue("@Enable",   dto.Enable ? 1 : 0);
+            cmd.Parameters.AddWithValue("@Username", username);
+            var rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0) return NotFound(new { error = "Usuario no encontrado." });
+
+            logger.LogInformation("GoogleOnly={Enable} para {User} por {Admin}",
+                dto.Enable, username, User.Identity?.Name);
+            return Ok(new { googleOnly = dto.Enable });
+        }
+        catch (Exception ex) { return StatusCode(500, ex.Message); }
+    }
+
     // ── Helpers: envío de correo ──────────────────────────────────────────────
     private async Task SendResetEmailAsync(string toEmail, string toName, string token)
     {
@@ -1006,3 +1056,4 @@ public record ResetPasswordRequest(string Token, string NewPassword);
 public record OtpRequest(string Username);
 public record VerifyOtpRequest(string Username, string Code, string? TempPassword);
 public record Toggle2FADto(bool Enable);
+public record ToggleGoogleOnlyDto(bool Enable);
