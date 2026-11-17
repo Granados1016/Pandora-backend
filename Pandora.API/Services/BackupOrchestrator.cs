@@ -12,6 +12,7 @@ namespace Pandora.API.Services;
 public class BackupOrchestrator(
     IConfiguration config,
     BackupService backupService,
+    BackupEncryptionService encryption,
     GoogleDriveBackupUploader driveUploader,
     ILogger<BackupOrchestrator> logger)
 {
@@ -27,6 +28,15 @@ public class BackupOrchestrator(
         var settings = await LoadSettingsAsync(ct);
         var backup   = await backupService.GenerateAsync(ct);
         var contentType = backup.Method == "bak" ? "application/octet-stream" : "text/plain; charset=utf-8";
+
+        // Cifrado opt-in: si hay llave configurada, el archivo que se reparte por
+        // correo y Drive viaja cifrado (AES-256-GCM). Sin llave, pasa tal cual.
+        if (encryption.IsEnabled)
+        {
+            var (encBytes, encName) = encryption.Encrypt(backup.Bytes, backup.FileName);
+            backup = backup with { Bytes = encBytes, FileName = encName };
+            contentType = "application/octet-stream";
+        }
 
         // ── Correo ─────────────────────────────────────────────────────────
         var emailedTo  = new List<string>();

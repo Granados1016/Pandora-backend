@@ -14,6 +14,7 @@ public class AdminController(
     IConfiguration config,
     IWebHostEnvironment env,
     BackupService backupService,
+    BackupEncryptionService backupEncryption,
     BackupOrchestrator backupOrchestrator,
     BackupRestoreService backupRestoreService,
     GoogleDriveBackupUploader driveUploader,
@@ -39,9 +40,12 @@ public class AdminController(
                 _     => await backupService.GenerateAsync(ct),
             };
 
-            logger.LogInformation("Backup ({Method}) descargado manualmente por {User}: {File} ({Kb} KB)",
-                result.Method, User.Identity?.Name, result.FileName, result.Bytes.Length / 1024);
-            return File(result.Bytes, "application/octet-stream", result.FileName);
+            // Cifrado opt-in: si hay llave configurada, el archivo se descarga cifrado (.enc).
+            var (bytes, fileName) = backupEncryption.Encrypt(result.Bytes, result.FileName);
+
+            logger.LogInformation("Backup ({Method}{Enc}) descargado manualmente por {User}: {File} ({Kb} KB)",
+                result.Method, backupEncryption.IsEnabled ? ", cifrado" : "", User.Identity?.Name, fileName, bytes.Length / 1024);
+            return File(bytes, "application/octet-stream", fileName);
         }
         catch (Exception ex) when (format?.ToLowerInvariant() == "bak")
         {
@@ -131,8 +135,9 @@ public class AdminController(
     public async Task<IActionResult> RestoreMissing(IFormFile file, CancellationToken ct)
     {
         if (file is null || file.Length == 0) return BadRequest(new { error = "Archivo .sql requerido." });
-        if (!file.FileName.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
-            return BadRequest(new { error = "Se esperaba un archivo .sql (el generado por 'Descargar Backup')." });
+        if (!file.FileName.EndsWith(".sql", StringComparison.OrdinalIgnoreCase) &&
+            !file.FileName.EndsWith(".sql.enc", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { error = "Se esperaba un archivo .sql o .sql.enc (el generado por 'Descargar Backup')." });
 
         await using var stream = file.OpenReadStream();
         var result = await backupRestoreService.RestoreMissingAsync(stream, ct);
@@ -153,8 +158,9 @@ public class AdminController(
     public async Task<IActionResult> RestoreFull(IFormFile file, CancellationToken ct)
     {
         if (file is null || file.Length == 0) return BadRequest(new { error = "Archivo .bak requerido." });
-        if (!file.FileName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
-            return BadRequest(new { error = "Se esperaba un archivo .bak (backup nativo de SQL Server)." });
+        if (!file.FileName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) &&
+            !file.FileName.EndsWith(".bak.enc", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { error = "Se esperaba un archivo .bak o .bak.enc (backup nativo de SQL Server)." });
 
         await using var stream = file.OpenReadStream();
         var result = await backupRestoreService.RestoreFullAsync(stream, env, ct);
