@@ -2057,6 +2057,36 @@ using (var scopeEnc = app.Services.CreateScope())
             IF OBJECT_ID('dbo.Employees') IS NOT NULL
                AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Employees') AND name='TenantId')
                 UPDATE dbo.Employees SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            -- #3 Fase 2: tablas con TenantId que faltaban en el backfill (dejaban
+            -- filas huérfanas invisibles a los filtros por tenant). Detectadas por
+            -- sql/verify-tenant-isolation.sql.
+            IF OBJECT_ID('dbo.Tickets') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Tickets') AND name='TenantId')
+                UPDATE dbo.Tickets SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.AccessRequests') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.AccessRequests') AND name='TenantId')
+                UPDATE dbo.AccessRequests SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.CheckadorRegistros') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.CheckadorRegistros') AND name='TenantId')
+                UPDATE dbo.CheckadorRegistros SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Mantenimientos') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Mantenimientos') AND name='TenantId')
+                UPDATE dbo.Mantenimientos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Resguardos') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Resguardos') AND name='TenantId')
+                UPDATE dbo.Resguardos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.ResguardoPlantillas') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.ResguardoPlantillas') AND name='TenantId')
+                UPDATE dbo.ResguardoPlantillas SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.Vehiculos') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.Vehiculos') AND name='TenantId')
+                UPDATE dbo.Vehiculos SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VehiculoReservas') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VehiculoReservas') AND name='TenantId')
+                UPDATE dbo.VehiculoReservas SET TenantId = @DefaultTid WHERE TenantId IS NULL;
+            IF OBJECT_ID('dbo.VehiculoSolicitudes') IS NOT NULL
+               AND EXISTS (SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID('dbo.VehiculoSolicitudes') AND name='TenantId')
+                UPDATE dbo.VehiculoSolicitudes SET TenantId = @DefaultTid WHERE TenantId IS NULL;
         END
         """;
     await cmdIso2.ExecuteNonQueryAsync();

@@ -56,6 +56,116 @@ public class SuperAdminController(IConfiguration config, ILogger<SuperAdminContr
         catch (Exception ex) { logger.LogError(ex, "SuperAdmin.GetAllUsers"); return StatusCode(500, ex.Message); }
     }
 
+    // ── GET /api/superadmin/tenant-isolation-check ───────────────────────────
+    /// <summary>
+    /// #3 Fase 2 — Verifica el aislamiento de datos entre clientes (multi-tenant).
+    /// De forma DINÁMICA recorre todas las tablas que tienen columna TenantId y
+    /// reporta, por tabla:
+    ///   - nullTenantId: filas sin cliente asignado (serían invisibles para los
+    ///     filtros por tenant o podrían filtrarse) — en AppUsers se excluyen las
+    ///     cuentas SuperAdmin del proveedor, que legítimamente no tienen tenant.
+    ///   - danglingTenantId: filas cuyo TenantId no existe en dbo.Tenants (apuntan
+    ///     a un cliente borrado/inexistente).
+    /// ok=true significa que no hay filas huérfanas ni colgadas en ningún lado.
+    /// Solo SuperAdmin (es un diagnóstico cross-tenant). Pensado para correrse en
+    /// producción tras cada despliegue y confirmar que no hay TenantId NULL.
+    /// </summary>
+    [HttpGet("tenant-isolation-check")]
+    public async Task<IActionResult> TenantIsolationCheck(CancellationToken ct)
+    {
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // 1) Todas las tablas base con columna TenantId (y si tienen columna Role).
+            var tables = new List<(string Schema, string Table, bool HasRole)>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT c.TABLE_SCHEMA, c.TABLE_NAME,
+                           CASE WHEN EXISTS (
+                               SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS rc
+                               WHERE rc.TABLE_SCHEMA = c.TABLE_SCHEMA
+                                 AND rc.TABLE_NAME   = c.TABLE_NAME
+                                 AND rc.COLUMN_NAME  = 'Role') THEN 1 ELSE 0 END AS HasRole
+                    FROM INFORMATION_SCHEMA.COLUMNS c
+                    JOIN INFORMATION_SCHEMA.TABLES t
+                      ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+                     AND t.TABLE_TYPE = 'BASE TABLE'
+                    WHERE c.COLUMN_NAME = 'TenantId'
+                    ORDER BY c.TABLE_NAME
+                    """;
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                while (await r.ReadAsync(ct))
+                    tables.Add((r.GetString(0), r.GetString(1), !r.IsDBNull(2) && r.GetInt32(2) == 1));
+            }
+
+            // 2) Por cada tabla: total, nulos y colgados.
+            var report = new List<object>();
+            long totalProblems = 0;
+            foreach (var (schema, table, hasRole) in tables)
+            {
+                // Nombres salen del catálogo (no de input del usuario); aun así se
+                // escapan los corchetes como defensa en profundidad.
+                var safe = $"[{schema.Replace("]", "]]")}].[{table.Replace("]", "]]")}]";
+
+                // En AppUsers, una cuenta SuperAdmin del proveedor sin TenantId es
+                // legítima (es global), no una huérfana.
+                var nullExpr = table.Equals("AppUsers", StringComparison.OrdinalIgnoreCase) && hasRole
+                    ? "SUM(CASE WHEN x.TenantId IS NULL AND ISNULL(x.Role,'') <> 'SuperAdmin' THEN 1 ELSE 0 END)"
+                    : "SUM(CASE WHEN x.TenantId IS NULL THEN 1 ELSE 0 END)";
+
+                long total = 0, nulls = 0, dangling = 0;
+                await using var cmd = conn.CreateCommand();
+                // "Colgado" = TenantId que no empata ningún cliente: se detecta con
+                // LEFT JOIN (t.Id NULL). No se puede usar un subquery dentro de SUM.
+                cmd.CommandText = $"""
+                    SELECT COUNT_BIG(*) AS Total,
+                           ISNULL({nullExpr}, 0) AS Nulls,
+                           ISNULL(SUM(CASE WHEN x.TenantId IS NOT NULL AND t.Id IS NULL
+                                           THEN 1 ELSE 0 END), 0) AS Dangling
+                    FROM {safe} x
+                    LEFT JOIN dbo.Tenants t ON t.Id = x.TenantId
+                    """;
+                await using (var r = await cmd.ExecuteReaderAsync(ct))
+                {
+                    if (await r.ReadAsync(ct))
+                    {
+                        total    = r.IsDBNull(0) ? 0 : Convert.ToInt64(r.GetValue(0));
+                        nulls    = r.IsDBNull(1) ? 0 : Convert.ToInt64(r.GetValue(1));
+                        dangling = r.IsDBNull(2) ? 0 : Convert.ToInt64(r.GetValue(2));
+                    }
+                }
+
+                var problems = nulls + dangling;
+                totalProblems += problems;
+                report.Add(new
+                {
+                    schema,
+                    table,
+                    total,
+                    nullTenantId     = nulls,
+                    danglingTenantId = dangling,
+                    ok               = problems == 0,
+                });
+            }
+
+            logger.LogInformation("TenantIsolationCheck por {User}: {Tables} tablas, {Problems} problemas.",
+                User.Identity?.Name, tables.Count, totalProblems);
+
+            return Ok(new
+            {
+                ok            = totalProblems == 0,
+                totalProblems,
+                tablesChecked = tables.Count,
+                checkedAt     = DateTime.UtcNow,
+                tables        = report,
+            });
+        }
+        catch (Exception ex) { logger.LogError(ex, "TenantIsolationCheck"); return StatusCode(500, ex.Message); }
+    }
+
     // ── POST /api/superadmin/users ────────────────────────────────────────────
     /// <summary>Crea un usuario en cualquier cliente, con el rol indicado.</summary>
     [HttpPost("users")]
