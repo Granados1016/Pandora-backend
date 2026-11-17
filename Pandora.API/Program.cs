@@ -218,6 +218,7 @@ builder.Services.AddScoped<IProgressNotifier, SignalRProgressNotifier>();
 builder.Services.AddScoped<Pandora.API.Services.TenantService>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddHostedService<Pandora.API.Services.TenantLicenseAlertService>();
+builder.Services.AddHostedService<Pandora.API.Services.BackupHealthAlertService>();
 
 // ── Servicios en segundo plano ────────────────────────────────────────────────
 builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierService>();
@@ -329,8 +330,35 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
-// Healthcheck liviano para Railway (Swagger está deshabilitado en producción).
+// Healthcheck liviano (liveness): el proceso está vivo. Respuesta instantánea,
+// sin tocar la BD — para que un reinicio no se dispare por una BD lenta.
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
+
+// #9 Fase 2 — Readiness: verifica que la BD responde. Úsalo como healthcheck de
+// Railway y en un monitor de uptime externo (UptimeRobot, etc.): 200 = listo
+// para recibir tráfico, 503 = degradado (no enrutar). Anónimo y liviano.
+app.MapGet("/health/ready", async (IConfiguration cfg, CancellationToken ct) =>
+{
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    try
+    {
+        await using var conn = new Microsoft.Data.SqlClient.SqlConnection(cfg.GetConnectionString("PandoraDb"));
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT 1";
+        cmd.CommandTimeout = 5;
+        await cmd.ExecuteScalarAsync(ct);
+        sw.Stop();
+        return Results.Ok(new { status = "ok", db = "ok", dbLatencyMs = sw.ElapsedMilliseconds });
+    }
+    catch (Exception ex)
+    {
+        sw.Stop();
+        return Results.Json(
+            new { status = "degraded", db = "error", error = ex.Message },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}).AllowAnonymous();
 app.MapHub<ProgressHub>("/hubs/progress");
 app.MapHub<NotificationsHub>("/hubs/notifications");
 app.MapFallbackToFile("index.html");
