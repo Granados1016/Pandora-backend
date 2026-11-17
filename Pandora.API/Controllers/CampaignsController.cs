@@ -344,6 +344,14 @@ public class CampaignsController(
             // Capturar baseUrl antes de entrar al Task.Run (HttpContext no es accesible dentro)
             var baseUrl = $"{Request.Scheme}://{Request.Host}";
 
+            // #1 Fase 2 — tope diario de envío (evita topar el límite de ~2,000 correos/día
+            // de Gmail, que haría rebotar la campaña). Se capturan AQUÍ, fuera del Task.Run:
+            // TenantParam viene de un servicio con scope de request que ya no es seguro usar
+            // en segundo plano. Al alcanzar el tope, el resto queda "En cola (límite diario)"
+            // y se retoma al reenviar (o cuando se agregue el worker de cola).
+            var tenantIdParam = TenantParam;
+            int dailyLimit = int.TryParse(config["Campaigns:DailySendLimit"], out var _dl) && _dl > 0 ? _dl : 1800;
+
             // ── Prueba de conexión SMTP antes de lanzar el background task ───────
             // Si las credenciales son incorrectas, el error se muestra inmediatamente
             // en lugar de quedar silencioso en la base de datos.
@@ -368,8 +376,29 @@ public class CampaignsController(
             _ = Task.Run(async () =>
             {
                 int sent = 0, failed = 0;
+
+                // Cuántos correos lleva HOY este tenant (el límite de Gmail es por día natural).
+                int sentToday = 0;
+                try
+                {
+                    await using var connLim = Conn();
+                    await connLim.OpenAsync();
+                    await using var cmdLim = connLim.CreateCommand();
+                    cmdLim.CommandText = """
+                        SELECT COUNT(*) FROM dbo.CampaignRecipients cr
+                        JOIN dbo.EmailCampaigns c ON c.Id = cr.CampaignId
+                        WHERE cr.Status = 'Sent' AND cr.SentAt >= @Today AND c.TenantId = @TenantId
+                        """;
+                    cmdLim.Parameters.AddWithValue("@Today", DateTime.UtcNow.Date);
+                    cmdLim.Parameters.AddWithValue("@TenantId", tenantIdParam);
+                    sentToday = Convert.ToInt32(await cmdLim.ExecuteScalarAsync() ?? 0);
+                }
+                catch { /* si el conteo falla, no se bloquea el envío */ }
+
                 foreach (var rec in recipients)
                 {
+                    // Tope diario: al alcanzarlo se detiene; el resto queda Pending (en cola).
+                    if (sentToday + sent >= dailyLimit) break;
                     try
                     {
                         var extraVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -437,23 +466,52 @@ public class CampaignsController(
                     }
                 }
 
-                // Actualizar contadores y estado final
+                // Actualizar contadores y estado final. Si quedaron destinatarios Pending
+                // (por el tope diario), la campaña queda "En cola (límite diario)" y se retoma
+                // al reenviarla (los contadores se recalculan desde la BD para ser correctos
+                // acumulando varios envíos del mismo lote en días distintos).
                 try
                 {
                     await using var conn2 = Conn();
                     await conn2.OpenAsync();
+
+                    int pendientes = 0, totalSent = 0, totalFailed = 0;
+                    await using (var cmdC = conn2.CreateCommand())
+                    {
+                        cmdC.CommandText = """
+                            SELECT
+                              SUM(CASE WHEN Status='Pending' THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN Status='Sent'    THEN 1 ELSE 0 END),
+                              SUM(CASE WHEN Status='Failed'  THEN 1 ELSE 0 END)
+                            FROM dbo.CampaignRecipients WHERE CampaignId=@Id
+                            """;
+                        cmdC.Parameters.AddWithValue("@Id", id);
+                        await using var rC = await cmdC.ExecuteReaderAsync();
+                        if (await rC.ReadAsync())
+                        {
+                            pendientes  = rC.IsDBNull(0) ? 0 : rC.GetInt32(0);
+                            totalSent   = rC.IsDBNull(1) ? 0 : rC.GetInt32(1);
+                            totalFailed = rC.IsDBNull(2) ? 0 : rC.GetInt32(2);
+                        }
+                    }
+
+                    string estado = pendientes > 0
+                        ? "En cola (límite diario)"
+                        : (totalFailed == 0 ? "Completado" : "Completado con errores");
+
                     await using var cmd2 = conn2.CreateCommand();
                     cmd2.CommandText = """
                         UPDATE dbo.EmailCampaigns
-                        SET Status = CASE WHEN @Failed = 0 THEN 'Completado' ELSE 'Completado con errores' END,
+                        SET Status = @Estado,
                             SentCount   = @Sent,
                             FailedCount = @Failed,
                             SentAt      = GETUTCDATE(),
                             UpdatedAt   = GETUTCDATE()
                         WHERE Id = @Id
                         """;
-                    cmd2.Parameters.AddWithValue("@Sent",   sent);
-                    cmd2.Parameters.AddWithValue("@Failed", failed);
+                    cmd2.Parameters.AddWithValue("@Estado", estado);
+                    cmd2.Parameters.AddWithValue("@Sent",   totalSent);
+                    cmd2.Parameters.AddWithValue("@Failed", totalFailed);
                     cmd2.Parameters.AddWithValue("@Id",     id);
                     await cmd2.ExecuteNonQueryAsync();
                 }
