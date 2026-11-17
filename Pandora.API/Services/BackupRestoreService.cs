@@ -12,18 +12,35 @@ namespace Pandora.API.Services;
 ///     TODA la base de datos actual por la del archivo. Destructivo e
 ///     irreversible; tumba las conexiones activas mientras corre.
 /// </summary>
-public class BackupRestoreService(IConfiguration config, ILogger<BackupRestoreService> logger)
+public class BackupRestoreService(
+    IConfiguration config,
+    BackupEncryptionService encryption,
+    ILogger<BackupRestoreService> logger)
 {
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
 
     public record RestoreResult(bool Success, string Message);
 
+    // Quita el BOM UTF-8 inicial que BackupService antepone al .sql.
+    private static string StripBom(string s) =>
+        s.Length > 0 && s[0] == '﻿' ? s[1..] : s;
+
     // ── Modo seguro: repone solo registros faltantes desde un .sql ───────────
     public async Task<RestoreResult> RestoreMissingAsync(Stream sqlFileStream, CancellationToken ct)
     {
-        string script;
-        using (var reader = new StreamReader(sqlFileStream, System.Text.Encoding.UTF8))
-            script = await reader.ReadToEndAsync(ct);
+        byte[] raw;
+        using (var ms = new MemoryStream())
+        {
+            await sqlFileStream.CopyToAsync(ms, ct);
+            raw = ms.ToArray();
+        }
+
+        // Descifra si viene cifrado (AES-GCM); passthrough si es texto plano.
+        byte[] plain;
+        try { plain = encryption.Decrypt(raw); }
+        catch (InvalidOperationException ex) { return new RestoreResult(false, ex.Message); }
+
+        var script = StripBom(System.Text.Encoding.UTF8.GetString(plain));
 
         if (string.IsNullOrWhiteSpace(script))
             return new RestoreResult(false, "El archivo está vacío.");
@@ -58,8 +75,18 @@ public class BackupRestoreService(IConfiguration config, ILogger<BackupRestoreSe
         Directory.CreateDirectory(tempDir);
         var tempFile = Path.Combine(tempDir, $"restore_{DateTime.Now:yyyyMMdd_HHmmss}.bak");
 
-        await using (var fs = new FileStream(tempFile, FileMode.Create))
-            await bakFileStream.CopyToAsync(fs, ct);
+        byte[] bakBytes;
+        using (var ms = new MemoryStream())
+        {
+            await bakFileStream.CopyToAsync(ms, ct);
+            bakBytes = ms.ToArray();
+        }
+
+        // Descifra si viene cifrado (.bak.enc); passthrough si es .bak en claro.
+        try { bakBytes = encryption.Decrypt(bakBytes); }
+        catch (InvalidOperationException ex) { return new RestoreResult(false, ex.Message); }
+
+        await System.IO.File.WriteAllBytesAsync(tempFile, bakBytes, ct);
 
         var sqlPath = tempFile.Replace("\\", "/");
 

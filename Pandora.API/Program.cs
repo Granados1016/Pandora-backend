@@ -224,6 +224,7 @@ builder.Services.AddHostedService<Pandora.API.Services.LicenseExpiryNotifierServ
 builder.Services.AddHostedService<Pandora.API.Services.CalendarReminderService>();
 
 // ── Backup de base de datos (manual + automático) ─────────────────────────────
+builder.Services.AddSingleton<Pandora.API.Services.BackupEncryptionService>();
 builder.Services.AddScoped<Pandora.API.Services.BackupService>();
 builder.Services.AddScoped<Pandora.API.Services.GoogleDriveBackupUploader>();
 builder.Services.AddScoped<Pandora.API.Services.BackupOrchestrator>();
