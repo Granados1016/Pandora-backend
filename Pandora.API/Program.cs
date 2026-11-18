@@ -47,6 +47,7 @@ builder.Services.AddMemoryCache();
 // Usado por GoogleWorkspaceProvisioningController para llamar al
 // microservicio Node (reenvío de Excel subido, red privada de Railway).
 builder.Services.AddHttpClient();
+builder.Services.AddScoped<Pandora.API.Services.GoogleWorkspaceClient>();
 builder.Services.AddControllers()
     .AddJsonOptions(opts =>
     {

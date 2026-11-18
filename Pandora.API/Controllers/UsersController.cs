@@ -10,7 +10,10 @@ namespace Pandora.API.Controllers;
 [ApiController]
 [Route("api/users")]
 [Authorize]
-public class UsersController(IConfiguration config, ILogger<UsersController> logger) : ControllerBase
+public class UsersController(
+    IConfiguration config,
+    Pandora.API.Services.GoogleWorkspaceClient googleClient,
+    ILogger<UsersController> logger) : ControllerBase
 {
     // ── Helpers ───────────────────────────────────────────────────────────────
     private SqlConnection Conn() => new(config.GetConnectionString("PandoraDb"));
@@ -325,6 +328,82 @@ public class UsersController(IConfiguration config, ILogger<UsersController> log
             return NoContent();
         }
         catch (Exception ex) { logger.LogError(ex, "Delete User {Id}", id); return StatusCode(500, ex.Message); }
+    }
+
+    // ── POST /api/users/{id}/offboard  (Admin) ───────────────────────────────
+    /// <summary>
+    /// #8 Fase 3 — Baja de colaborador en un solo paso: desactiva al usuario en
+    /// Pandora (IsActive=0), revoca sus sesiones (refresh tokens) y suspende su
+    /// cuenta de Google Workspace. La suspensión de Google es best-effort: la baja
+    /// en Pandora queda hecha aunque el microservicio no responda, y la respuesta
+    /// indica qué pasó con Google para reintentar si hace falta. Solo Admin; un
+    /// admin de cliente no puede dar de baja a un SuperAdmin del proveedor.
+    /// </summary>
+    [HttpPost("{id:guid}/offboard")]
+    public async Task<IActionResult> Offboard(Guid id, CancellationToken ct)
+    {
+        if (!IsAdmin) return Forbid();
+        try
+        {
+            await using var conn = Conn();
+            await conn.OpenAsync(ct);
+
+            // 1) Localizar al usuario (scoping por tenant salvo SuperAdmin).
+            string username, role = "User";
+            string? email = null;
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = IsCallerSuperAdmin
+                    ? "SELECT Username, Email, Role FROM dbo.AppUsers WHERE Id=@Id"
+                    : "SELECT Username, Email, Role FROM dbo.AppUsers WHERE Id=@Id AND TenantId=@TenantId";
+                cmd.Parameters.AddWithValue("@Id", id);
+                if (!IsCallerSuperAdmin)
+                    cmd.Parameters.AddWithValue("@TenantId", TenantId.HasValue ? (object)TenantId.Value : DBNull.Value);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return NotFound("Usuario no encontrado.");
+                username = r.GetString(0);
+                email    = r.IsDBNull(1) ? null : r.GetString(1);
+                role     = r.IsDBNull(2) ? "User" : r.GetString(2);
+            }
+
+            if (!IsCallerSuperAdmin && role.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase))
+                return Forbid();
+
+            // 2) Desactivar en Pandora + cortar sesiones activas.
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    UPDATE dbo.AppUsers SET IsActive = 0 WHERE Id = @Id;
+                    DELETE FROM dbo.RefreshTokens WHERE Username = @Username;
+                    """;
+                cmd.Parameters.AddWithValue("@Id", id);
+                cmd.Parameters.AddWithValue("@Username", (username ?? "").Trim().ToLower());
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+
+            // 3) Suspender la cuenta de Google (si tiene correo). Best-effort.
+            var adminUser = CurrentUsername ?? "admin";
+            string googleStatus = "omitido_sin_correo";
+            string? googleDetail = null;
+            if (!string.IsNullOrWhiteSpace(email))
+            {
+                var res = await googleClient.SuspendGoogleAccountAsync(email!, adminUser, ct);
+                googleStatus = res.Status;
+                googleDetail = res.Detail;
+            }
+
+            logger.LogInformation("Offboard de {User} por {Admin}: Pandora desactivado, Google={Google}",
+                username, adminUser, googleStatus);
+
+            return Ok(new
+            {
+                message = "Colaborador dado de baja.",
+                pandora = "desactivado",
+                google = googleStatus,       // suspendida | no_existia | no_configurado | error | omitido_sin_correo
+                googleDetail,
+            });
+        }
+        catch (Exception ex) { logger.LogError(ex, "Offboard User {Id}", id); return StatusCode(500, ex.Message); }
     }
 
     // ── PUT /api/users/me/smtp ────────────────────────────────────────────────
