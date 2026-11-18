@@ -26,7 +26,7 @@ public class ComunicadosController(
     private object TenantParam => (object?)tenant.TenantId ?? DBNull.Value;
 
     // ── Helper: insertar notificación broadcast y emitir evento SignalR ─────────
-    private async Task BroadcastComunicadoAsync(string title, string author, SqlConnection conn, CancellationToken ct)
+    private async Task BroadcastComunicadoAsync(int comunicadoId, string title, string author, SqlConnection conn, CancellationToken ct)
     {
         int notifId;
         await using var notifCmd = conn.CreateCommand();
@@ -51,6 +51,17 @@ public class ComunicadosController(
             path    = "/comunicados",
         };
         await hub.Clients.Group("broadcast").SendAsync("NewNotification", payload, ct);
+
+        // #6 Fase 3 — Registrar en la bitácora de auditoría que se difundió un
+        // comunicado a TODA la institución (quién, cuándo, qué y desde qué IP).
+        // Un comunicado notifica a todos los usuarios del cliente, así que queda
+        // traza del envío masivo. No rompe el flujo si la auditoría falla.
+        var ip = HttpContext?.Connection?.RemoteIpAddress?.ToString();
+        var details = $"Comunicado institucional difundido a todos los usuarios del cliente (tenant {tenant.TenantId?.ToString() ?? "—"}): \"{title}\".";
+        await AuditHelper.Log(
+            config.GetConnectionString("PandoraDb")!,
+            author, "broadcast_institucional", "Comunicados",
+            comunicadoId.ToString(), details, ip);
     }
 
     // ── GET /api/comunicados ──────────────────────────────────────────────────
@@ -178,7 +189,7 @@ public class ComunicadosController(
 
         // Notificar a todos los usuarios si el comunicado se publica de inmediato
         if (dto.IsPublished)
-            await BroadcastComunicadoAsync(dto.Title, author, conn, ct);
+            await BroadcastComunicadoAsync(newId, dto.Title, author, conn, ct);
 
         return Ok(new { id = newId });
     }
@@ -229,7 +240,7 @@ public class ComunicadosController(
         // Notificar solo cuando se publica por primera vez (borrador → publicado)
         var author = CurrentUser() ?? "system";
         if (!wasPublished && dto.IsPublished)
-            await BroadcastComunicadoAsync(dto.Title, author, conn, ct);
+            await BroadcastComunicadoAsync(id, dto.Title, author, conn, ct);
 
         return NoContent();
     }
