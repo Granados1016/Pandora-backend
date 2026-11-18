@@ -1,0 +1,39 @@
+name: CI
+
+# #7 Fase 2 — Integración continua del backend de Pandora.
+# Compila el API en cada push/PR a main para detectar errores de compilación
+# antes de desplegar. No ejecuta pruebas: la capa de datos (EF Core) es de DLLs
+# cloud-only y no hay proyecto de pruebas del backend.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Compilar API (.NET 10)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Las referencias Pandora.Application/Infrastructure/Domain son DLLs
+      # cloud-only referenciadas por HintPath a bin/Debug/net8.0 (ver csproj,
+      # propiedad BinDir). Se colocan igual que en el Dockerfile antes de build.
+      - name: Colocar DLLs cloud-only (BinDir)
+        run: |
+          mkdir -p Pandora.API/bin/Debug/net8.0
+          cp -r libs/. Pandora.API/bin/Debug/net8.0/
+
+      - name: Restaurar dependencias
+        run: dotnet restore Pandora.API/Pandora.API.csproj
+
+      - name: Compilar (Release)
+        run: dotnet build Pandora.API/Pandora.API.csproj -c Release --no-restore
